@@ -13,6 +13,7 @@ import MarketPage from './pages/MarketPage'
 import OptionChainPage from './pages/OptionChainPage'
 import WatchlistChartPage from './pages/WatchlistChartPage'
 import StrategyPage from './pages/StrategyPage'
+import StrategyBuilderPage from './pages/StrategyBuilderPage'
 import SettingsPage from './pages/SettingsPage'
 import ToastContainer from './components/common/ToastContainer'
 
@@ -97,6 +98,7 @@ export default function App() {
           <Route path="option-chain" element={<OptionChainPage />} />
           <Route path="watchlist" element={<WatchlistChartPage />} />
           <Route path="strategies" element={<StrategyPage />} />
+          <Route path="strategy-builder" element={<StrategyBuilderPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="settings/:tab" element={<SettingsPage />} />
         </Route>

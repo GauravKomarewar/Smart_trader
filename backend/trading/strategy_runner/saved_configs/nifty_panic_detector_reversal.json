@@ -1,0 +1,327 @@
+{
+  "schema_version": "4.0",
+  "name": "nifty_panic_detector_reversal",
+  "id": "NIFTY_PANIC_REV",
+  "description": "Two-phase buying strategy. Phase 1: detects sudden panic sell-off (spot drops > 1% quickly) and buys PE to ride the momentum. Phase 2: when PCR signals oversold / VIX starts mean-reverting, closes PE and opens CE to catch the bounce. This is specifically designed for war/event intraday panic spikes like Iran news, surgical strikes, flash crash.",
+  "type": "directional",
+  "enabled": true,
+  "status": "COMPLETED",
+  "identity": {
+    "exchange": "NFO",
+    "underlying": "NIFTY",
+    "instrument_type": "OPTIDX",
+    "product_type": "MIS",
+    "order_type": "MARKET",
+    "lots": 1,
+    "paper_mode": true,
+    "test_mode": true
+  },
+  "timing": {
+    "entry_window_start": "09:25",
+    "entry_window_end": "14:00",
+    "eod_exit_time": "15:10"
+  },
+  "market_data": {
+    "source": "sqlite"
+  },
+  "entry": {
+    "entry_sequence": "sequential",
+    "global_conditions": [
+      {
+        "parameter": "time_current",
+        "comparator": "between",
+        "value": "09:25",
+        "value2": "14:00"
+      }
+    ],
+    "legs": [
+      {
+        "tag": "LEG@1_PE",
+        "label": "Panic PE buy \u2014 ride the fall",
+        "group": "PanicRide",
+        "instrument": "OPT",
+        "side": "BUY",
+        "option_type": "PE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.45",
+        "conditions": [
+          {
+            "parameter": "spot_change_pct",
+            "comparator": "<",
+            "value": "-1.0"
+          },
+          {
+            "parameter": "india_vix",
+            "comparator": ">=",
+            "value": "17",
+            "join": "AND"
+          },
+          {
+            "parameter": "pcr",
+            "comparator": ">",
+            "value": "1.3",
+            "join": "AND"
+          }
+        ],
+        "else_enabled": true,
+        "else_conditions": [
+          {
+            "parameter": "spot_change_pct",
+            "comparator": ">",
+            "value": "1.0"
+          },
+          {
+            "parameter": "india_vix",
+            "comparator": ">=",
+            "value": "17",
+            "join": "AND"
+          },
+          {
+            "parameter": "pcr",
+            "comparator": "<",
+            "value": "0.7",
+            "join": "AND"
+          }
+        ],
+        "else_action": {
+          "side": "BUY",
+          "option_type": "CE",
+          "strike_selection": "delta",
+          "strike_value": "0.45",
+          "lots": 1,
+          "order_type": "MARKET"
+        }
+      }
+    ]
+  },
+  "adjustment": {
+    "enabled": true,
+    "rules": [
+      {
+        "name": "Phase 2 \u2014 Panic done, flip to reversal CE",
+        "priority": 1,
+        "max_per_day": 2,
+        "max_total": null,
+        "cooldown_sec": 300,
+        "retriger": false,
+        "leg_guard": "LEG@1_PE",
+        "conditions": [
+          {
+            "parameter": "tag.LEG@1_PE.pnl_pct",
+            "comparator": ">=",
+            "value": "25"
+          },
+          {
+            "parameter": "spot_change_pct",
+            "comparator": ">",
+            "value": "-0.3",
+            "join": "AND"
+          },
+          {
+            "parameter": "india_vix",
+            "comparator": "crosses_below",
+            "value": "20",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "LEG@1_PE",
+              "new_leg": {
+                "side": "BUY",
+                "option_type": "CE",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.45"
+              }
+            }
+          ]
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "PCR extreme oversold \u2014 reversal signal",
+        "priority": 2,
+        "max_per_day": 2,
+        "max_total": null,
+        "cooldown_sec": 300,
+        "retriger": false,
+        "leg_guard": "LEG@1_PE",
+        "conditions": [
+          {
+            "parameter": "pcr",
+            "comparator": ">",
+            "value": "2.0"
+          },
+          {
+            "parameter": "tag.LEG@1_PE.pnl_pct",
+            "comparator": ">=",
+            "value": "15",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "LEG@1_PE",
+              "new_leg": {
+                "side": "BUY",
+                "option_type": "CE",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.40"
+              }
+            }
+          ]
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "CE bounce riding \u2014 lock half profits",
+        "priority": 3,
+        "max_per_day": 3,
+        "max_total": null,
+        "cooldown_sec": 180,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "combined_pnl",
+            "comparator": ">=",
+            "value": "3000"
+          }
+        ],
+        "action": {
+          "type": "reduce_by_pct",
+          "close_tag": "MOST_PROFITABLE_LEG",
+          "reduce_pct": 50
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "Panic worsens beyond SL \u2014 cut and wait",
+        "priority": 4,
+        "max_per_day": 3,
+        "max_total": null,
+        "cooldown_sec": 120,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "india_vix",
+            "comparator": ">=",
+            "value": "27"
+          },
+          {
+            "parameter": "combined_pnl",
+            "comparator": "<",
+            "value": "-2000",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "close_leg",
+          "close_tag": "all"
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      }
+    ]
+  },
+  "exit": {
+    "profit_target": {
+      "amount": null,
+      "pct": 60,
+      "action": "exit_all",
+      "lots": 1
+    },
+    "stop_loss": {
+      "amount": null,
+      "pct": 35,
+      "action": "exit_all",
+      "allow_reentry": false
+    },
+    "trailing": {
+      "trail_amount": null,
+      "lock_in_at": 2000,
+      "trail_step": null,
+      "step_trigger": null
+    },
+    "profit_steps": {
+      "step_size": null,
+      "max_steps": null,
+      "action": "adj"
+    },
+    "risk": {
+      "max_loss_per_day": 3000,
+      "max_delta": null,
+      "delta_breach_action": "hedge",
+      "max_iv": null,
+      "min_iv": null,
+      "max_lots": 2,
+      "breakeven_buffer": null
+    },
+    "time": {
+      "strategy_exit_time": "15:10",
+      "expiry_day_action": "time",
+      "expiry_day_time": "14:30",
+      "roll_target": "weekly_next"
+    },
+    "combined_conditions": {
+      "operator": "OR",
+      "rules": [
+        {
+          "parameter": "india_vix",
+          "comparator": ">=",
+          "value": "30"
+        }
+      ]
+    },
+    "leg_rules": []
+  },
+  "schedule": {
+    "frequency": "daily",
+    "active_days": [
+      "mon",
+      "tue",
+      "wed",
+      "thu",
+      "fri"
+    ],
+    "entry_time": "09:25",
+    "entry_window_end": "14:00",
+    "exit_time": "15:10",
+    "expiry_mode": "weekly_auto",
+    "dte_min": 1,
+    "dte_max": null,
+    "square_off_before_min": null,
+    "entry_on_expiry_day": true,
+    "max_reentries_per_day": 2
+  },
+  "meta": {
+    "schema_version": "4.0",
+    "created_at": "2026-03-19T00:00:00.000Z",
+    "notes": "PANIC DETECTOR + REVERSAL BUYER. Three-phase logic: (1) DETECT: spot_change_pct < -1% AND VIX >= 17 AND PCR > 1.3 \u2014 genuine panic (not just a dip). Buy slightly OTM PE (0.45 delta) to ride the momentum. (2) RIDE: hold PE as long as spot continues falling. Partial exit at 25% PE profit if VIX starts reverting. (3) FLIP: when PCR becomes extreme (>2.0) or VIX crosses below 20, close PE and open CE for the bounce \u2014 markets almost always bounce after a panic spike. ELSE branch: if the initial condition is a spike UP instead (short squeeze, geopolitical relief rally), does the opposite \u2014 buys CE on the spike. Hard exit at VIX>=30 (circuit breaker territory \u2014 no directional conviction possible). Max loss per day: \u20b93000. Best used on days like: Iran escalation, China border tension, sudden FII sell-off, circuit breaker approach."
+  },
+  "paper_mode": true,
+  "test_mode": true,
+  "status_updated_at": "2026-03-20T14:30:02.664558"
+}

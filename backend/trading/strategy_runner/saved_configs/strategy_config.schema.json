@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Shoonya Strategy Config",
+  "type": "object",
+  "properties": {
+    "identity": {
+      "type": "object",
+      "properties": {
+        "paper_mode": {
+          "type": "boolean"
+        },
+        "test_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "paper_mode"
+      ]
+    }
+  },
+  "not": {
+    "required": [
+      "paper_mode"
+    ]
+  },
+  "errorMessage": {
+    "not": "Do not define 'paper_mode' at the root level. Use only identity.paper_mode."
+  }
+}

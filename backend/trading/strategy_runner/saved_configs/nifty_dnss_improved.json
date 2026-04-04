@@ -1,0 +1,336 @@
+{
+  "schema_version": "4.0",
+  "name": "nifty_dnss_improved",
+  "id": "NIFTY_DNSS_IMPROVED",
+  "description": "Improved DNSS with VIX spike defense, panic adj rule, breakeven guard, and trailing SL. Handles sudden directional moves and VIX spikes (war/event scenarios).",
+  "type": "neutral",
+  "enabled": true,
+  "status": "RUNNING",
+  "identity": {
+    "exchange": "NFO",
+    "underlying": "NIFTY",
+    "instrument_type": "OPTIDX",
+    "product_type": "NRML",
+    "order_type": "MARKET",
+    "lots": 1,
+    "paper_mode": true,
+    "test_mode": true
+  },
+  "timing": {
+    "entry_window_start": "09:18",
+    "entry_window_end": "14:00",
+    "eod_exit_time": "15:28"
+  },
+  "market_data": {
+    "source": "sqlite"
+  },
+  "entry": {
+    "entry_sequence": "parallel",
+    "global_conditions": [
+      {
+        "parameter": "india_vix",
+        "comparator": "<",
+        "value": "20"
+      }
+    ],
+    "legs": [
+      {
+        "tag": "LEG@1_CE",
+        "label": "Short CE",
+        "group": "",
+        "instrument": "OPT",
+        "side": "SELL",
+        "option_type": "CE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.3",
+        "conditions": [],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      },
+      {
+        "tag": "LEG@2_PE",
+        "label": "Short PE",
+        "group": "",
+        "instrument": "OPT",
+        "side": "SELL",
+        "option_type": "PE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.3",
+        "conditions": [],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      }
+    ]
+  },
+  "adjustment": {
+    "enabled": true,
+    "rules": [
+      {
+        "name": "PANIC \u2014 Deep ITM rescue",
+        "priority": 1,
+        "max_per_day": 10,
+        "max_total": null,
+        "cooldown_sec": 30,
+        "retriger": true,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "max_leg_delta",
+            "comparator": ">=",
+            "value": "0.65"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "HIGHER_DELTA_LEG",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "MATCH_CLOSING",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.20"
+              }
+            }
+          ]
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "VIX spike defense \u2014 widen both legs",
+        "priority": 2,
+        "max_per_day": 3,
+        "max_total": null,
+        "cooldown_sec": 300,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "india_vix",
+            "comparator": ">=",
+            "value": "20"
+          },
+          {
+            "parameter": "max_leg_delta",
+            "comparator": "<",
+            "value": "0.65",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "LEG@1_CE",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "CE",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.15"
+              }
+            },
+            {
+              "close_tag": "LEG@2_PE",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "PE",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.15"
+              }
+            }
+          ]
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "Standard delta neutralize",
+        "priority": 3,
+        "max_per_day": 20,
+        "max_total": null,
+        "cooldown_sec": 90,
+        "retriger": true,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "abs(net_delta)",
+            "comparator": ">=",
+            "value": "0.2"
+          },
+          {
+            "parameter": "max_leg_delta",
+            "comparator": "<",
+            "value": "0.65",
+            "join": "AND"
+          },
+          {
+            "parameter": "india_vix",
+            "comparator": "<",
+            "value": "20",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "LOWER_DELTA_LEG",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "MATCH_CLOSING",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "match_leg",
+                "strike_selection": "match_leg_param",
+                "match_leg": "HIGHER_DELTA_LEG",
+                "match_param": "abs_delta",
+                "match_offset": 0,
+                "match_multiplier": 1
+              }
+            }
+          ]
+        },
+        "else_enabled": true,
+        "else_conditions": [
+          {
+            "parameter": "abs(net_delta)",
+            "comparator": ">=",
+            "value": "0.2"
+          },
+          {
+            "parameter": "max_leg_delta",
+            "comparator": "<",
+            "value": "0.65",
+            "join": "AND"
+          },
+          {
+            "parameter": "india_vix",
+            "comparator": ">=",
+            "value": "20",
+            "join": "AND"
+          }
+        ],
+        "else_action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "HIGHER_DELTA_LEG",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "MATCH_CLOSING",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "match_leg",
+                "strike_selection": "match_leg_param",
+                "match_leg": "LOWER_DELTA_LEG",
+                "match_param": "abs_delta",
+                "match_offset": 0,
+                "match_multiplier": 1
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "exit": {
+    "profit_target": {
+      "amount": null,
+      "pct": null,
+      "action": "lock_trail",
+      "lots": 1
+    },
+    "stop_loss": {
+      "amount": 5000,
+      "pct": null,
+      "action": "exit_all",
+      "allow_reentry": false
+    },
+    "trailing": {
+      "trail_amount": 1000,
+      "lock_in_at": 2000,
+      "trail_step": 500,
+      "step_trigger": 1000
+    },
+    "profit_steps": {
+      "step_size": null,
+      "max_steps": null,
+      "action": "adj"
+    },
+    "risk": {
+      "max_loss_per_day": 5000,
+      "max_delta": null,
+      "delta_breach_action": "hedge",
+      "max_iv": null,
+      "min_iv": null,
+      "max_lots": 4,
+      "breakeven_buffer": 50
+    },
+    "time": {
+      "strategy_exit_time": "15:28",
+      "expiry_day_action": "none",
+      "expiry_day_time": "09:15",
+      "roll_target": "weekly_next"
+    },
+    "combined_conditions": {
+      "operator": "OR",
+      "rules": [
+        {
+          "parameter": "india_vix",
+          "comparator": ">=",
+          "value": "25"
+        }
+      ]
+    },
+    "leg_rules": []
+  },
+  "schedule": {
+    "frequency": "daily",
+    "active_days": [
+      "mon",
+      "tue",
+      "wed",
+      "thu",
+      "fri"
+    ],
+    "entry_time": "09:18",
+    "entry_window_end": "14:00",
+    "exit_time": "15:28",
+    "expiry_mode": "weekly_auto",
+    "dte_min": null,
+    "dte_max": null,
+    "square_off_before_min": null,
+    "entry_on_expiry_day": true,
+    "max_reentries_per_day": 1
+  },
+  "meta": {
+    "schema_version": "4.0",
+    "created_at": "2026-03-19T00:00:00.000Z",
+    "notes": "Key improvements: (1) Global VIX<20 entry gate \u2014 no new position in panic markets. (2) Priority-1 panic rule: 30s cooldown, fires when any leg delta >=0.65 before the standard adj gets a chance. (3) VIX spike defense rule: widens both legs to 0.15 delta when VIX>=20, 5min cooldown prevents churn. (4) Standard adj now has cooldown raised to 90s and explicitly excludes VIX>=20 environment. (5) Trailing SL: locks \u20b92000, trails \u20b91000 steps every \u20b91000 gain \u2014 no more giving back all premium. (6) Breakeven buffer: exit if spot within 50pts of breakeven. (7) Hard VIX=25 exit condition \u2014 handles war/event spike scenarios."
+  },
+  "paper_mode": true,
+  "test_mode": true,
+  "status_updated_at": "2026-03-20T08:52:25.584320"
+}

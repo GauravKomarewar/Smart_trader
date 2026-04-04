@@ -1,0 +1,2423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Universal Strategy Builder v4</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#07090f;--panel:#0c1018;--panel-2:#101521;--panel-3:#161e2e;
+  --border:#1a2540;--border-2:#223060;--text:#dde4f0;--sub:#8494b0;
+  --muted:#4e6080;--primary:#3d8ef0;--success:#18c97a;--danger:#f05252;
+  --warning:#f0a030;--accent:#9068f5;--cyan:#18b8d4;--orange:#f07030;--teal:#18d4a0;
+  --topbar-h:54px;--nav-h:40px;--mob-nav-h:54px;
+  --mono:'JetBrains Mono',monospace;--sans:'DM Sans',system-ui,sans-serif;
+}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+html,body{height:100%;overflow:hidden;}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px;line-height:1.55;}
+button,input,select,textarea{font-family:var(--sans);}
+::-webkit-scrollbar{width:4px;height:4px;}
+::-webkit-scrollbar-track{background:var(--bg);}
+::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:4px;}
+
+/* SHELL */
+.app-shell{display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden;}
+
+/* TOPBAR */
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:0 16px;height:var(--topbar-h);flex-shrink:0;background:var(--panel);border-bottom:1px solid var(--border);}
+.topbar-brand{display:flex;align-items:center;gap:10px;}
+.topbar-title{font-size:14px;font-weight:700;color:var(--text);}
+.topbar-sub{font-size:10px;color:var(--sub);padding:2px 7px;background:rgba(61,142,240,.1);border:1px solid rgba(61,142,240,.2);border-radius:4px;}
+.topbar-actions{display:flex;align-items:center;gap:5px;}
+.dirty-dot{width:7px;height:7px;border-radius:50%;background:var(--warning);display:none;margin-right:4px;}
+.dirty-dot.show{display:block;}
+
+/* NAV */
+.nav-tabs{display:flex;flex-shrink:0;height:var(--nav-h);background:var(--panel-2);border-bottom:1px solid var(--border);overflow-x:auto;}
+.nav-tabs::-webkit-scrollbar{height:0;}
+.nav-tab{padding:0 14px;height:var(--nav-h);font-size:12px;font-weight:600;color:var(--sub);background:transparent;border:none;border-bottom:2px solid transparent;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:5px;transition:color .15s,border-color .15s;}
+.nav-tab.active{color:var(--primary);border-bottom-color:var(--primary);}
+.nav-tab:hover:not(.active){color:var(--text);}
+.tab-badge{background:var(--primary);color:#fff;border-radius:8px;font-size:9px;font-weight:700;padding:1px 5px;min-width:16px;text-align:center;}
+
+/* BODY */
+.builder-body{flex:1;overflow-y:auto;padding:18px 20px 80px;}
+.bsec{display:none;}.bsec.active{display:block;}
+
+/* SEC TITLE */
+.sec-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--primary);margin:0 0 12px;display:flex;align-items:center;gap:8px;}
+.sec-title::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--border-2),transparent);}
+.st-orange{color:var(--orange);}.st-accent{color:var(--accent);}.st-success{color:var(--success);}.st-teal{color:var(--teal);}
+
+/* FORM */
+.f-row{display:grid;gap:10px;margin-bottom:12px;}
+.f-row.c2{grid-template-columns:1fr 1fr;}
+.f-row.c3{grid-template-columns:1fr 1fr 1fr;}
+.f-row.c4{grid-template-columns:repeat(4,1fr);}
+.f-row.c5{grid-template-columns:repeat(5,1fr);}
+.f-row.c6{grid-template-columns:repeat(6,1fr);}
+.f-group{display:flex;flex-direction:column;gap:4px;}
+.f-label{font-size:11px;font-weight:500;color:var(--sub);}
+.f-input,.f-select{padding:7px 10px;background:var(--panel-2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12.5px;transition:border-color .15s;width:100%;}
+.f-input:focus,.f-select:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(61,142,240,.1);}
+.f-input[readonly]{opacity:.5;cursor:not-allowed;}
+.f-select option,.f-select optgroup{background:var(--panel-3);}
+.f-select optgroup{color:var(--sub);font-size:10.5px;}
+
+/* TOGGLE */
+.tog-wrap{display:flex;align-items:center;gap:7px;}
+.tog{display:none;}
+.tog-lbl{width:36px;height:19px;background:var(--border-2);border-radius:10px;cursor:pointer;position:relative;transition:background .2s;flex-shrink:0;}
+.tog-lbl::after{content:'';width:13px;height:13px;background:#fff;border-radius:50%;position:absolute;top:3px;left:3px;transition:transform .2s;}
+.tog:checked+.tog-lbl{background:var(--primary);}
+.tog:checked+.tog-lbl::after{transform:translateX(17px);}
+.tog-text{font-size:11.5px;color:var(--sub);font-weight:500;}
+
+/* BUTTONS */
+.btn{display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;white-space:nowrap;}
+.btn-primary{background:var(--primary);color:#fff;}.btn-primary:hover{background:#2d7ce0;}
+.btn-success{background:rgba(24,201,122,.12);color:var(--success);border:1px solid rgba(24,201,122,.3);}.btn-success:hover{background:rgba(24,201,122,.22);}
+.btn-danger{background:rgba(240,82,82,.1);color:var(--danger);border:1px solid rgba(240,82,82,.25);}.btn-danger:hover{background:rgba(240,82,82,.2);}
+.btn-ghost{background:transparent;color:var(--sub);border:1px solid var(--border-2);}.btn-ghost:hover{color:var(--text);background:rgba(255,255,255,.04);}
+.btn-accent{background:rgba(144,104,245,.12);color:var(--accent);border:1px solid rgba(144,104,245,.3);}.btn-accent:hover{background:rgba(144,104,245,.22);}
+.btn-sm{padding:4px 9px;font-size:11.5px;}
+.btn-xs{padding:3px 7px;font-size:11px;}
+
+/* INFO BOX */
+.info-box{padding:8px 12px;border-radius:6px;font-size:11.5px;display:flex;align-items:flex-start;gap:7px;margin-bottom:12px;line-height:1.5;}
+.ib-cyan{background:rgba(24,184,212,.06);border:1px solid rgba(24,184,212,.2);color:var(--cyan);}
+.ib-orange{background:rgba(240,112,48,.06);border:1px solid rgba(240,112,48,.2);color:var(--orange);}
+.ib-accent{background:rgba(144,104,245,.06);border:1px solid rgba(144,104,245,.2);color:var(--accent);}
+.ib-success{background:rgba(24,201,122,.06);border:1px solid rgba(24,201,122,.2);color:var(--success);}
+.ib-teal{background:rgba(24,212,160,.06);border:1px solid rgba(24,212,160,.2);color:var(--teal);}
+
+/* ALERT */
+.alert{padding:8px 12px;border-radius:6px;font-size:12px;display:none;align-items:center;gap:7px;margin-bottom:10px;}
+.alert.show{display:flex;}
+.alert-success{background:rgba(24,201,122,.09);border:1px solid var(--success);color:var(--success);}
+.alert-error{background:rgba(240,82,82,.09);border:1px solid var(--danger);color:var(--danger);}
+.alert-info{background:rgba(61,142,240,.09);border:1px solid var(--primary);color:var(--primary);}
+
+/* LEG CARDS */
+.legs-cont{display:flex;flex-direction:column;gap:10px;}
+.leg-card{background:var(--panel-2);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .2s;}
+.leg-card.lc-buy{border-left:3px solid var(--success);}
+.leg-card.lc-sell{border-left:3px solid var(--danger);}
+.leg-card.lc-adj{border-left:3px solid var(--warning);}
+.leg-card.lc-exit{border-left:3px solid var(--accent);}
+.leg-head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:rgba(0,0,0,.2);cursor:pointer;gap:8px;user-select:none;}
+.leg-head-left{display:flex;align-items:center;gap:7px;flex-wrap:wrap;}
+.leg-expand{color:var(--muted);font-size:10px;transition:transform .2s;}
+.leg-card.open .leg-expand{transform:rotate(90deg);}
+.leg-tag{font-family:var(--mono);font-size:10px;font-weight:600;padding:2px 7px;border-radius:4px;background:rgba(240,112,48,.1);border:1px solid rgba(240,112,48,.28);color:var(--orange);}
+.leg-name-text{font-size:13px;font-weight:600;color:var(--text);}
+.leg-group-badge{font-size:9.5px;padding:1px 6px;border-radius:3px;background:rgba(24,212,160,.1);border:1px solid rgba(24,212,160,.25);color:var(--teal);font-weight:600;}
+.badge{display:inline-flex;align-items:center;padding:2px 6px;border-radius:4px;font-size:9.5px;font-weight:700;}
+.b-buy{background:rgba(24,201,122,.14);color:#20d982;}
+.b-sell{background:rgba(240,82,82,.14);color:#f47070;}
+.b-ce{background:rgba(61,142,240,.14);color:#70a8f0;}
+.b-pe{background:rgba(240,82,82,.14);color:#f47070;}
+.b-fut{background:rgba(240,160,48,.14);color:var(--warning);}
+.leg-del{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:rgba(240,82,82,.08);border:1px solid rgba(240,82,82,.2);border-radius:5px;cursor:pointer;color:var(--danger);font-size:14px;flex-shrink:0;}
+.leg-del:hover{background:rgba(240,82,82,.2);}
+.leg-body{padding:14px;display:none;}
+.leg-card.open .leg-body{display:block;}
+
+/* COND AREA */
+.simple-cond-area{background:rgba(24,184,212,.04);border:1px solid rgba(24,184,212,.14);border-radius:8px;padding:12px;margin-bottom:10px;}
+.cond-section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--cyan);margin-bottom:9px;display:flex;align-items:center;gap:7px;}
+.cond-section-title::before{content:'';width:3px;height:11px;background:var(--cyan);border-radius:2px;}
+
+/* COND ROW */
+.simple-cond-row{display:grid;grid-template-columns:2.2fr 100px 1fr 26px;gap:7px;align-items:center;background:var(--panel-3);padding:8px 10px;border-radius:7px;border:1px solid rgba(255,255,255,.05);margin-bottom:6px;}
+.simple-cond-row:hover{border-color:rgba(61,142,240,.25);}
+.simple-cond-row .f-select,.simple-cond-row .f-input{padding:6px 7px;font-size:11.5px;margin:0;}
+.cond-rm{width:24px;height:24px;background:rgba(240,82,82,.08);border:1px solid rgba(240,82,82,.18);border-radius:5px;cursor:pointer;color:var(--danger);font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.cond-rm:hover{background:rgba(240,82,82,.2);}
+.val-row{display:grid;grid-template-columns:1fr 1fr;gap:5px;}
+
+/* JOIN */
+.cond-join-indicator{text-align:center;margin:3px 0;position:relative;}
+.cond-join-indicator::before{content:'';position:absolute;left:20px;right:20px;top:50%;height:1px;background:linear-gradient(90deg,transparent,var(--border-2),transparent);}
+.join-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:999px;background:var(--panel-3);border:1px solid var(--border-2);font-size:10px;font-weight:700;color:var(--warning);cursor:pointer;position:relative;z-index:1;transition:all .15s;}
+.join-badge:hover{background:rgba(240,160,48,.1);}
+
+/* EXEC SECTION */
+.exec-section{background:rgba(61,142,240,.04);border:1px solid rgba(61,142,240,.13);border-radius:8px;padding:13px;margin-top:10px;}
+.exec-section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--primary);margin-bottom:11px;display:flex;align-items:center;gap:6px;}
+.exec-section-title::before{content:'⚡';font-size:13px;}
+
+/* ELSE BOX */
+.else-toggle-box{background:rgba(240,82,82,.04);border:1px solid rgba(240,82,82,.13);border-radius:8px;padding:11px;margin-top:9px;}
+.else-toggle-box.active{background:rgba(240,82,82,.07);border-color:rgba(240,82,82,.25);}
+
+/* ADD BTNS */
+.add-cond-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:6px 12px;margin-top:5px;background:rgba(24,184,212,.05);border:2px dashed rgba(24,184,212,.28);border-radius:7px;color:var(--cyan);font-size:11.5px;font-weight:600;cursor:pointer;transition:all .2s;width:100%;}
+.add-cond-btn:hover{background:rgba(24,184,212,.12);border-style:solid;}
+.add-leg-btn{display:flex;align-items:center;justify-content:center;gap:7px;padding:10px;margin-top:10px;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;transition:all .2s;}
+.alb-entry{background:rgba(24,201,122,.05);border:2px dashed rgba(24,201,122,.3);color:var(--success);}.alb-entry:hover{background:rgba(24,201,122,.1);border-style:solid;}
+.alb-adj{background:rgba(240,160,48,.05);border:2px dashed rgba(240,160,48,.3);color:var(--warning);}.alb-adj:hover{background:rgba(240,160,48,.1);border-style:solid;}
+.alb-exit{background:rgba(144,104,245,.05);border:2px dashed rgba(144,104,245,.3);color:var(--accent);}.alb-exit:hover{background:rgba(144,104,245,.1);border-style:solid;}
+
+/* PANELS */
+.sub-panel{background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:7px;padding:12px;margin-top:9px;}
+.sub-panel-title{font-size:10.5px;font-weight:700;color:var(--sub);text-transform:uppercase;letter-spacing:.5px;margin-bottom:9px;}
+
+/* STRIKE MODE */
+.stk-panel{background:rgba(144,104,245,.05);border:1px solid rgba(144,104,245,.18);border-radius:7px;padding:12px;margin-top:8px;}
+.stk-panel-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:8px;}
+.stk-sub-panel{display:none;}
+
+/* MATCH LEG PANEL */
+.match-leg-panel{display:none;}
+
+/* TAG SEL */
+.tag-sel{padding:5px 8px;background:rgba(240,112,48,.08);border:1px solid rgba(240,112,48,.25);border-radius:5px;color:var(--orange);font-size:12px;font-weight:600;}
+
+/* SUMMARY */
+.summary-box{margin-top:12px;padding:10px 12px;border-radius:7px;border:1px solid var(--border-2);background:rgba(16,21,33,.4);}
+.summary-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--cyan);margin-bottom:6px;}
+.summary-text{white-space:pre-line;font-size:11.5px;color:var(--sub);line-height:1.6;}
+
+/* DAY BTNS */
+.day-btns{display:flex;flex-wrap:wrap;gap:5px;}
+.day-btn{padding:4px 9px;border-radius:999px;border:1px solid var(--border-2);background:transparent;color:var(--sub);font-size:11.5px;font-weight:600;cursor:pointer;}
+.day-btn.active{background:rgba(61,142,240,.18);border-color:var(--primary);color:var(--text);}
+
+/* HELPER */
+.helper-text{font-size:10.5px;color:var(--muted);margin-top:3px;line-height:1.4;}
+
+/* LOCK NOTE */
+.lock-note{margin-bottom:10px;font-size:11px;color:var(--warning);padding:7px 11px;background:rgba(240,160,48,.06);border:1px solid rgba(240,160,48,.2);border-radius:6px;display:none;}
+
+/* PNL CARDS */
+.card-grid{display:grid;gap:10px;margin-bottom:14px;}
+.cg-2{grid-template-columns:1fr 1fr;}.cg-3{grid-template-columns:1fr 1fr 1fr;}.cg-4{grid-template-columns:repeat(4,1fr);}
+.pnl-card{background:var(--panel-2);border:1px solid var(--border);border-radius:8px;padding:12px;}
+.pnl-card-title{font-size:12px;font-weight:600;color:var(--text);margin-bottom:9px;display:flex;align-items:center;gap:6px;}
+
+/* MODAL */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9000;display:none;align-items:center;justify-content:center;padding:16px;}
+.modal-overlay.open{display:flex;}
+.modal-box{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:420px;width:100%;}
+.modal-title{font-size:14px;font-weight:700;margin-bottom:8px;}
+.modal-msg{font-size:12.5px;color:var(--sub);margin-bottom:14px;}
+.modal-actions{display:flex;gap:7px;justify-content:flex-end;}
+
+/* JSON */
+.json-preview{background:#0a0e14;padding:12px;border-radius:7px;font-family:var(--mono);font-size:11px;overflow:auto;white-space:pre;border:1px solid var(--border);min-height:180px;max-height:60vh;}
+
+/* SWAP CARD */
+.swap-card{background:var(--panel-3);border:1px solid var(--border-2);border-radius:7px;padding:11px;margin-bottom:9px;}
+.swap-card:hover{border-color:rgba(240,160,48,.4);}
+.swap-card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px;}
+.swap-card-title{font-size:11.5px;font-weight:700;color:var(--warning);}
+
+/* FLOWCHART */
+.fc-canvas{display:flex;flex-direction:column;align-items:center;gap:0;width:100%;}
+.fc-node{border-radius:9px;padding:9px 16px;font-size:12px;font-weight:600;text-align:center;min-width:170px;max-width:300px;}
+.fc-node-start{background:linear-gradient(135deg,#1a3050,#1e3a60);border:1px solid #3d8ef0;color:var(--primary);}
+.fc-node-schedule{background:rgba(24,184,212,.08);border:1px solid rgba(24,184,212,.3);color:var(--cyan);}
+.fc-node-gate{background:rgba(144,104,245,.08);border:1px solid rgba(144,104,245,.3);color:var(--accent);}
+.fc-node-leg{border-radius:7px;min-width:190px;overflow:hidden;}
+.fc-node-leg-head{padding:6px 12px;font-size:11.5px;font-weight:700;}
+.fc-node-leg-body{padding:6px 12px;font-size:10.5px;color:var(--sub);text-align:left;line-height:1.6;}
+.fc-node-sell .fc-node-leg-head{background:rgba(240,82,82,.12);border:1px solid rgba(240,82,82,.28);color:var(--danger);}
+.fc-node-buy  .fc-node-leg-head{background:rgba(24,201,122,.12);border:1px solid rgba(24,201,122,.28);color:var(--success);}
+.fc-node-sell .fc-node-leg-body{background:rgba(240,82,82,.04);border:1px solid rgba(240,82,82,.13);border-top:none;}
+.fc-node-buy  .fc-node-leg-body{background:rgba(24,201,122,.04);border:1px solid rgba(24,201,122,.13);border-top:none;}
+.fc-node-adj{background:rgba(240,160,48,.08);border:1px solid rgba(240,160,48,.28);color:var(--warning);}
+.fc-adj-rule{min-width:260px;max-width:360px;padding:0;text-align:left;overflow:hidden}
+.fc-adj-head{padding:7px 10px;background:rgba(240,160,48,.14);border-bottom:1px solid rgba(240,160,48,.25);font-size:10.5px;font-weight:700;color:var(--warning)}
+.fc-adj-body{padding:8px 10px;display:flex;flex-direction:column;gap:7px}
+.fc-adj-branch{font-size:10px;line-height:1.45;background:rgba(0,0,0,.12);border:1px solid rgba(255,255,255,.08);border-radius:6px;padding:6px 7px;color:var(--text)}
+.fc-adj-branch b{color:var(--warning)}
+.fc-adj-branch-else b{color:var(--danger)}
+.fc-adj-cond{color:var(--sub)}
+.fc-adj-act{color:var(--orange);font-weight:600}
+.fc-node-monitor{background:rgba(61,142,240,.06);border:1px solid rgba(61,142,240,.22);color:var(--primary);}
+.fc-node-exit{background:rgba(240,82,82,.08);border:1px solid rgba(240,82,82,.28);color:var(--danger);}
+.fc-node-end{background:rgba(22,30,46,.7);border:1px solid var(--sub);color:var(--sub);}
+.fc-arrow{display:flex;flex-direction:column;align-items:center;}
+.fc-arrow-line{width:2px;height:20px;background:linear-gradient(180deg,var(--border-2),var(--muted));}
+.fc-arrow-tip{width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:7px solid var(--muted);}
+.fc-arrow-label{font-size:9.5px;color:var(--muted);padding:2px 6px;border-radius:4px;background:var(--panel-3);border:1px solid var(--border);margin:2px 0;font-weight:600;}
+.fc-legs-row,.fc-adj-row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;}
+
+/* MOBILE NAV */
+.mob-nav{display:none;position:fixed;bottom:0;left:0;right:0;height:var(--mob-nav-h);background:var(--panel);border-top:1px solid var(--border);z-index:300;align-items:center;justify-content:space-around;padding:0 4px;padding-bottom:env(safe-area-inset-bottom,0);}
+.mob-nav-btn{display:flex;flex-direction:column;align-items:center;gap:2px;padding:5px 7px;border:none;background:transparent;color:var(--sub);font-size:9px;font-weight:600;cursor:pointer;border-radius:7px;min-width:42px;}
+.mob-nav-btn.active{color:var(--primary);}
+.mob-nav-btn span{font-size:16px;line-height:1;}
+.mob-nav-dot{width:4px;height:4px;border-radius:50%;background:var(--primary);display:none;margin-top:1px;}
+.mob-nav-btn.has-items .mob-nav-dot{display:block;}
+
+/* RESPONSIVE */
+@media(max-width:860px){.cg-3{grid-template-columns:1fr 1fr;}.f-row.c5,.f-row.c6{grid-template-columns:repeat(3,1fr);}.f-row.c4{grid-template-columns:1fr 1fr;}}
+@media(max-width:700px){
+  .mob-nav{display:flex;}
+  .nav-tabs{display:none;}
+  .builder-body{padding-bottom:calc(14px + var(--mob-nav-h) + env(safe-area-inset-bottom,0px));}
+  .topbar-sub{display:none;}
+}
+@media(max-width:580px){
+  .cg-2,.cg-3,.cg-4{grid-template-columns:1fr 1fr;}
+  .f-row.c3,.f-row.c4,.f-row.c5,.f-row.c6{grid-template-columns:1fr 1fr;}
+  .simple-cond-row{grid-template-columns:1fr 75px 1fr 24px;}
+}
+.fc-adj-swap-close {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.fc-adj-swap-arrow {
+  color: var(--muted);
+  margin: 0 4px;
+}
+
+.fc-adj-swap-new {
+  color: var(--success);
+  font-weight: 600;
+}
+</style>
+</head>
+<body>
+<div class="app-shell">
+
+<!-- TOPBAR -->
+<div class="topbar">
+  <div class="topbar-brand">
+    <div class="topbar-title">⚙️ Strategy Builder</div>
+    <div class="topbar-sub">v4 — Universal</div>
+  </div>
+  <div class="topbar-actions">
+    <span class="dirty-dot" id="dirtyDot" title="Unsaved changes"></span>
+    <button class="btn btn-ghost btn-sm" onclick="exportJSON()">↓ JSON</button>
+    <button class="btn btn-ghost btn-sm" onclick="resetForm()">↺ Reset</button>
+    <button class="btn btn-success btn-sm" onclick="saveStrategy()">💾 Save</button>
+    <button class="btn btn-danger btn-sm" onclick="closeBuilder()">✕</button>
+  </div>
+</div>
+
+<!-- DESKTOP NAV -->
+<div class="nav-tabs">
+  <button class="nav-tab active" data-sec="identity" onclick="switchSec('identity',this)">1 · Identity &amp; Schedule</button>
+  <button class="nav-tab" data-sec="entry"      onclick="switchSec('entry',this)">2 · Entry <span class="tab-badge" id="badgeEntry">0</span></button>
+  <button class="nav-tab" data-sec="adjustment" onclick="switchSec('adjustment',this)">3 · Adjustment <span class="tab-badge" id="badgeAdj">0</span></button>
+  <button class="nav-tab" data-sec="exit"       onclick="switchSec('exit',this)">4 · Exit &amp; Risk <span class="tab-badge" id="badgeExit">0</span></button>
+  <button class="nav-tab" data-sec="flowchart"  onclick="switchSec('flowchart',this)">📊 Flowchart</button>
+  <button class="nav-tab" data-sec="json"       onclick="switchSec('json',this)">{ } JSON</button>
+</div>
+
+<!-- BODY -->
+<div class="builder-body">
+  <div id="alertBox" class="alert"></div>
+
+  <!-- 1. IDENTITY -->
+  <div class="bsec active" id="sec-identity">
+    <div class="sec-title">Strategy Identity</div>
+    <div class="f-row c2">
+      <div class="f-group"><label class="f-label">Strategy Name *</label><input class="f-input" id="sName" placeholder="e.g. NIFTY Skewed Straddle" oninput="onNameInput()"></div>
+      <div class="f-group"><label class="f-label">Strategy ID (auto)</label><input class="f-input" id="sId" readonly></div>
+    </div>
+    <div class="f-row c3">
+      <div class="f-group"><label class="f-label">Strategy Type</label>
+        <select class="f-select" id="sType">
+          <option value="neutral">Neutral / Premium Collect</option>
+          <option value="directional">Directional</option>
+          <option value="spread">Spread (Bull/Bear)</option>
+          <option value="calendar">Calendar / Diagonal</option>
+          <option value="volatility">Volatility Play</option>
+          <option value="gamma_scalp">Gamma Scalping</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
+      <div class="f-group"><label class="f-label">Symbol *</label>
+        <select class="f-select" id="sSymbol" onchange="onSymbolChange()"><option value="">Loading…</option></select>
+      </div>
+      <div class="f-group"><label class="f-label">Lot Multiplier</label>
+        <input class="f-input" id="sLots" type="number" value="1" min="1" oninput="markDirty()">
+        <div class="helper-text">1 means one exchange lot. Final broker quantity = lots × lot_size.</div>
+      </div>
+    </div>
+    <div class="f-row c4">
+      <div class="f-group"><label class="f-label">Exchange</label><input class="f-input" id="sExchange" readonly></div>
+      <div class="f-group"><label class="f-label">Product Type</label>
+        <select class="f-select" id="sProductType">
+          <option value="NRML">NRML</option><option value="MIS">MIS</option><option value="CNC">CNC</option>
+        </select>
+      </div>
+      <div class="f-group"><label class="f-label">Default Order Type</label>
+        <select class="f-select" id="sOrderType">
+          <option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option>
+          <option value="SL">SL</option><option value="SLM">SL-Market</option>
+        </select>
+      </div>
+      <div class="f-group"><label class="f-label">Entry Sequence</label>
+        <select class="f-select" id="sEntrySeq">
+          <option value="parallel">Parallel (all at once)</option>
+          <option value="sequential">Sequential (leg by leg)</option>
+        </select>
+        <div class="helper-text">Parallel = best for straddles. Sequential = spreads/condors</div>
+      </div>
+    </div>
+    <div class="f-row">
+      <div class="f-group"><label class="f-label">Description / Notes</label><input class="f-input" id="sDesc" placeholder="Strategy rationale, bias, targets…" oninput="markDirty()"></div>
+      <!-- DB Path removed -->
+    </div>
+
+    <div class="sec-title" style="margin-top:18px;">Trading Schedule</div>
+    <div class="f-row c4">
+      <div class="f-group"><label class="f-label">Frequency</label>
+        <select class="f-select" id="schFreq">
+          <option value="daily">Daily</option><option value="weekly">Weekly</option>
+          <option value="monthly">Monthly (Expiry Week)</option><option value="event">Event-triggered</option><option value="manual">Manual Only</option>
+        </select>
+      </div>
+      <div class="f-group"><label class="f-label">Entry Window Start</label><input class="f-input" id="schEntry" type="time" value="09:18"></div>
+      <div class="f-group"><label class="f-label">Entry Window End</label><input class="f-input" id="schEntryEnd" type="time" value="14:00">
+        <div class="helper-text">No new entry after this time</div>
+      </div>
+      <div class="f-group"><label class="f-label">EOD Exit Time</label><input class="f-input" id="schExit" type="time" value="15:15"></div>
+    </div>
+    <div class="f-row c4">
+      <div class="f-group"><label class="f-label">Default Expiry Mode</label>
+        <select class="f-select" id="schExpiry">
+          <option value="weekly_auto">Weekly Auto (closest, next on expiry day)</option>
+          <option value="weekly_current">Weekly Current</option><option value="weekly_next">Weekly Next</option>
+          <option value="monthly_current">Monthly Current</option><option value="monthly_next">Monthly Next</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
+      <div class="f-group"><label class="f-label">DTE Min</label><input class="f-input" id="schDteMin" type="number" placeholder="e.g. 1"></div>
+      <div class="f-group"><label class="f-label">DTE Max</label><input class="f-input" id="schDteMax" type="number" placeholder="e.g. 7"></div>
+      <div class="f-group"><label class="f-label">Square Off Before (min)</label><input class="f-input" id="schSqoff" type="number" placeholder="e.g. 30"></div>
+    </div>
+    <div class="f-row c3">
+      <div class="f-group"><label class="f-label">Active Days</label>
+        <div class="day-btns" id="schDaysBtns">
+          <button type="button" class="day-btn active" data-day="mon" onclick="toggleDay(this)">Mon</button>
+          <button type="button" class="day-btn active" data-day="tue" onclick="toggleDay(this)">Tue</button>
+          <button type="button" class="day-btn active" data-day="wed" onclick="toggleDay(this)">Wed</button>
+          <button type="button" class="day-btn active" data-day="thu" onclick="toggleDay(this)">Thu</button>
+          <button type="button" class="day-btn active" data-day="fri" onclick="toggleDay(this)">Fri</button>
+          <button type="button" class="day-btn" data-day="sat" onclick="toggleDay(this)">Sat</button>
+        </div>
+      </div>
+      <div class="f-group"><label class="f-label">Entry on Expiry Day</label>
+        <select class="f-select" id="schEntryExpiry"><option value="no">No</option><option value="yes">Yes</option></select>
+      </div>
+      <div class="f-group"><label class="f-label">Max Re-entries / Day</label>
+        <input class="f-input" id="schMaxReentry" type="number" value="1" min="1">
+        <div class="helper-text">How many times the full strategy can enter per session</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. ENTRY -->
+  <div class="bsec" id="sec-entry">
+    <div class="info-box ib-cyan">📊 Each leg runs its own IF/ELSE. Global Gate runs first. Add buy wings for spreads/condors — no leg limit.</div>
+    <div class="sec-title">Global Entry Gate <span style="font-size:10px;font-weight:400;text-transform:none;color:var(--muted);letter-spacing:0;">(all legs must pass before any executes)</span></div>
+    <div class="simple-cond-area">
+      <div class="cond-section-title">Strategy-Level Entry Conditions</div>
+      <div id="entryCombinedList"></div>
+      <button class="add-cond-btn" onclick="addCond('entryCombinedList')">＋ Add Global Condition</button>
+    </div>
+    <div class="sec-title st-success" style="margin-top:16px;">Entry Legs</div>
+    <div class="legs-cont" id="entryLegs"></div>
+    <button class="add-leg-btn alb-entry" onclick="addEntryLeg()">＋  Add Entry Leg</button>
+    <div class="summary-box" style="margin-top:16px;">
+      <div class="summary-title">Entry Summary</div>
+      <div class="summary-text" id="entrySummary">No entry legs yet.</div>
+    </div>
+  </div>
+
+  <!-- 3. ADJUSTMENT -->
+  <div class="bsec" id="sec-adjustment">
+    <div class="info-box ib-orange">🔧 Rules fire when conditions met. Priority: lower fires first. Each rule can close, roll, hedge, or partially close legs. Re-entry toggle lets a rule repeat every cycle.</div>
+    <div class="lock-note" id="adjLockMsg">⚠️ Add at least one Entry leg first.</div>
+    <div class="legs-cont" id="adjLegs"></div>
+    <button class="add-leg-btn alb-adj" onclick="addAdjLeg()">＋  Add Adjustment Rule</button>
+    <div class="summary-box" style="margin-top:12px;">
+      <div class="summary-title">Adjustment Summary</div>
+      <div class="summary-text" id="adjSummary">No adjustment rules yet.</div>
+    </div>
+  </div>
+
+  <!-- 4. EXIT & RISK -->
+  <div class="bsec" id="sec-exit">
+    <div class="info-box ib-accent">🚪 Strategy exits on ANY top-level trigger. Combine P&amp;L exits, Greek limits, breakeven monitoring, and per-leg rules.</div>
+
+    <div class="sec-title">P&amp;L Exits</div>
+    <div class="card-grid cg-3">
+      <div class="pnl-card">
+        <div class="pnl-card-title">🎯 Target Profit</div>
+        <div class="f-row c2" style="margin-bottom:7px;">
+          <div class="f-group"><label class="f-label">Amount (₹)</label><input class="f-input" id="exitTargetAmt" type="number" placeholder="e.g. 5000"></div>
+          <div class="f-group"><label class="f-label">% of Premium</label><input class="f-input" id="exitTargetPct" type="number" placeholder="e.g. 50"></div>
+        </div>
+        <div class="f-group"><label class="f-label">On Hit Action</label>
+          <select class="f-select" id="exitTargetAction">
+            <option value="exit_all">Exit All</option><option value="trail">Switch to Trail</option>
+            <option value="partial_50">Partial 50%</option><option value="partial_lots">Close N Lots</option>
+            <option value="lock_trail">Lock &amp; Trail</option>
+          </select>
+        </div>
+        <div class="f-group" style="margin-top:7px;" id="exitTargetLotsGrp"><label class="f-label">Lots to Close</label><input class="f-input" id="exitTargetLots" type="number" value="1" min="1"></div>
+      </div>
+      <div class="pnl-card">
+        <div class="pnl-card-title">🛑 Stop Loss</div>
+        <div class="f-row c2" style="margin-bottom:7px;">
+          <div class="f-group"><label class="f-label">Amount (₹)</label><input class="f-input" id="exitSlAmt" type="number" placeholder="e.g. 3000"></div>
+          <div class="f-group"><label class="f-label">% of Premium</label><input class="f-input" id="exitSlPct" type="number" placeholder="e.g. 100"></div>
+        </div>
+        <div class="f-row c2">
+          <div class="f-group"><label class="f-label">On Hit</label>
+            <select class="f-select" id="exitSlAction">
+              <option value="exit_all">Exit All</option><option value="adjust">Trigger Adj</option><option value="partial_50">Partial 50%</option>
+            </select>
+          </div>
+          <div class="f-group"><label class="f-label">Re-enter After SL?</label>
+            <select class="f-select" id="exitSlReentry"><option value="no">No</option><option value="yes">Yes</option></select>
+          </div>
+        </div>
+      </div>
+      <div class="pnl-card">
+        <div class="pnl-card-title">📈 Trailing SL</div>
+        <div class="f-row c2" style="margin-bottom:7px;">
+          <div class="f-group"><label class="f-label">Trail (₹)</label><input class="f-input" id="exitTrailAmt" type="number" placeholder="e.g. 1000"></div>
+          <div class="f-group"><label class="f-label">Lock-in at (₹)</label><input class="f-input" id="exitLockIn" type="number" placeholder="e.g. 2000"></div>
+        </div>
+        <div class="f-row c2">
+          <div class="f-group"><label class="f-label">Trail Step (₹)</label><input class="f-input" id="exitTrailStep" type="number" placeholder="500"></div>
+          <div class="f-group"><label class="f-label">Step Trigger (₹)</label><input class="f-input" id="exitTrailStepTrigger" type="number" placeholder="1000">
+            <div class="helper-text">Profit increment that moves trail</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec-title">Profit Step Targets <span style="font-size:10px;font-weight:400;text-transform:none;color:var(--muted);letter-spacing:0;">(triggers adj/partial at each milestone)</span></div>
+    <div class="card-grid cg-4" style="margin-bottom:14px;">
+      <div class="pnl-card">
+        <div class="pnl-card-title">Step Config</div>
+        <div class="f-row c2">
+          <div class="f-group"><label class="f-label">Step Size (₹)</label><input class="f-input" id="profitStepSize" type="number" placeholder="e.g. 1000"></div>
+          <div class="f-group"><label class="f-label">Max Steps</label><input class="f-input" id="profitStepMax" type="number" placeholder="e.g. 5"></div>
+        </div>
+        <div class="f-group" style="margin-top:6px;"><label class="f-label">Action per Step</label>
+          <select class="f-select" id="profitStepAction">
+            <option value="adj">Trigger Adjustment Rule</option>
+            <option value="trail">Tighten Trail</option>
+            <option value="partial">Partial Close 25%</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec-title">Greek &amp; Breakeven Risk</div>
+    <div class="card-grid cg-4">
+      <div class="pnl-card">
+        <div class="pnl-card-title">Δ Delta</div>
+        <div class="f-row c2">
+          <div class="f-group"><label class="f-label">Max |Net Δ|</label><input class="f-input" id="rMaxDelta" type="number" step="0.01" placeholder="0.5"></div>
+          <div class="f-group"><label class="f-label">On Breach</label>
+            <select class="f-select" id="rDeltaAction"><option value="hedge">Hedge</option><option value="adjust">Trigger Adj</option><option value="alert">Alert</option></select>
+          </div>
+        </div>
+      </div>
+      <div class="pnl-card">
+        <div class="pnl-card-title">σ IV &amp; VIX</div>
+        <div class="f-row c2">
+          <div class="f-group"><label class="f-label">Max IV %</label><input class="f-input" id="rMaxIv" type="number" placeholder="25"></div>
+          <div class="f-group"><label class="f-label">Min IV %</label><input class="f-input" id="rMinIv" type="number" placeholder="10"></div>
+        </div>
+      </div>
+      <div class="pnl-card">
+        <div class="pnl-card-title">📍 Breakeven Guard</div>
+        <div class="f-group"><label class="f-label">Exit if spot within (pts) of breakeven</label>
+          <input class="f-input" id="rBreakevenBuffer" type="number" placeholder="e.g. 50">
+          <div class="helper-text">Protects breakeven zone breach</div>
+        </div>
+      </div>
+      <div class="pnl-card">
+        <div class="pnl-card-title">⚖ Position Limits</div>
+        <div class="f-row c2">
+          <div class="f-group"><label class="f-label">Max Loss/Day (₹)</label><input class="f-input" id="rMaxLoss" type="number"></div>
+          <div class="f-group"><label class="f-label">Max Lots</label><input class="f-input" id="rMaxLots" type="number" value="4" min="1"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec-title">Expiry &amp; Time Exits</div>
+    <div class="f-row c4" style="margin-bottom:16px;">
+      <div class="f-group"><label class="f-label">Strategy Exit Time</label><input class="f-input" id="exitTime" type="time" value="15:28"></div>
+      <div class="f-group"><label class="f-label">Expiry Day Action</label>
+        <select class="f-select" id="expiryDayAction">
+          <option value="none">No special action</option><option value="time">Exit at specified time</option>
+          <option value="open">Exit at market open</option><option value="roll">Roll to next expiry</option>
+        </select>
+      </div>
+      <div class="f-group"><label class="f-label">Expiry Exit Time</label><input class="f-input" id="expiryDayTime" type="time" value="09:15"></div>
+      <div class="f-group"><label class="f-label">Roll Target Expiry</label>
+        <select class="f-select" id="rollTarget">
+          <option value="weekly_next">Next Weekly</option><option value="monthly_next">Next Monthly</option><option value="custom">Custom</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="sub-panel">
+      <div class="sub-panel-title">⚡ Combined Exit Gate — ANY condition triggers full exit</div>
+      <div class="simple-cond-area" style="margin-bottom:0;">
+        <div class="cond-section-title">Custom Exit Conditions</div>
+        <div id="exitCombinedList"></div>
+        <button class="add-cond-btn" onclick="addCond('exitCombinedList')">＋ Add Exit Condition</button>
+      </div>
+    </div>
+
+    <div class="sec-title st-accent" style="margin-top:18px;">Per-Leg Exit Rules</div>
+    <div class="legs-cont" id="exitLegs"></div>
+    <button class="add-leg-btn alb-exit" onclick="addExitLeg()">＋  Add Per-Leg Exit Rule</button>
+    <div class="summary-box" style="margin-top:12px;">
+      <div class="summary-title">Exit Summary</div>
+      <div class="summary-text" id="exitSummary">No custom exit rules yet.</div>
+    </div>
+  </div>
+
+  <!-- 5. FLOWCHART -->
+  <div class="bsec" id="sec-flowchart">
+    <div class="info-box ib-cyan">📊 Live visual flow — auto-updates as you build.</div>
+    <div id="flowchartCanvas"></div>
+  </div>
+
+  <!-- 6. JSON -->
+  <div class="bsec" id="sec-json">
+    <div class="sec-title">JSON Output (Schema v4.0)</div>
+    <div class="info-box ib-accent" style="margin-bottom:8px;">Complete strategy config. Your backend runner should consume this directly.</div>
+    <pre id="jsonOutput" class="json-preview">{}</pre>
+  </div>
+</div>
+
+<!-- MOBILE NAV -->
+<nav class="mob-nav">
+  <button class="mob-nav-btn active" data-sec="identity" onclick="switchSec('identity',this)"><span>⚙️</span>Identity<div class="mob-nav-dot"></div></button>
+  <button class="mob-nav-btn" data-sec="entry"      onclick="switchSec('entry',this)"><span>📥</span>Entry<div class="mob-nav-dot" id="mdot-entry"></div></button>
+  <button class="mob-nav-btn" data-sec="adjustment" onclick="switchSec('adjustment',this)"><span>🔧</span>Adj<div class="mob-nav-dot" id="mdot-adj"></div></button>
+  <button class="mob-nav-btn" data-sec="exit"       onclick="switchSec('exit',this)"><span>🚪</span>Exit<div class="mob-nav-dot" id="mdot-exit"></div></button>
+  <button class="mob-nav-btn" data-sec="flowchart"  onclick="switchSec('flowchart',this)"><span>📊</span>Flow</button>
+  <button class="mob-nav-btn" data-sec="json"       onclick="switchSec('json',this)"><span>{}</span>JSON</button>
+</nav>
+</div><!-- app-shell -->
+
+<script>
+'use strict';
+/* ========== CONSTANTS ========== */
+const OPERATORS=[
+  {v:'>',l:'> Greater'},{v:'>=',l:'>= Gtr/Eq'},{v:'<',l:'< Less'},{v:'<=',l:'<= Less/Eq'},
+  {v:'==',l:'== Equal'},{v:'!=',l:'!= Not Equal'},{v:'~=',l:'~= Approx (±2%)'},
+  {v:'between',l:'Between'},{v:'not_between',l:'Not Between'},
+  {v:'crosses_above',l:'Crosses Above ↑'},{v:'crosses_below',l:'Crosses Below ↓'},
+  {v:'is_true',l:'Is True'},{v:'is_false',l:'Is False'},
+];
+
+const BASE_PARAMS=[
+  /* Option Legs */
+  {v:'ce_ltp',l:'CE LTP',cat:'Option Legs'},{v:'pe_ltp',l:'PE LTP',cat:'Option Legs'},
+  {v:'ce_strike',l:'CE Strike',cat:'Option Legs'},{v:'pe_strike',l:'PE Strike',cat:'Option Legs'},
+  {v:'ce_oi',l:'CE OI',cat:'Option Legs'},{v:'pe_oi',l:'PE OI',cat:'Option Legs'},
+  {v:'ce_oi_change',l:'CE OI Change',cat:'Option Legs'},{v:'pe_oi_change',l:'PE OI Change',cat:'Option Legs'},
+  {v:'ce_volume',l:'CE Volume',cat:'Option Legs'},{v:'pe_volume',l:'PE Volume',cat:'Option Legs'},
+  {v:'ce_bid_ask_spread',l:'CE Bid-Ask Spread',cat:'Option Legs'},{v:'pe_bid_ask_spread',l:'PE Bid-Ask Spread',cat:'Option Legs'},
+  {v:'ce_moneyness',l:'CE Moneyness (ITM+/OTM−)',cat:'Option Legs'},{v:'pe_moneyness',l:'PE Moneyness (ITM+/OTM−)',cat:'Option Legs'},
+  /* Greeks Signed */
+  {v:'ce_delta',l:'CE Delta',cat:'Greeks (Signed)'},{v:'pe_delta',l:'PE Delta (−ve)',cat:'Greeks (Signed)'},
+  {v:'ce_gamma',l:'CE Gamma',cat:'Greeks (Signed)'},{v:'pe_gamma',l:'PE Gamma',cat:'Greeks (Signed)'},
+  {v:'ce_theta',l:'CE Theta (−ve)',cat:'Greeks (Signed)'},{v:'pe_theta',l:'PE Theta (−ve)',cat:'Greeks (Signed)'},
+  {v:'ce_vega',l:'CE Vega',cat:'Greeks (Signed)'},{v:'pe_vega',l:'PE Vega',cat:'Greeks (Signed)'},
+  /* Greeks Absolute */
+  {v:'abs(ce_delta)',l:'|CE Delta|',cat:'Greeks (Absolute)'},{v:'abs(pe_delta)',l:'|PE Delta|',cat:'Greeks (Absolute)'},
+  {v:'abs(ce_gamma)',l:'|CE Gamma|',cat:'Greeks (Absolute)'},{v:'abs(pe_gamma)',l:'|PE Gamma|',cat:'Greeks (Absolute)'},
+  {v:'abs(ce_theta)',l:'|CE Theta|',cat:'Greeks (Absolute)'},{v:'abs(pe_theta)',l:'|PE Theta|',cat:'Greeks (Absolute)'},
+  {v:'abs(ce_vega)',l:'|CE Vega|',cat:'Greeks (Absolute)'},{v:'abs(pe_vega)',l:'|PE Vega|',cat:'Greeks (Absolute)'},
+  {v:'abs(net_delta)',l:'|Net Delta|',cat:'Greeks (Absolute)'},{v:'abs(delta_diff)',l:'|Delta Diff CE−PE|',cat:'Greeks (Absolute)'},
+  /* Portfolio Greeks */
+  {v:'portfolio_delta',l:'Portfolio Delta (net)',cat:'Portfolio Greeks'},
+  {v:'portfolio_gamma',l:'Portfolio Gamma',cat:'Portfolio Greeks'},
+  {v:'portfolio_theta',l:'Portfolio Theta (decay/day)',cat:'Portfolio Greeks'},
+  {v:'portfolio_vega',l:'Portfolio Vega (IV sensitivity)',cat:'Portfolio Greeks'},
+  {v:'abs(portfolio_delta)',l:'|Portfolio Delta|',cat:'Portfolio Greeks'},
+  /* Volatility */
+  {v:'ce_iv',l:'CE IV %',cat:'Volatility'},{v:'pe_iv',l:'PE IV %',cat:'Volatility'},
+  {v:'iv_skew',l:'IV Skew (PE IV − CE IV)',cat:'Volatility'},
+  {v:'india_vix',l:'India VIX',cat:'Volatility'},{v:'atm_iv',l:'ATM IV %',cat:'Volatility'},
+  /* Premium & Cost */
+  {v:'total_premium',l:'Total Premium Collected',cat:'Premium & Cost'},
+  {v:'premium_collected',l:'Net Credit Received (₹)',cat:'Premium & Cost'},
+  {v:'total_cost_basis',l:'Total Cost Basis',cat:'Premium & Cost'},
+  {v:'ce_premium_decay_pct',l:'CE Decay %',cat:'Premium & Cost'},{v:'pe_premium_decay_pct',l:'PE Decay %',cat:'Premium & Cost'},
+  {v:'total_premium_decay_pct',l:'Total Decay %',cat:'Premium & Cost'},
+  {v:'max_profit_potential',l:'Max Profit Potential (₹)',cat:'Premium & Cost'},
+  /* Strategy P&L */
+  {v:'net_delta',l:'Net Delta',cat:'Strategy P&L'},{v:'delta_diff',l:'Delta Diff (CE−PE)',cat:'Strategy P&L'},
+  {v:'combined_pnl',l:'Combined P&L (₹)',cat:'Strategy P&L'},{v:'combined_pnl_pct',l:'Combined P&L %',cat:'Strategy P&L'},
+  {v:'unrealised_pnl',l:'Unrealised P&L (₹)',cat:'Strategy P&L'},{v:'realised_pnl',l:'Realised P&L (₹)',cat:'Strategy P&L'},
+  {v:'profit_step',l:'Profit Step Number',cat:'Strategy P&L'},
+  /* Breakeven */
+  {v:'breakeven_upper',l:'Upper Breakeven Strike',cat:'Breakeven'},
+  {v:'breakeven_lower',l:'Lower Breakeven Strike',cat:'Breakeven'},
+  {v:'breakeven_distance',l:'Nearest Breakeven Distance (pts)',cat:'Breakeven'},
+  {v:'spot_vs_upper_be',l:'Spot vs Upper BE (pts)',cat:'Breakeven'},
+  {v:'spot_vs_lower_be',l:'Spot vs Lower BE (pts)',cat:'Breakeven'},
+  /* OI / Market Data */
+  {v:'pcr',l:'Put-Call Ratio (OI)',cat:'OI & Market Data'},{v:'pcr_volume',l:'PCR (Volume)',cat:'OI & Market Data'},
+  {v:'max_pain_strike',l:'Max Pain Strike',cat:'OI & Market Data'},
+  {v:'spot_vs_max_pain',l:'Spot vs Max Pain (pts)',cat:'OI & Market Data'},
+  {v:'total_oi_ce',l:'Total CE OI (chain)',cat:'OI & Market Data'},{v:'total_oi_pe',l:'Total PE OI (chain)',cat:'OI & Market Data'},
+  {v:'oi_buildup_ce',l:'CE OI Build-up %',cat:'OI & Market Data'},{v:'oi_buildup_pe',l:'PE OI Build-up %',cat:'OI & Market Data'},
+  /* Leg Status */
+  {v:'active_legs_count',l:'Active Legs Count',cat:'Leg Status'},
+  {v:'closed_legs_count',l:'Closed Legs Count',cat:'Leg Status'},
+  {v:'any_leg_active',l:'Any Leg Still Active?',cat:'Leg Status'},
+  {v:'all_legs_active',l:'All Legs Active?',cat:'Leg Status'},
+  {v:'adjustment_count',l:'Total Adjustments Done',cat:'Leg Status'},
+  {v:'adj_count_today',l:'Adjustments Today',cat:'Leg Status'},
+  /* Time */
+  {v:'time_current',l:'Current Time (HH:MM)',cat:'Time'},{v:'time_in_position_sec',l:'Time In Position (sec)',cat:'Time'},
+  {v:'time_since_last_adj_sec',l:'Time Since Last Adj (sec)',cat:'Time'},
+  {v:'session_type',l:'Session Type (morning/afternoon/pre_expiry)',cat:'Time'},
+  {v:'minutes_to_exit',l:'Minutes to EOD Exit',cat:'Time'},
+  {v:'is_expiry_day',l:'Is Expiry Day?',cat:'Time'},{v:'days_to_expiry',l:'Days to Expiry',cat:'Time'},
+  /* Index */
+  {v:'spot_price',l:'Spot Price',cat:'Index/Spot'},{v:'spot_change',l:'Spot Change (pts)',cat:'Index/Spot'},
+  {v:'spot_change_pct',l:'Spot Change %',cat:'Index/Spot'},{v:'atm_strike',l:'ATM Strike',cat:'Index/Spot'},
+  {v:'fut_ltp',l:'Futures LTP',cat:'Index/Spot'},{v:'india_vix',l:'India VIX',cat:'Index/Spot'},
+  {v:'index_NIFTY_ltp',l:'NIFTY LTP',cat:'Index/Spot'},{v:'index_NIFTY_change_pct',l:'NIFTY Change %',cat:'Index/Spot'},
+  {v:'index_BANKNIFTY_ltp',l:'BANKNIFTY LTP',cat:'Index/Spot'},{v:'index_BANKNIFTY_change_pct',l:'BANKNIFTY Change %',cat:'Index/Spot'},
+  {v:'index_SENSEX_ltp',l:'SENSEX LTP',cat:'Index/Spot'},{v:'index_SENSEX_change_pct',l:'SENSEX Change %',cat:'Index/Spot'},
+  {v:'index_FINNIFTY_ltp',l:'FINNIFTY LTP',cat:'Index/Spot'},{v:'index_FINNIFTY_change_pct',l:'FINNIFTY Change %',cat:'Index/Spot'},
+  {v:'index_MIDCPNIFTY_ltp',l:'MIDCP NIFTY LTP',cat:'Index/Spot'},
+  {v:'index_CRUDEOIL_ltp',l:'CRUDE OIL LTP',cat:'Index/Spot'},{v:'index_CRUDEOIL_change_pct',l:'CRUDE OIL Chg %',cat:'Index/Spot'},
+  {v:'index_GOLDPETAL_ltp',l:'GOLD PETAL LTP',cat:'Index/Spot'},{v:'index_SILVERMIC_ltp',l:'SILVER MIC LTP',cat:'Index/Spot'},
+  {v:'index_NATGASMINI_ltp',l:'NAT GAS MINI LTP',cat:'Index/Spot'},
+  /* Dynamic leg refs */
+  {v:'higher_delta_leg',l:'Higher Delta Leg Tag',cat:'Dynamic Leg Refs'},
+  {v:'lower_delta_leg',l:'Lower Delta Leg Tag',cat:'Dynamic Leg Refs'},
+  {v:'most_profitable_leg',l:'Most Profitable Leg Tag',cat:'Dynamic Leg Refs'},
+  {v:'least_profitable_leg',l:'Least Profitable Leg Tag',cat:'Dynamic Leg Refs'},
+  {v:'max_leg_delta',l:'Max Leg |Delta| (any leg)',cat:'Dynamic Leg Refs'},
+  {v:'min_leg_delta',l:'Min Leg |Delta| (any leg)',cat:'Dynamic Leg Refs'},
+  {v:'any_leg_delta_above',l:'Any Leg |Delta| Above (provide value)',cat:'Dynamic Leg Refs'},
+  {v:'all_legs_delta_below',l:'All Legs |Delta| Below (provide value)',cat:'Dynamic Leg Refs'},
+];
+
+const LEG_METRICS=[
+  {v:'ltp',l:'LTP'},{v:'delta',l:'Delta (signed)'},{v:'abs_delta',l:'|Delta| (abs)'},
+  {v:'gamma',l:'Gamma'},{v:'abs_gamma',l:'|Gamma|'},
+  {v:'theta',l:'Theta'},{v:'abs_theta',l:'|Theta|'},
+  {v:'vega',l:'Vega'},{v:'abs_vega',l:'|Vega|'},
+  {v:'iv',l:'IV %'},{v:'pnl',l:'P&L (₹)'},{v:'pnl_pct',l:'P&L %'},
+  {v:'oi',l:'OI'},{v:'oi_change',l:'OI Change'},
+  {v:'volume',l:'Volume'},{v:'strike',l:'Strike'},
+  {v:'is_active',l:'Is Active? (bool)'},{v:'is_itm',l:'Is ITM? (bool)'},
+  {v:'moneyness',l:'Moneyness (ITM+/OTM−)'},
+];
+
+const MATCH_PARAMS=[
+  {v:'delta',l:'Delta (signed)'},{v:'abs_delta',l:'|Delta| (abs)'},
+  {v:'iv',l:'IV %'},{v:'theta',l:'Theta'},{v:'abs_theta',l:'|Theta|'},
+  {v:'vega',l:'Vega'},{v:'gamma',l:'Gamma'},{v:'ltp',l:'LTP / Premium'},
+  {v:'oi',l:'Open Interest'},{v:'strike',l:'Strike Price'},{v:'moneyness',l:'Moneyness'},
+];
+
+/* STRIKE SELECTIONS — full expanded set */
+const ALL_STRIKE_SELECTIONS=[
+  'atm','atm+1','atm-1','atm+2','atm-2','atm+3','atm-3',
+  'atm+4','atm-4','atm+5','atm-5',
+  'atm_points','atm_pct',   /* point/% offset from ATM */
+  'exact_strike',            /* literal strike price */
+  'delta',                   /* delta-based (independent per leg) */
+  'straddle_delta',          /* delta-based: same strike for CE & PE */
+  'gamma','iv','theta','vega','premium','oi','volume','otm_pct',
+  'max_pain',               /* closest to max pain */
+  'pcr_inflection',         /* strike where PCR flips */
+];
+const MATCH_STRIKE_SELECTIONS=['delta','abs_delta','iv','theta','abs_theta','vega','gamma','premium','oi','volume','otm_pct','strike','moneyness'];
+
+const ACTION_TYPES=[
+  {v:'simple_close_open_new',l:'Close &amp; Open New (Roll / Shift)'},
+  {v:'open_hedge',l:'Open Hedge Leg (no close)'},
+  {v:'close_leg',l:'Close Leg Only'},
+  {v:'partial_close_lots',l:'Partial Close — N Lots'},
+  {v:'reduce_by_pct',l:'Reduce Position by %'},
+  {v:'roll_to_next_expiry',l:'Roll to Next Expiry'},
+  {v:'convert_to_spread',l:'Convert to Spread (add wing)'},
+];
+
+const DYNAMIC_LEG_TAGS=[
+  'HIGHER_DELTA_LEG','LOWER_DELTA_LEG',
+  'MOST_PROFITABLE_LEG','LEAST_PROFITABLE_LEG',
+  'HIGHER_THETA_LEG','LOWER_THETA_LEG',
+  'HIGHER_IV_LEG','LOWER_IV_LEG',
+  'DEEPEST_ITM_LEG','MOST_OTM_LEG',
+];
+
+/* ========== STATE ========== */
+const ST={cnt:{entry:0,adj:0,exit:0},tags:[],symMap:{},dirty:false,preserve:{}};
+
+/* ========== UTILS ========== */
+const $=id=>document.getElementById(id);
+const esc=s=>String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const gv=id=>$(id)?.value?.trim()||'';
+const sv=(id,v)=>{const e=$(id);if(e)e.value=v??'';};
+
+function showAlert(msg,type='success'){
+  const b=$('alertBox');
+  b.className=`alert alert-${type} show`;b.innerHTML=msg;
+  clearTimeout(b._t);b._t=setTimeout(()=>b.classList.remove('show'),5000);
+}
+function toggleDay(btn){btn.classList.toggle('active');markDirty();}
+function getActiveDays(){return[...document.querySelectorAll('#schDaysBtns .day-btn.active')].map(b=>b.dataset.day);}
+function markDirty(){ST.dirty=true;$('dirtyDot')?.classList.add('show');}
+function clearDirty(){ST.dirty=false;$('dirtyDot')?.classList.remove('show');}
+function autoSave(){
+  try{
+    const json = JSON.stringify(buildJSON());
+    sessionStorage.setItem('sb_v4', json);
+    sessionStorage.setItem('sb_ts', Date.now());
+  } catch(e){
+    if(e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED'){
+      console.warn('sessionStorage quota exceeded — auto-save skipped', e);
+      showAlert('⚠️ Auto-save skipped: browser storage full. Use Save button to persist to server.', 'alert-warning');
+    } else {
+      console.error('autoSave failed:', e);
+    }
+  }
+}
+setInterval(()=>{if(ST.dirty)autoSave();},30000);
+
+// BUG-001 FIX: saveStrategy() now POSTs to server.
+async function saveStrategy(){
+  updateJSONPreview();
+  const config = buildJSON();
+  const name = config.name || config.identity?.name || '';
+  if(!name){showAlert('❌ Strategy name is required before saving.','alert-danger');return;}
+
+  showAlert('⏳ Saving to server…','alert-info');
+  try{
+    const resp = await fetch('/dashboard/strategy/config/save-all',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'include',
+      body:JSON.stringify(config),
+    });
+    if(!resp.ok){
+      const err = await resp.json().catch(()=>({detail:'Unknown server error'}));
+      showAlert(`❌ Save failed: ${err.detail || resp.statusText}`,'alert-danger');
+      return;
+    }
+    const result = await resp.json();
+    autoSave();   // also keep local backup
+    clearDirty();
+    showAlert(`✅ Strategy "${result.name}" saved to server (${result.file})`, 'alert-success');
+  }catch(e){
+    console.error('saveStrategy error:', e);
+    showAlert(`❌ Network error: ${e.message}`,'alert-danger');
+  }
+}
+
+/* ========== LOAD EXISTING STRATEGY FROM SERVER ========== */
+async function loadStrategyFromServer(name) {
+  if (!name) return;
+  showAlert(`⏳ Loading strategy "${name}"...`, 'alert-info');
+  try {
+    const resp = await fetch(`/dashboard/strategy/config/${encodeURIComponent(name)}`, { credentials: 'include' });
+    if (!resp.ok) throw new Error(`Failed to load: ${resp.statusText}`);
+    const config = await resp.json();
+
+    // Clear existing form
+    resetForm(true); // silent reset without confirm
+
+    // Populate identity
+    if (config.name) sv('sName', config.name);
+    if (config.id) sv('sId', config.id);
+    if (config.type) sv('sType', config.type);
+    if (config.description) sv('sDesc', config.description);
+
+    // Identity object
+    const ident = config.identity || {};
+    ST.preserve = {
+      paper_mode: config.paper_mode,
+      test_mode: config.test_mode,
+      instrument_type: ident.instrument_type,
+      identity_paper_mode: ident.paper_mode,
+      identity_test_mode: ident.test_mode
+    };
+    if (ident.exchange) sv('sExchange', ident.exchange);
+    if (ident.underlying) ST.pendingSymbol = ident.underlying;
+    if (ident.product_type) sv('sProductType', ident.product_type);
+    if (ident.order_type) sv('sOrderType', ident.order_type);
+    if (ident.lots) sv('sLots', ident.lots);
+    // db_file and db_path are ignored – no UI elements exist for them.
+
+    // Apply symbol immediately
+    if (ident.underlying) {
+      const symEl = $('sSymbol');
+      if (symEl) symEl.value = ident.underlying;
+      await onSymbolChange();
+    }
+
+    // Schedule
+    const sched = config.schedule || {};
+    if (sched.frequency) sv('schFreq', sched.frequency);
+    if (sched.entry_time) sv('schEntry', sched.entry_time);
+    if (sched.entry_window_end) sv('schEntryEnd', sched.entry_window_end);
+    if (sched.exit_time) sv('schExit', sched.exit_time);
+    if (sched.expiry_mode) sv('schExpiry', sched.expiry_mode);
+    if (sched.dte_min) sv('schDteMin', sched.dte_min);
+    if (sched.dte_max) sv('schDteMax', sched.dte_max);
+    if (sched.square_off_before_min) sv('schSqoff', sched.square_off_before_min);
+    if (sched.max_reentries_per_day) sv('schMaxReentry', sched.max_reentries_per_day);
+    if (sched.entry_on_expiry_day !== undefined) sv('schEntryExpiry', sched.entry_on_expiry_day ? 'yes' : 'no');
+
+    // Active days
+    if (sched.active_days && Array.isArray(sched.active_days)) {
+      document.querySelectorAll('#schDaysBtns .day-btn').forEach(btn => {
+        const day = btn.dataset.day;
+        btn.classList.toggle('active', sched.active_days.includes(day));
+      });
+    }
+
+    // Timing (entry window start/end are in identity section, but also in config.timing)
+    const timing = config.timing || {};
+    if (timing.entry_window_start) sv('schEntry', timing.entry_window_start);
+    if (timing.entry_window_end) sv('schEntryEnd', timing.entry_window_end);
+    if (timing.eod_exit_time) sv('schExit', timing.eod_exit_time);
+
+    // Entry sequence
+    if (config.entry && config.entry.entry_sequence) sv('sEntrySeq', config.entry.entry_sequence);
+
+    // Global entry conditions
+    const entryGlobal = config.entry?.global_conditions || [];
+    entryGlobal.forEach(cond => addCond('entryCombinedList', cond.parameter, cond.comparator, cond.value, cond.value2, cond.join));
+
+    // Entry legs
+    const entryLegs = config.entry?.legs || [];
+    // Remove default leg
+    document.querySelectorAll('#entryLegs .leg-card').forEach(card => card.remove());
+    ST.cnt.entry = 0;
+    ST.tags = ST.tags.filter(t => t.section !== 'entry');
+    for (const leg of entryLegs) {
+      addEntryLeg(); // creates a new leg card with default values
+      const id = ST.cnt.entry; // after add, this is the new ID
+      const card = $(`lc_entry_${id}`);
+      if (!card) continue;
+
+      // Set fields (use setField to update DOM values)
+      setField(card, 'leg-label', leg.label || leg.tag);
+      setField(card, 'leg-group', leg.group || '');
+      setField(card, 'instrument', leg.instrument || 'OPT');
+      setField(card, 'leg-expiry', leg.expiry || 'strategy_default');
+      setField(card, 'side', leg.side || 'SELL');
+      setField(card, 'opt-type', leg.option_type || 'CE');
+      setField(card, 'lots', leg.lots || 1);
+      setField(card, 'order-type', leg.order_type || '');
+      setField(card, 'strike-mode', leg.strike_mode || 'standard');
+      setField(card, 'strike-sel', leg.strike_selection || 'delta');
+      setField(card, 'strike-val', leg.strike_value || '');
+
+      // Trigger UI updates for side and option type
+      onSide('entry', id, leg.side || 'SELL');
+      if (leg.option_type) {
+        onOptType('entry', id, leg.option_type);
+      }
+
+      // If instrument FUT, trigger instrument change
+      if (leg.instrument === 'FUT') {
+        onInstrumentChange('entry', id, 'FUT');
+      }
+
+      // IF conditions
+      const ifConds = leg.conditions || [];
+      ifConds.forEach(cond => addCond(`cl_entry_if_${id}`, cond.parameter, cond.comparator, cond.value, cond.value2, cond.join));
+
+      // ELSE
+      if (leg.else_enabled) {
+        const elseCheck = $(`use_else_entry_${id}`);
+        if (elseCheck) {
+          elseCheck.checked = true;
+          onElseToggle('entry', id);
+        }
+        if (leg.else_conditions) {
+          leg.else_conditions.forEach(cond => addCond(`cl_entry_else_${id}`, cond.parameter, cond.comparator, cond.value, cond.value2, cond.join));
+        }
+        if (leg.else_action) {
+          setField(card, 'else-side', leg.else_action.side || 'SELL');
+          setField(card, 'else-opt-type', leg.else_action.option_type || 'CE');
+          setField(card, 'else-strike-sel', leg.else_action.strike_selection || 'delta');
+          setField(card, 'else-strike-val', leg.else_action.strike_value || '');
+          setField(card, 'else-lots', leg.else_action.lots || 1);
+          setField(card, 'else-order-type', leg.else_action.order_type || '');
+        }
+      }
+    }
+
+    
+    // Adjustment rules (now fully restored)
+    const adjRules = config.adjustment?.rules || [];
+    document.querySelectorAll('#adjLegs .leg-card').forEach(card => card.remove());
+    ST.cnt.adj = 0;
+    ST.tags = ST.tags.filter(t => t.section !== 'adj');
+    for (const rule of adjRules) {
+      addAdjLeg();
+      const id = ST.cnt.adj;
+      const card = $(`lc_adj_${id}`);
+      if (!card) continue;
+
+      setField(card, 'adj-name', rule.name || `Adjustment ${id}`);
+      setField(card, 'adj-priority', rule.priority || id);
+      setField(card, 'adj-maxday', rule.max_per_day || 5);
+      setField(card, 'adj-maxtotal', rule.max_total || '');
+      setField(card, 'adj-cooldown', rule.cooldown_sec || 60);
+      setField(card, 'adj-retriger', rule.retriger ? 'yes' : 'no');
+      setField(card, 'adj-leg-guard', rule.leg_guard || '');
+
+      const ifConds = rule.conditions || [];
+      ifConds.forEach(cond => addCond(`cl_adj_${id}`, cond.parameter, cond.comparator, cond.value, cond.value2, cond.join));
+
+      const ifAction = rule.action || {};
+      setField(card, 'adj-action-type', ifAction.type || 'close_leg');
+      const actSel = card.querySelector('[data-role="adj-action-type"]');
+      if (actSel) {
+        onAdjActionChange(id, 'if', actSel.value);
+        // Populate the IF action detail with saved data
+        populateAdjActionDetail(card, 'if', ifAction);
+      }
+
+      if (rule.else_enabled) {
+        const elseCheck = $(`use_else_adj_${id}`);
+        if (elseCheck) {
+          elseCheck.checked = true;
+          onElseToggle('adj', id);
+        }
+        if (rule.else_conditions) {
+          rule.else_conditions.forEach(cond => addCond(`cl_adj_else_${id}`, cond.parameter, cond.comparator, cond.value, cond.value2, cond.join));
+        }
+        if (rule.else_action) {
+          setField(card, 'adj-else-action-type', rule.else_action.type || 'close_leg');
+          const elseActSel = card.querySelector('[data-role="adj-else-action-type"]');
+          if (elseActSel) {
+            onAdjActionChange(id, 'else', elseActSel.value);
+            // Populate the ELSE action detail
+            populateAdjActionDetail(card, 'else', rule.else_action);
+          }
+        }
+      }
+    }
+
+
+    // Exit rules (unchanged, not affecting tags)
+    const exitCfg = config.exit || {};
+    if (exitCfg.profit_target) {
+      if (exitCfg.profit_target.amount) sv('exitTargetAmt', exitCfg.profit_target.amount);
+      if (exitCfg.profit_target.pct) sv('exitTargetPct', exitCfg.profit_target.pct);
+      if (exitCfg.profit_target.action) sv('exitTargetAction', exitCfg.profit_target.action);
+      if (exitCfg.profit_target.lots) sv('exitTargetLots', exitCfg.profit_target.lots);
+    }
+    if (exitCfg.stop_loss) {
+      if (exitCfg.stop_loss.amount) sv('exitSlAmt', exitCfg.stop_loss.amount);
+      if (exitCfg.stop_loss.pct) sv('exitSlPct', exitCfg.stop_loss.pct);
+      if (exitCfg.stop_loss.action) sv('exitSlAction', exitCfg.stop_loss.action);
+      if (exitCfg.stop_loss.allow_reentry) sv('exitSlReentry', exitCfg.stop_loss.allow_reentry ? 'yes' : 'no');
+    }
+    if (exitCfg.trailing) {
+      if (exitCfg.trailing.trail_amount) sv('exitTrailAmt', exitCfg.trailing.trail_amount);
+      if (exitCfg.trailing.lock_in_at) sv('exitLockIn', exitCfg.trailing.lock_in_at);
+      if (exitCfg.trailing.trail_step) sv('exitTrailStep', exitCfg.trailing.trail_step);
+      if (exitCfg.trailing.step_trigger) sv('exitTrailStepTrigger', exitCfg.trailing.step_trigger);
+    }
+    if (exitCfg.profit_steps) {
+      if (exitCfg.profit_steps.step_size) sv('profitStepSize', exitCfg.profit_steps.step_size);
+      if (exitCfg.profit_steps.max_steps) sv('profitStepMax', exitCfg.profit_steps.max_steps);
+      if (exitCfg.profit_steps.action) sv('profitStepAction', exitCfg.profit_steps.action);
+    }
+    if (exitCfg.risk) {
+      if (exitCfg.risk.max_loss_per_day) sv('rMaxLoss', exitCfg.risk.max_loss_per_day);
+      if (exitCfg.risk.max_delta) sv('rMaxDelta', exitCfg.risk.max_delta);
+      if (exitCfg.risk.delta_breach_action) sv('rDeltaAction', exitCfg.risk.delta_breach_action);
+      if (exitCfg.risk.max_iv) sv('rMaxIv', exitCfg.risk.max_iv);
+      if (exitCfg.risk.min_iv) sv('rMinIv', exitCfg.risk.min_iv);
+      if (exitCfg.risk.max_lots) sv('rMaxLots', exitCfg.risk.max_lots);
+      if (exitCfg.risk.breakeven_buffer) sv('rBreakevenBuffer', exitCfg.risk.breakeven_buffer);
+    }
+    if (exitCfg.time) {
+      if (exitCfg.time.strategy_exit_time) sv('exitTime', exitCfg.time.strategy_exit_time);
+      if (exitCfg.time.expiry_day_action) sv('expiryDayAction', exitCfg.time.expiry_day_action);
+      if (exitCfg.time.expiry_day_time) sv('expiryDayTime', exitCfg.time.expiry_day_time);
+      if (exitCfg.time.roll_target) sv('rollTarget', exitCfg.time.roll_target);
+    }
+    const combined = exitCfg.combined_conditions?.rules || [];
+    combined.forEach(cond => addCond('exitCombinedList', cond.parameter, cond.comparator, cond.value, cond.value2, cond.join));
+
+    const legRules = exitCfg.leg_rules || [];
+    document.querySelectorAll('#exitLegs .leg-card').forEach(card => card.remove());
+    ST.cnt.exit = 0;
+    ST.tags = ST.tags.filter(t => t.section !== 'exit');
+    for (const rule of legRules) {
+      addExitLeg();
+      const id = ST.cnt.exit;
+      const card = $(`lc_exit_${id}`);
+      if (!card) continue;
+      setField(card, 'exit-ref', rule.exit_leg_ref || 'all');
+      setField(card, 'exit-action', rule.action || 'close_leg');
+      setField(card, 'exit-group', rule.group || '');
+      const conds = rule.conditions || [];
+      conds.forEach(cond => addCond(`cl_exit_${id}`, cond.parameter, cond.comparator, cond.value, cond.value2, cond.join));
+    }
+
+    updateSummaries();
+    showAlert(`✅ Strategy "${name}" loaded successfully`, 'alert-success');
+  } catch (e) {
+    console.error('load error:', e);
+    showAlert(`❌ Load failed: ${e.message}`, 'alert-danger');
+  }
+}
+
+// Helper to set a field value inside a card
+function setField(card, role, value) {
+  if (value === undefined || value === null) return;
+  const el = card.querySelector(`[data-role="${role}"]`);
+  if (el) {
+    if (el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      el.value = value;
+    } else {
+      el.textContent = value;
+    }
+  }
+}
+
+/* ========== PARAMS ========== */
+function getParams(){
+  let p=[...BASE_PARAMS];
+  ST.tags.filter(t=>t.section==='entry').forEach(t=>{
+    LEG_METRICS.forEach(m=>p.push({v:`tag.${t.tag}.${m.v}`,l:`${t.tag} ▸ ${m.l}`,cat:`Leg: ${t.tag}`}));
+  });
+  return p;
+}
+function paramOpts(cur=''){
+  const cats={};getParams().forEach(p=>{if(!cats[p.cat])cats[p.cat]=[];cats[p.cat].push(p);});
+  let h='<option value="">— Select Parameter —</option>';
+  for(const c in cats){
+    h+=`<optgroup label="${esc(c)}">`;
+    cats[c].forEach(p=>h+=`<option value="${p.v}"${p.v===cur?' selected':''}>${esc(p.l)}</option>`);
+    h+='</optgroup>';
+  }
+  return h;
+}
+function opOpts(cur='>'){return OPERATORS.map(o=>`<option value="${o.v}"${o.v===cur?' selected':''}>${esc(o.l)}</option>`).join('');}
+const STRIKE_LABELS={straddle_delta:'straddle_delta (same strike CE+PE)',gamma:'gamma',abs_theta:'|theta| (abs)',atm_points:'atm_points (fixed offset)',atm_pct:'atm_pct (% offset)',exact_strike:'exact_strike (literal)',otm_pct:'otm_pct (% OTM)',max_pain:'max_pain',pcr_inflection:'pcr_inflection'};
+function strikeOpts(cur='atm',pool=ALL_STRIKE_SELECTIONS){return pool.map(s=>`<option value="${s}"${s===cur?' selected':''}>${STRIKE_LABELS[s]||s}</option>`).join('');}
+function matchParamOpts(cur='delta'){return MATCH_PARAMS.map(p=>`<option value="${p.v}"${p.v===cur?' selected':''}>${esc(p.l)}</option>`).join('');}
+
+/* ========== TAG MANAGEMENT ========== */
+function mkTag(sec,opt,id){
+  if(sec==='entry') return`LEG@${id}_${opt}`;
+  if(sec==='adj') return`ADJ@${id}`;
+  return`EXIT@${id}`;
+}
+function regTag(id,tag,sec,opt='',side=''){
+  ST.tags=ST.tags.filter(x=>!(x.id===id&&x.section===sec));
+  ST.tags.push({id,tag,section:sec,opt,side});
+}
+function unregTag(id,sec){ST.tags=ST.tags.filter(x=>!(x.id===id&&x.section===sec));}
+function closeLegOpts(exclude=''){
+  let h='<option value="">— Select Leg —</option>';
+  const et=ST.tags.filter(t=>t.section==='entry'&&t.tag!==exclude);
+  if(et.length){h+='<optgroup label="Entry Legs">';et.forEach(t=>h+=`<option value="${t.tag}">${t.tag} (${t.side} ${t.opt})</option>`);h+='</optgroup>';}
+  h+='<optgroup label="Dynamic Selectors">';DYNAMIC_LEG_TAGS.forEach(t=>h+=`<option value="${t}">${t.replace(/_/g,' ')}</option>`);h+='</optgroup>';
+  return h;
+}
+function refLegOpts(exclude=''){
+  let h='<option value="">— Reference Leg —</option>';
+  ST.tags.filter(t=>t.section==='entry'&&t.tag!==exclude).forEach(t=>h+=`<option value="${t.tag}">${t.tag} (${t.side} ${t.opt})</option>`);
+  DYNAMIC_LEG_TAGS.forEach(t=>h+=`<option value="${t}">${t.replace(/_/g,' ')}</option>`);
+  return h;
+}
+function tagOpts(){
+  const et=ST.tags.filter(t=>t.section==='entry');
+  if(!et.length) return'<option value="">No entry legs yet</option>';
+  return'<option value="">— Select Leg —</option>'+et.map(t=>`<option value="${t.tag}">${t.tag}</option>`).join('');
+}
+
+/* ========== CONDITIONS ========== */
+function addCond(containerId,pv='',ov='>',vv='',vv2='',jv='AND'){
+  const c=$(containerId);if(!c) return;
+  if(c.querySelectorAll('.simple-cond-row').length>0){
+    const j=document.createElement('div');j.className='cond-join-indicator';
+    const joinVal=(jv==='OR'?'OR':'AND');
+    const joinColor=joinVal==='OR'?'var(--accent)':'var(--warning)';
+    j.innerHTML=`<span class="join-badge" onclick="toggleJoin(this)" data-join="${joinVal}" style="color:${joinColor};">${joinVal}</span>`;c.appendChild(j);
+  }
+  const isBet=ov==='between'||ov==='not_between';
+  const row=document.createElement('div');row.className='simple-cond-row';
+  row.innerHTML=`
+    <select class="f-select" data-role="param">${paramOpts(pv)}</select>
+    <select class="f-select" data-role="op" onchange="onOpChange(this)">${opOpts(ov)}</select>
+    <div data-role="val-wrap">${isBet?`<div class="val-row"><input class="f-input" data-role="val" placeholder="Min" value="${esc(vv)}"><input class="f-input" data-role="val2" placeholder="Max" value="${esc(vv2)}"></div>`:`<input class="f-input" data-role="val" value="${esc(vv)}" placeholder="Value">`}</div>
+    <button class="cond-rm" onclick="removeCond(this)">✕</button>`;
+  c.appendChild(row);markDirty();
+}
+function onOpChange(sel){
+  const wrap=sel.closest('.simple-cond-row').querySelector('[data-role="val-wrap"]');
+  const isBet=sel.value==='between'||sel.value==='not_between';
+  const noVal=['is_true','is_false'].includes(sel.value);
+  wrap.innerHTML=noVal?`<span style="color:var(--muted);font-size:11px;padding:6px;">no value needed</span>`:isBet?`<div class="val-row"><input class="f-input" data-role="val" placeholder="Min"><input class="f-input" data-role="val2" placeholder="Max"></div>`:`<input class="f-input" data-role="val" placeholder="Value">`;
+}
+function removeCond(btn){
+  const row=btn.closest('.simple-cond-row');
+  const c=row.parentElement;
+  const prev=row.previousElementSibling;const next=row.nextElementSibling;
+  if(prev?.classList.contains('cond-join-indicator')) prev.remove();
+  else if(next?.classList.contains('cond-join-indicator')) next.remove();
+  row.remove();markDirty();
+}
+function toggleJoin(badge){
+  const nxt=badge.getAttribute('data-join')==='AND'?'OR':'AND';
+  badge.setAttribute('data-join',nxt);badge.textContent=nxt;
+  badge.style.color=nxt==='OR'?'var(--accent)':'var(--warning)';markDirty();
+}
+function extractCondsList(container){
+  if(!container) return[];
+  return[...container.querySelectorAll('.simple-cond-row')].map((row,i)=>{
+    const p=row.querySelector('[data-role="param"]')?.value||'';
+    const op=row.querySelector('[data-role="op"]')?.value||'>';
+    const v=row.querySelector('[data-role="val"]')?.value||'';
+    const v2=row.querySelector('[data-role="val2"]')?.value||'';
+    const prevEl=row.previousElementSibling;
+    const join=i>0?(prevEl?.classList.contains('cond-join-indicator')?prevEl.querySelector('.join-badge')?.getAttribute('data-join'):'AND')||'AND':undefined;
+    const c={parameter:p,comparator:op,value:v};if(v2)c.value2=v2;if(join)c.join=join;return c;
+  }).filter(c=>c.parameter&&c.parameter.trim()!==''); // skip rows where parameter was left blank
+}
+const extractConds=id=>extractCondsList($(id));
+
+/* ========== STRIKE MODE PANEL ========== */
+function strikeModeHtml(prefix, excludeClose='', showMatch=true){
+  const matchOpt=showMatch?`<option value="match_leg">Match Active Leg Parameter</option>`:'';
+  return`
+  <div class="stk-panel">
+    <div class="stk-panel-label">▸ Strike Selection Mode</div>
+    <div class="f-row c3">
+      <div class="f-group"><label class="f-label">Side</label>
+        <select class="f-select" data-role="${prefix}-side"><option value="SELL">SELL</option><option value="BUY">BUY</option></select>
+      </div>
+      <div class="f-group"><label class="f-label">Option Type</label>
+        <select class="f-select" data-role="${prefix}-opt">
+          <option value="CE">CE</option><option value="PE">PE</option>
+          <option value="MATCH_CLOSING">Same as Closing Leg</option>
+          <option value="MATCH_OPPOSITE">Opposite of Closing Leg</option>
+        </select>
+      </div>
+      <div class="f-group"><label class="f-label">Strike Mode</label>
+        <select class="f-select" data-role="${prefix}-stk-mode" onchange="onStrikeModeChange(this,'${prefix}','${excludeClose}')">
+          <option value="standard">Standard (ATM / Delta / Premium…)</option>
+          <option value="exact">Exact Strike Number</option>
+          <option value="atm_points">ATM ± Points Offset</option>
+          <option value="atm_pct">ATM ± % Offset</option>
+          ${matchOpt}
+        </select>
+      </div>
+    </div>
+
+    <!-- STANDARD -->
+    <div id="${prefix}-panel-standard">
+      <div class="f-row c3">
+        <div class="f-group"><label class="f-label">Strike Selection Method</label>
+          <select class="f-select" data-role="${prefix}-stk-sel">${strikeOpts('atm')}</select>
+        </div>
+        <div class="f-group"><label class="f-label">Value / Target</label>
+          <input class="f-input" data-role="${prefix}-stk-val" placeholder="e.g. 0.5 for delta, 80 for premium">
+          <div class="helper-text">Empty for ATM±n. delta/straddle_delta: 0.5 | theta: 15 (positive, auto sign) | gamma: 0.0003 | iv: 60 | premium: 100</div>
+        </div>
+        <div class="f-group"><label class="f-label">Order Type</label>
+          <select class="f-select" data-role="${prefix}-order"><option value="">Default</option><option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option></select>
+        </div>
+      </div>
+    </div>
+
+    <!-- EXACT STRIKE -->
+    <div id="${prefix}-panel-exact" class="stk-sub-panel">
+      <div class="info-box ib-orange" style="margin:6px 0;font-size:11px;">Enter the exact strike number you want to trade (e.g. 25700 for a skewed straddle).</div>
+      <div class="f-row c3">
+        <div class="f-group"><label class="f-label">Exact Strike Price</label>
+          <input class="f-input" data-role="${prefix}-stk-exact" type="number" placeholder="e.g. 25700" step="50">
+        </div>
+        <div class="f-group"><label class="f-label">Rounding (pts)</label>
+          <input class="f-input" data-role="${prefix}-stk-round" type="number" placeholder="e.g. 50" value="50">
+          <div class="helper-text">Round to nearest lot size if needed</div>
+        </div>
+        <div class="f-group"><label class="f-label">Order Type</label>
+          <select class="f-select" data-role="${prefix}-order"><option value="">Default</option><option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option></select>
+        </div>
+      </div>
+    </div>
+
+    <!-- ATM POINTS -->
+    <div id="${prefix}-panel-atm_points" class="stk-sub-panel">
+      <div class="info-box ib-teal" style="margin:6px 0;font-size:11px;">ATM ± fixed point offset. Example: ATM+100 when ATM=25500 → strike = 25600.</div>
+      <div class="f-row c3">
+        <div class="f-group"><label class="f-label">Points Offset from ATM</label>
+          <input class="f-input" data-role="${prefix}-stk-pts" type="number" placeholder="e.g. 100 or −100">
+          <div class="helper-text">Positive = above ATM, negative = below ATM</div>
+        </div>
+        <div class="f-group"><label class="f-label">Rounding (pts)</label>
+          <input class="f-input" data-role="${prefix}-stk-round2" type="number" placeholder="50" value="50">
+        </div>
+        <div class="f-group"><label class="f-label">Order Type</label>
+          <select class="f-select" data-role="${prefix}-order"><option value="">Default</option><option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option></select>
+        </div>
+      </div>
+    </div>
+
+    <!-- ATM PCT -->
+    <div id="${prefix}-panel-atm_pct" class="stk-sub-panel">
+      <div class="info-box ib-teal" style="margin:6px 0;font-size:11px;">ATM ± percentage offset. Example: ATM+0.5% when ATM=25000 → strike ≈ 25125.</div>
+      <div class="f-row c3">
+        <div class="f-group"><label class="f-label">% Offset from ATM</label>
+          <input class="f-input" data-role="${prefix}-stk-pct" type="number" step="0.1" placeholder="e.g. 0.5 or −0.5">
+          <div class="helper-text">Positive = OTM CE direction, negative = OTM PE direction</div>
+        </div>
+        <div class="f-group"><label class="f-label">Rounding (pts)</label>
+          <input class="f-input" data-role="${prefix}-stk-round3" type="number" placeholder="50" value="50">
+        </div>
+        <div class="f-group"><label class="f-label">Order Type</label>
+          <select class="f-select" data-role="${prefix}-order"><option value="">Default</option><option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option></select>
+        </div>
+      </div>
+    </div>
+
+    <!-- MATCH ACTIVE LEG -->
+    <div id="${prefix}-panel-match_leg" class="stk-sub-panel">
+      <div class="info-box ib-accent" style="margin:6px 0;font-size:11px;">
+        📌 Find the strike whose <b>selected parameter</b> most closely matches the <b>reference leg's live value</b> at adjustment time. Used for delta neutralization, IV matching, etc.
+      </div>
+      <div class="f-row c2">
+        <div class="f-group"><label class="f-label">Reference Leg (value source)</label>
+          <select class="f-select" data-role="${prefix}-ref-leg" style="border-color:rgba(24,201,122,.35);">${refLegOpts(excludeClose)}</select>
+          <div class="helper-text">The live parameter of this leg becomes the target</div>
+        </div>
+        <div class="f-group"><label class="f-label">Match Parameter</label>
+          <select class="f-select" data-role="${prefix}-match-param">${matchParamOpts('abs_delta')}</select>
+          <div class="helper-text">e.g. |Delta| → new leg's |delta| ≈ reference leg's |delta|</div>
+        </div>
+      </div>
+      <div class="f-row c3">
+        <div class="f-group"><label class="f-label">Offset (± add to target)</label>
+          <input class="f-input" data-role="${prefix}-match-offset" placeholder="0.00" value="0">
+          <div class="helper-text">e.g. 0.05 = match + small buffer</div>
+        </div>
+        <div class="f-group"><label class="f-label">Multiplier (scale target)</label>
+          <input class="f-input" data-role="${prefix}-match-mult" placeholder="1.0" value="1.0">
+          <div class="helper-text">1.0 = exact, 0.9 = 90% of ref value</div>
+        </div>
+        <div class="f-group"><label class="f-label">Order Type</label>
+          <select class="f-select" data-role="${prefix}-order"><option value="">Default</option><option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option></select>
+        </div>
+      </div>
+    </div>
+
+    <div class="f-row c2" style="margin-top:8px;margin-bottom:0;">
+      <div class="f-group"><label class="f-label">Lots</label>
+        <input class="f-input" data-role="${prefix}-lots" type="number" value="1" min="1">
+      </div>
+    </div>
+  </div>`;
+}
+
+function onStrikeModeChange(sel,prefix,excludeClose=''){
+  const mode=sel.value;
+  ['standard','exact','atm_points','atm_pct','match_leg'].forEach(m=>{
+    const p=document.getElementById(`${prefix}-panel-${m}`);
+    if(p) p.style.display=m===mode?'block':'none';
+  });
+  if(mode==='match_leg'){
+    const refSel=document.querySelector(`#${prefix}-panel-match_leg [data-role="${prefix}-ref-leg"]`);
+    if(refSel) refSel.innerHTML=refLegOpts(excludeClose);
+  }
+}
+
+function extractStrikeConfig(prefix){
+  const mode=document.querySelector(`[data-role="${prefix}-stk-mode"]`)?.value||'standard';
+  const side=document.querySelector(`[data-role="${prefix}-side"]`)?.value||'SELL';
+  const opt=document.querySelector(`[data-role="${prefix}-opt"]`)?.value||'CE';
+  const lots=parseInt(document.querySelector(`[data-role="${prefix}-lots"]`)?.value)||1;
+  const order=document.querySelector(`[data-role="${prefix}-order"]`)?.value||'';
+  const base={side,option_type:opt,lots,order_type:order,strike_mode:mode};
+  if(mode==='standard') return{...base,strike_selection:document.querySelector(`[data-role="${prefix}-stk-sel"]`)?.value||'atm',strike_value:document.querySelector(`[data-role="${prefix}-stk-val"]`)?.value||''};
+  if(mode==='exact') return{...base,exact_strike:parseFloat(document.querySelector(`[data-role="${prefix}-stk-exact"]`)?.value)||0,rounding:parseFloat(document.querySelector(`[data-role="${prefix}-stk-round"]`)?.value)||50};
+  if(mode==='atm_points') return{...base,atm_offset_points:parseFloat(document.querySelector(`[data-role="${prefix}-stk-pts"]`)?.value)||0,rounding:parseFloat(document.querySelector(`[data-role="${prefix}-stk-round2"]`)?.value)||50};
+  if(mode==='atm_pct') return{...base,atm_offset_pct:parseFloat(document.querySelector(`[data-role="${prefix}-stk-pct"]`)?.value)||0,rounding:parseFloat(document.querySelector(`[data-role="${prefix}-stk-round3"]`)?.value)||50};
+  if(mode==='match_leg') return{...base,strike_selection:'match_leg_param',match_leg:document.querySelector(`[data-role="${prefix}-ref-leg"]`)?.value||'',match_param:document.querySelector(`[data-role="${prefix}-match-param"]`)?.value||'delta',match_offset:parseFloat(document.querySelector(`[data-role="${prefix}-match-offset"]`)?.value)||0,match_multiplier:parseFloat(document.querySelector(`[data-role="${prefix}-match-mult"]`)?.value)||1};
+  return base;
+}
+
+/* ========== SWAP CARD ========== */
+function swapCardHtml(adjId,branch,si){
+  const pfx=`sc_${adjId}_${branch}_${si}`;
+  return`
+<div class="swap-card" data-swap-idx="${si}" id="${pfx}_card">
+  <div class="swap-card-head">
+    <span class="swap-card-title">↔ Leg Swap ${si+1}</span>
+    <button class="btn btn-danger btn-xs" onclick="removeSwapCard(this)">Remove</button>
+  </div>
+  <div class="f-row c2" style="margin-bottom:9px;">
+    <div class="f-group"><label class="f-label">Close This Leg</label>
+      <select class="f-select tag-sel" data-role="swap-close" onchange="onSwapCloseChange(this,'${pfx}')">${closeLegOpts()}</select>
+      <div class="helper-text">Leg to close / roll off</div>
+    </div>
+    <div class="f-group" style="align-self:end;"><div style="padding:7px 10px;background:rgba(240,112,48,.08);border:1px solid rgba(240,112,48,.2);border-radius:6px;font-size:11px;color:var(--orange);text-align:center;">↓ Then Open New</div></div>
+  </div>
+  ${strikeModeHtml(pfx,'',true)}
+</div>`;
+}
+
+function onSwapCloseChange(sel,pfx){
+  const refSel=document.querySelector(`#${pfx}-panel-match_leg [data-role="${pfx}-ref-leg"]`);
+  if(refSel) refSel.innerHTML=refLegOpts(sel.value);
+}
+
+/* ========== ADJ ACTION CHANGE ========== */
+function onAdjActionChange(id,branch,val){
+  const detail=$(`adj_${branch}_detail_${id}`);if(!detail) return;
+  if(val==='close_leg'){
+    detail.innerHTML=`<div class="f-row c2" style="margin-top:8px;">
+      <div class="f-group"><label class="f-label">Leg to Close</label>
+        <select class="f-select tag-sel" data-role="close-leg-sel">${closeLegOpts()}</select>
+        <div class="helper-text">Select which active leg to close on trigger</div>
+      </div></div>`;
+  }else if(val==='partial_close_lots'){
+    detail.innerHTML=`<div class="f-row c3" style="margin-top:8px;">
+      <div class="f-group"><label class="f-label">Target Leg</label>
+        <select class="f-select tag-sel" data-role="partial-leg-sel">${closeLegOpts()}</select></div>
+      <div class="f-group"><label class="f-label">Lots to Close</label>
+        <input class="f-input" data-role="partial-lots" type="number" value="1" min="1"></div>
+      <div class="f-group"><label class="f-label">Keep Remaining?</label>
+        <select class="f-select" data-role="partial-keep"><option value="yes">Yes – hold rest</option><option value="no">No – close all if possible</option></select></div>
+    </div>`;
+  }else if(val==='reduce_by_pct'){
+    detail.innerHTML=`<div class="f-row c2" style="margin-top:8px;">
+      <div class="f-group"><label class="f-label">Target Leg</label>
+        <select class="f-select tag-sel" data-role="reduce-leg-sel">${closeLegOpts()}</select></div>
+      <div class="f-group"><label class="f-label">Reduce By %</label>
+        <input class="f-input" data-role="reduce-pct" type="number" value="50" min="1" max="100">
+        <div class="helper-text">e.g. 50 = close half the position</div>
+      </div></div>`;
+  }else if(val==='open_hedge'){
+    detail.innerHTML=`<div style="font-size:11px;color:var(--sub);margin:7px 0;">Open a new hedge leg without closing any existing positions:</div>${strikeModeHtml(`hedge_${id}_${branch}`,'',false)}`;
+  }else if(val==='roll_to_next_expiry'){
+    detail.innerHTML=`<div class="f-row c3" style="margin-top:8px;">
+      <div class="f-group"><label class="f-label">Leg to Roll</label>
+        <select class="f-select tag-sel" data-role="roll-leg-sel">${closeLegOpts()}</select></div>
+      <div class="f-group"><label class="f-label">Roll To Expiry</label>
+        <select class="f-select" data-role="roll-target-expiry">
+          <option value="weekly_next">Next Weekly</option><option value="monthly_next">Next Monthly</option><option value="weekly_current">Current Week</option>
+        </select></div>
+      <div class="f-group"><label class="f-label">Same Strike?</label>
+        <select class="f-select" data-role="roll-same-strike">
+          <option value="yes">Yes – same strike</option><option value="atm">No – ATM of new expiry</option><option value="delta">No – match delta</option>
+        </select></div>
+    </div>`;
+  }else if(val==='convert_to_spread'){
+    detail.innerHTML=`<div class="info-box ib-success" style="font-size:11px;margin:7px 0;">Add a buy wing leg to convert naked position into a spread (Iron Condor wing, butterfly wing, etc.):</div>${strikeModeHtml(`spread_${id}_${branch}`,'',false)}`;
+  }else if(val==='simple_close_open_new'){
+    detail.innerHTML=`<div style="font-size:11px;color:var(--sub);margin:7px 0;">Each swap closes one leg and opens a replacement. "Match Active Leg" lets you neutralize delta/IV by targeting another leg's live value.</div>
+      <div id="swaps_${branch}_${id}">${swapCardHtml(id,branch,0)}</div>
+      <button class="btn btn-ghost btn-sm" style="margin-top:6px;width:100%;justify-content:center;border-style:dashed;" onclick="addSwapCard(${id},'${branch}')">＋ Add Leg Swap</button>`;
+  }
+}
+
+function addSwapCard(adjId,branch){
+  const c=$(`swaps_${branch}_${adjId}`);if(!c) return;
+  const idx=c.querySelectorAll('.swap-card').length;
+  c.insertAdjacentHTML('beforeend',swapCardHtml(adjId,branch,idx));markDirty();
+}
+function removeSwapCard(btn){
+  const card=btn.closest('.swap-card');const c=card?.parentElement;if(!c) return;
+  if(c.querySelectorAll('.swap-card').length<=1){showAlert('At least one swap required.','alert-error');return;}
+  card.remove();
+  c.querySelectorAll('.swap-card').forEach((sc,i)=>{sc.setAttribute('data-swap-idx',i);const l=sc.querySelector('.swap-card-title');if(l)l.textContent=`↔ Leg Swap ${i+1}`;});markDirty();
+}
+
+/* ========== ENTRY LEGS ========== */
+function addEntryLeg(){
+  ST.cnt.entry++;const id=ST.cnt.entry;
+  const tag=mkTag('entry','CE',id);regTag(id,tag,'entry','CE','SELL');
+  const pfx=`entry_${id}`;
+  const html=`
+<div class="leg-card lc-sell open" id="lc_entry_${id}">
+  <div class="leg-head" onclick="togLeg('entry_${id}')">
+    <div class="leg-head-left">
+      <span class="leg-expand" id="lx_entry_${id}">▶</span>
+      <span class="leg-tag" id="lt_entry_${id}">${tag}</span>
+      <span class="leg-name-text">Entry Leg ${id}</span>
+      <span class="badge b-sell" id="lbs_entry_${id}">SELL</span>
+      <span class="badge b-ce" id="lbt_entry_${id}">CE</span>
+      <span class="badge" id="lbi_entry_${id}" style="background:rgba(61,142,240,.1);color:var(--primary);">OPT</span>
+    </div>
+    <button class="leg-del" onclick="event.stopPropagation();removeLeg('entry',${id})">✕</button>
+  </div>
+  <div class="leg-body" id="lb_entry_${id}">
+
+    <!-- IDENTITY -->
+    <div class="f-row c4" style="margin-bottom:12px;">
+      <div class="f-group"><label class="f-label">Leg Label</label>
+        <input class="f-input" data-role="leg-label" value="Leg ${id}" placeholder="e.g. Short CE">
+      </div>
+      <div class="f-group"><label class="f-label">Group / Spread Bucket</label>
+        <input class="f-input" data-role="leg-group" placeholder="e.g. Spread-1, Wing, Hedge" oninput="onLegGroupChange('entry',${id},this.value)">
+        <div class="helper-text">Group legs for batch exits (e.g. all in \'Wing\' group)</div>
+      </div>
+      <div class="f-group"><label class="f-label">Instrument Type</label>
+        <select class="f-select" data-role="instrument" onchange="onInstrumentChange('entry',${id},this.value)">
+          <option value="OPT">OPTION (CE / PE)</option>
+          <option value="FUT">FUTURES</option>
+        </select>
+      </div>
+      <div class="f-group"><label class="f-label">Leg Expiry</label>
+        <select class="f-select" data-role="leg-expiry">
+          <option value="strategy_default">Strategy Default</option>
+          <option value="weekly_current">Current Weekly</option>
+          <option value="weekly_next">Next Weekly</option>
+          <option value="monthly_current">Current Monthly</option>
+          <option value="monthly_next">Next Monthly</option>
+          <option value="custom">Custom (enter below)</option>
+        </select>
+        <div class="helper-text">Override strategy expiry per leg — use for calendars/diagonals</div>
+      </div>
+    </div>
+
+    <!-- IF CONDITIONS -->
+    <div class="simple-cond-area">
+      <div class="cond-section-title">IF Conditions — When to Enter this Leg</div>
+      <div class="helper-text" style="margin-bottom:7px;">Leave empty to always enter. Click AND/OR to toggle. Use |delta| params for unsigned comparisons.</div>
+      <div id="cl_entry_if_${id}"></div>
+      <button class="add-cond-btn" onclick="addCond('cl_entry_if_${id}')">＋ Add IF Condition</button>
+    </div>
+
+    <!-- IF EXECUTION -->
+    <div class="exec-section">
+      <div class="exec-section-title">Execution (IF Branch)</div>
+      <div id="opt_exec_${id}">
+        <!-- OPT fields -->
+        <div class="f-row c4" style="margin-bottom:0;">
+          <div class="f-group"><label class="f-label">Side</label>
+            <select class="f-select" data-role="side" onchange="onSide('entry',${id},this.value)">
+              <option value="SELL">SELL</option><option value="BUY">BUY</option>
+            </select>
+          </div>
+          <div class="f-group"><label class="f-label">Option Type</label>
+            <select class="f-select" data-role="opt-type" onchange="onOptType('entry',${id},this.value)">
+              <option value="CE">CE</option><option value="PE">PE</option>
+            </select>
+          </div>
+          <div class="f-group"><label class="f-label">Lots</label>
+            <input class="f-input" data-role="lots" type="number" value="1" min="1">
+          </div>
+          <div class="f-group"><label class="f-label">Order Override</label>
+            <select class="f-select" data-role="order-type"><option value="">Default</option><option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option></select>
+          </div>
+        </div>
+        <div class="f-row c2" style="margin-top:10px;margin-bottom:0;">
+          <div class="f-group"><label class="f-label">Strike Selection Mode</label>
+            <select class="f-select" data-role="strike-mode" onchange="onEntryStrikeModeChange(${id},this.value)">
+              <option value="standard">Standard (ATM / Delta / Premium…)</option>
+              <option value="exact">Exact Strike Number</option>
+              <option value="atm_points">ATM ± Points Offset</option>
+              <option value="atm_pct">ATM ± % Offset</option>
+            </select>
+          </div>
+          <div class="f-group" id="entry_stk_main_${id}"><label class="f-label">Strike Method</label>
+            <select class="f-select" data-role="strike-sel">${strikeOpts('delta')}</select>
+          </div>
+        </div>
+        <div id="entry_stk_extra_${id}">
+          <div class="f-row c2" style="margin-bottom:0;">
+            <div class="f-group"><label class="f-label">Strike Value / Target</label>
+              <input class="f-input" data-role="strike-val" placeholder="e.g. 0.5 for delta, 80 for premium">
+              <div class="helper-text">delta/straddle_delta: 0.5 | theta: 15 (positive) | gamma: 0.0003 | iv: 60</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="fut_exec_${id}" style="display:none;">
+        <!-- FUT fields -->
+        <div class="f-row c3">
+          <div class="f-group"><label class="f-label">Direction</label>
+            <select class="f-select" data-role="fut-side" onchange="onSide('entry',${id},this.value)"><option value="BUY">BUY (Long)</option><option value="SELL">SELL (Short)</option></select>
+          </div>
+          <div class="f-group"><label class="f-label">Lots</label>
+            <input class="f-input" data-role="lots" type="number" value="1" min="1">
+          </div>
+          <div class="f-group"><label class="f-label">Order Override</label>
+            <select class="f-select" data-role="order-type"><option value="">Default</option><option value="MARKET">MARKET</option><option value="LIMIT">LIMIT</option></select>
+          </div>
+        </div>
+        <div class="info-box ib-orange" style="font-size:11px;">Futures leg — no strike selection needed. Expiry from leg expiry selector above.</div>
+      </div>
+    </div>
+
+    <!-- ELSE TOGGLE -->
+    <div class="else-toggle-box" id="else_box_entry_${id}">
+      <div class="f-row c2">
+        <div class="f-group"><label class="f-label">Enable ELSE Branch?</label>
+          <div class="helper-text">Enter alternative leg if IF conditions fail</div>
+        </div>
+        <div class="f-group">
+          <div class="tog-wrap" style="margin-top:4px;">
+            <input type="checkbox" class="tog" id="use_else_entry_${id}" onchange="onElseToggle('entry',${id})">
+            <label class="tog-lbl" for="use_else_entry_${id}"></label>
+            <span class="tog-text" id="elseLbl_entry_${id}">Disabled</span>
+          </div>
+        </div>
+      </div>
+      <div id="else_content_entry_${id}" style="display:none;margin-top:10px;">
+        <div class="simple-cond-area" style="background:rgba(240,82,82,.04);border-color:rgba(240,82,82,.13);">
+          <div class="cond-section-title" style="color:var(--danger);">ELSE Conditions (optional)</div>
+          <div id="cl_entry_else_${id}"></div>
+          <button class="add-cond-btn" style="background:rgba(240,82,82,.05);border-color:rgba(240,82,82,.28);color:var(--danger);" onclick="addCond('cl_entry_else_${id}')">＋ Add ELSE Condition</button>
+        </div>
+        <div class="exec-section" style="background:rgba(240,82,82,.04);border-color:rgba(240,82,82,.13);">
+          <div class="exec-section-title" style="color:var(--danger);">ELSE Execution</div>
+          <div class="f-row c6">
+            <div class="f-group"><label class="f-label">Side</label>
+              <select class="f-select" data-role="else-side"><option value="SELL">SELL</option><option value="BUY">BUY</option></select>
+            </div>
+            <div class="f-group"><label class="f-label">Type</label>
+              <select class="f-select" data-role="else-opt-type"><option value="CE">CE</option><option value="PE">PE</option></select>
+            </div>
+            <div class="f-group"><label class="f-label">Strike Mode</label>
+              <select class="f-select" data-role="else-strike-sel">${strikeOpts('delta')}</select>
+            </div>
+            <div class="f-group"><label class="f-label">Strike Value</label>
+              <input class="f-input" data-role="else-strike-val" placeholder="e.g. 0.3">
+            </div>
+            <div class="f-group"><label class="f-label">Lots</label>
+              <input class="f-input" data-role="else-lots" type="number" value="1" min="1">
+            </div>
+            <div class="f-group"><label class="f-label">Order</label>
+              <select class="f-select" data-role="else-order-type"><option value="">Default</option><option value="MARKET">MARKET</option></select>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>`;
+  const w=document.createElement('div');w.innerHTML=html;
+  $('entryLegs').appendChild(w.firstElementChild);
+  updBadge('entry');refreshAdjAvail();updateSummaries();markDirty();
+}
+
+function onEntryStrikeModeChange(id,mode){
+  const mainGrp=$(`entry_stk_main_${id}`);
+  const extraGrp=$(`entry_stk_extra_${id}`);
+  if(!mainGrp||!extraGrp) return;
+  if(mode==='standard'){
+    mainGrp.style.display='';
+    extraGrp.innerHTML=`<div class="f-row c2" style="margin-bottom:0;"><div class="f-group"><label class="f-label">Strike Value / Target</label><input class="f-input" data-role="strike-val" placeholder="e.g. 0.5 for delta, 80 for premium"><div class="helper-text">delta/straddle_delta: 0.5 | theta: 15 (positive, auto sign) | gamma: 0.0003</div></div></div>`;
+  }else if(mode==='exact'){
+    mainGrp.style.display='none';
+    extraGrp.innerHTML=`<div class="info-box ib-orange" style="font-size:11px;margin-top:8px;">Enter exact strike (e.g. 25700 for skewed straddle bias).</div><div class="f-row c2" style="margin-bottom:0;"><div class="f-group"><label class="f-label">Exact Strike</label><input class="f-input" data-role="strike-val" type="number" placeholder="e.g. 25700" step="50"></div><div class="f-group"><label class="f-label">Rounding (pts)</label><input class="f-input" data-role="strike-round" type="number" value="50"></div></div>`;
+  }else if(mode==='atm_points'){
+    mainGrp.style.display='none';
+    extraGrp.innerHTML=`<div class="info-box ib-teal" style="font-size:11px;margin-top:8px;">Fixed point offset from ATM. e.g. +100 pts above ATM.</div><div class="f-row c2" style="margin-bottom:0;"><div class="f-group"><label class="f-label">Points from ATM</label><input class="f-input" data-role="strike-val" type="number" placeholder="e.g. 100 or -100"></div><div class="f-group"><label class="f-label">Rounding (pts)</label><input class="f-input" data-role="strike-round" type="number" value="50"></div></div>`;
+  }else if(mode==='atm_pct'){
+    mainGrp.style.display='none';
+    extraGrp.innerHTML=`<div class="info-box ib-teal" style="font-size:11px;margin-top:8px;">Percent offset from ATM. e.g. +0.5% above ATM.</div><div class="f-row c2" style="margin-bottom:0;"><div class="f-group"><label class="f-label">% from ATM</label><input class="f-input" data-role="strike-val" type="number" step="0.1" placeholder="e.g. 0.5"></div><div class="f-group"><label class="f-label">Rounding (pts)</label><input class="f-input" data-role="strike-round" type="number" value="50"></div></div>`;
+  }
+}
+
+function onInstrumentChange(sec,id,val){
+  const optExec=$(`opt_exec_${id}`);const futExec=$(`fut_exec_${id}`);
+  const badge=$(`lbi_entry_${id}`);
+  if(optExec) optExec.style.display=val==='OPT'?'block':'none';
+  if(futExec) futExec.style.display=val==='FUT'?'block':'none';
+  if(badge){badge.textContent=val;badge.style.color=val==='FUT'?'var(--warning)':'var(--primary)';}
+  // Hide CE/PE badge for futures
+  const typeBadge=$(`lbt_entry_${id}`);
+  if(typeBadge) typeBadge.style.display=val==='FUT'?'none':'inline-flex';
+  markDirty();
+}
+
+/* ========== ADJUSTMENT LEGS ========== */
+function addAdjLeg(){
+  if(!hasEntryLegs()){showAlert('⚠️ Add at least one Entry leg first.','alert-error');return;}
+  ST.cnt.adj++;const id=ST.cnt.adj;
+  regTag(id,mkTag('adj','',id),'adj');
+  const html=`
+<div class="leg-card lc-adj open" id="lc_adj_${id}">
+  <div class="leg-head" onclick="togLeg('adj_${id}')">
+    <div class="leg-head-left">
+      <span class="leg-expand" id="lx_adj_${id}">▶</span>
+      <span class="leg-tag" style="background:rgba(240,160,48,.1);border-color:rgba(240,160,48,.28);color:var(--warning);">ADJ@${id}</span>
+      <span class="leg-name-text">Adjustment Rule ${id}</span>
+    </div>
+    <button class="leg-del" onclick="event.stopPropagation();removeLeg('adj',${id})">✕</button>
+  </div>
+  <div class="leg-body" id="lb_adj_${id}">
+
+    <div class="f-row c4" style="margin-bottom:11px;">
+      <div class="f-group"><label class="f-label">Rule Name</label>
+        <input class="f-input" data-role="adj-name" value="Adjustment ${id}" placeholder="e.g. Delta Neutralize"></div>
+      <div class="f-group"><label class="f-label">Priority (lower = first)</label>
+        <input class="f-input" data-role="adj-priority" type="number" value="${id}" min="1"></div>
+      <div class="f-group"><label class="f-label">Max / Day</label>
+        <input class="f-input" data-role="adj-maxday" type="number" value="5" min="1"></div>
+      <div class="f-group"><label class="f-label">Max Total (lifetime)</label>
+        <input class="f-input" data-role="adj-maxtotal" type="number" placeholder="∞ unlimited">
+        <div class="helper-text">Leave empty for unlimited</div>
+      </div>
+    </div>
+    <div class="f-row c3" style="margin-bottom:12px;">
+      <div class="f-group"><label class="f-label">Cooldown (seconds)</label>
+        <input class="f-input" data-role="adj-cooldown" type="number" value="60" min="0"></div>
+      <div class="f-group"><label class="f-label">Re-trigger When Conditions Reset?</label>
+        <select class="f-select" data-role="adj-retriger">
+          <option value="no">No – fire once per trigger</option>
+          <option value="yes">Yes – repeat every check cycle when true</option>
+        </select>
+        <div class="helper-text">Use "Yes" for continuous delta-neutral loops</div>
+      </div>
+      <div class="f-group"><label class="f-label">Only If Leg Active</label>
+        <select class="f-select tag-sel" data-role="adj-leg-guard" style="width:100%;">
+          <option value="">No guard (always check)</option>
+          ${ST.tags.filter(t=>t.section==='entry').map(t=>`<option value="${t.tag}">Only if ${t.tag} active</option>`).join('')}
+        </select>
+        <div class="helper-text">Gate this rule on a specific leg still being open</div>
+      </div>
+    </div>
+
+    <div class="simple-cond-area" style="background:rgba(240,160,48,.04);border-color:rgba(240,160,48,.13);">
+      <div class="cond-section-title" style="color:var(--warning);">IF Conditions — When to Trigger</div>
+      <div class="helper-text" style="margin-bottom:7px;">Tip: use |Net Delta|, profit_step, time_current, breakeven_distance for common adj triggers.</div>
+      <div id="cl_adj_${id}"></div>
+      <button class="add-cond-btn" style="background:rgba(240,160,48,.05);border-color:rgba(240,160,48,.28);color:var(--warning);" onclick="addCond('cl_adj_${id}')">＋ Add Trigger Condition</button>
+    </div>
+
+    <div class="exec-section" style="background:rgba(240,160,48,.04);border-color:rgba(240,160,48,.13);">
+      <div class="exec-section-title" style="color:var(--warning);">IF Action</div>
+      <div class="f-row c2">
+        <div class="f-group"><label class="f-label">Action Type</label>
+          <select class="f-select" data-role="adj-action-type" onchange="onAdjActionChange(${id},'if',this.value)">
+            ${ACTION_TYPES.map(a=>`<option value="${a.v}">${a.l}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div id="adj_if_detail_${id}"></div>
+    </div>
+
+    <!-- ELSE -->
+    <div class="else-toggle-box" id="else_box_adj_${id}">
+      <div class="f-row c2">
+        <div class="f-group"><label class="f-label">Enable ELSE Branch?</label>
+          <div class="helper-text">Different action when IF conditions are false</div>
+        </div>
+        <div class="f-group">
+          <div class="tog-wrap" style="margin-top:4px;">
+            <input type="checkbox" class="tog" id="use_else_adj_${id}" onchange="onElseToggle('adj',${id})">
+            <label class="tog-lbl" for="use_else_adj_${id}"></label>
+            <span class="tog-text" id="elseLbl_adj_${id}">Disabled</span>
+          </div>
+        </div>
+      </div>
+      <div id="else_content_adj_${id}" style="display:none;margin-top:10px;">
+        <div class="simple-cond-area" style="background:rgba(240,82,82,.04);border-color:rgba(240,82,82,.13);">
+          <div class="cond-section-title" style="color:var(--danger);">ELSE Conditions (optional)</div>
+          <div id="cl_adj_else_${id}"></div>
+          <button class="add-cond-btn" style="background:rgba(240,82,82,.05);border-color:rgba(240,82,82,.28);color:var(--danger);" onclick="addCond('cl_adj_else_${id}')">＋ Add ELSE Condition</button>
+        </div>
+        <div class="exec-section" style="background:rgba(240,82,82,.04);border-color:rgba(240,82,82,.13);">
+          <div class="exec-section-title" style="color:var(--danger);">ELSE Action</div>
+          <div class="f-row c2"><div class="f-group"><label class="f-label">Action Type</label>
+            <select class="f-select" data-role="adj-else-action-type" onchange="onAdjActionChange(${id},'else',this.value)">
+              ${ACTION_TYPES.map(a=>`<option value="${a.v}">${a.l}</option>`).join('')}
+            </select>
+          </div></div>
+          <div id="adj_else_detail_${id}"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>`;
+  const w=document.createElement('div');w.innerHTML=html;
+  $('adjLegs').appendChild(w.firstElementChild);
+  updBadge('adj');updateSummaries();markDirty();
+  const actSel=document.querySelector(`#lc_adj_${id} [data-role="adj-action-type"]`);
+  if(actSel){actSel.value='simple_close_open_new';}
+  onAdjActionChange(id,'if','simple_close_open_new');
+}
+
+/* ========== EXIT LEGS ========== */
+function addExitLeg(){
+  ST.cnt.exit++;const id=ST.cnt.exit;regTag(id,mkTag('exit','',id),'exit');
+  const html=`
+<div class="leg-card lc-exit open" id="lc_exit_${id}">
+  <div class="leg-head" onclick="togLeg('exit_${id}')">
+    <div class="leg-head-left">
+      <span class="leg-expand" id="lx_exit_${id}">▶</span>
+      <span class="leg-tag" style="background:rgba(144,104,245,.1);border-color:rgba(144,104,245,.28);color:var(--accent);">EXIT@${id}</span>
+      <span class="leg-name-text">Exit Rule ${id}</span>
+    </div>
+    <button class="leg-del" onclick="event.stopPropagation();removeLeg('exit',${id})">✕</button>
+  </div>
+  <div class="leg-body" id="lb_exit_${id}">
+    <div class="f-row c3" style="margin-bottom:10px;">
+      <div class="f-group"><label class="f-label">Exit Applies To</label>
+        <select class="f-select tag-sel" data-role="exit-ref">
+          ${tagOpts()}<option value="all">All Legs</option><option value="group">Leg Group…</option>
+        </select>
+      </div>
+      <div class="f-group"><label class="f-label">Exit Action</label>
+        <select class="f-select" data-role="exit-action">
+          <option value="close_leg">Close This Leg</option>
+          <option value="close_all">Close All Positions</option>
+          <option value="reduce_50pct">Reduce 50%</option>
+          <option value="partial_lots">Close N Lots</option>
+          <option value="roll_next">Roll to Next Expiry</option>
+        </select>
+      </div>
+      <div class="f-group"><label class="f-label">Group Name (if above = group)</label>
+        <input class="f-input" data-role="exit-group" placeholder="e.g. Wing">
+      </div>
+    </div>
+    <div class="simple-cond-area" style="background:rgba(144,104,245,.04);border-color:rgba(144,104,245,.13);">
+      <div class="cond-section-title" style="color:var(--accent);">Exit Conditions (ANY triggers)</div>
+      <div id="cl_exit_${id}"></div>
+      <button class="add-cond-btn" style="background:rgba(144,104,245,.05);border-color:rgba(144,104,245,.28);color:var(--accent);" onclick="addCond('cl_exit_${id}')">＋ Add Exit Condition</button>
+    </div>
+  </div>
+</div>`;
+  const w=document.createElement('div');w.innerHTML=html;
+  $('exitLegs').appendChild(w.firstElementChild);updBadge('exit');updateSummaries();markDirty();
+}
+
+/* ========== COMMON ========== */
+function onSide(sec,id,v){
+  $(`lc_${sec}_${id}`)?.setAttribute('class',`leg-card lc-${v==='BUY'?'buy':'sell'} open`);
+  const b=$(`lbs_${sec}_${id}`);if(b){b.className=`badge b-${v.toLowerCase()}`;b.textContent=v;}
+  updateSummaries();markDirty();
+}
+function onOptType(sec,id,v){
+  const b=$(`lbt_${sec}_${id}`);if(b){b.className=`badge b-${v.toLowerCase()}`;b.textContent=v;}
+  const tag=mkTag(sec,v,id);const card=$(`lc_${sec}_${id}`);
+  const side=card?.querySelector('[data-role="side"]')?.value||'SELL';
+  regTag(id,tag,sec,v,side);
+  const el=$(`lt_${sec}_${id}`);if(el)el.textContent=tag;
+  updateSummaries();markDirty();
+}
+function onLegGroupChange(sec,id,val){
+  const badge=$(`lc_${sec}_${id}`)?.querySelector('.leg-group-badge');
+  if(val&&!badge){
+    const hd=$(`lc_${sec}_${id}`)?.querySelector('.leg-head-left');
+    if(hd){const b=document.createElement('span');b.className='leg-group-badge';b.id=`lgb_${sec}_${id}`;b.textContent=val;hd.appendChild(b);}
+  }else if(badge){badge.textContent=val||'';if(!val)badge.remove();}
+  markDirty();
+}
+function onElseToggle(sec,id){
+  const enabled=$(`use_else_${sec}_${id}`)?.checked;
+  const cc=$(`else_content_${sec}_${id}`);if(cc)cc.style.display=enabled?'block':'none';
+  $(`else_box_${sec}_${id}`)?.classList.toggle('active',enabled);
+  const l=$(`elseLbl_${sec}_${id}`);if(l)l.textContent=enabled?'Enabled':'Disabled';
+  
+  // ✅ FIX: if enabling else for adjustment rules, populate the action detail
+  if (sec === 'adj' && enabled) {
+    const actSelect = document.querySelector(`#lc_adj_${id} [data-role="adj-else-action-type"]`);
+    if (actSelect) {
+      onAdjActionChange(id, 'else', actSelect.value);
+    }
+  }
+  markDirty();
+}
+function removeLeg(sec,id){
+  $(`lc_${sec}_${id}`)?.remove();unregTag(id,sec);updBadge(sec);
+  if(sec==='entry')refreshAdjAvail();updateSummaries();markDirty();
+}
+function togLeg(key){
+  const card=$(`lc_${key}`);if(!card)return;
+  const open=card.classList.contains('open');card.classList.toggle('open',!open);
+  const body=$(`lb_${key}`);if(body)body.style.display=open?'none':'block';
+}
+function updBadge(sec){
+  const map={entry:'badgeEntry',adj:'badgeAdj',exit:'badgeExit'};
+  const cont={entry:'entryLegs',adj:'adjLegs',exit:'exitLegs'};
+  const n=$(cont[sec])?.querySelectorAll('.leg-card').length||0;
+  const el=$(map[sec]);if(el)el.textContent=n;
+  const mdot=$(`mdot-${sec}`);if(mdot)mdot.closest('.mob-nav-btn')?.classList.toggle('has-items',n>0);
+}
+function hasEntryLegs(){return(document.querySelectorAll('#entryLegs .leg-card').length||0)>0;}
+function refreshAdjAvail(){const n=$('adjLockMsg');if(n)n.style.display=hasEntryLegs()?'none':'block';}
+
+/* ========== SUMMARIES ========== */
+function updateSummaries(){
+  const ecs=[...document.querySelectorAll('#entryLegs .leg-card')];
+  $('entrySummary').textContent=ecs.length?ecs.map(card=>{
+    const id=card.id.replace('lc_entry_','');
+    const tag=card.querySelector('.leg-tag')?.textContent||'?';
+    const inst=card.querySelector('[data-role="instrument"]')?.value||'OPT';
+    const side=card.querySelector('[data-role="side"]')?.value||card.querySelector('[data-role="fut-side"]')?.value||'SELL';
+    const opt=card.querySelector('[data-role="opt-type"]')?.value||'';
+    const stk=card.querySelector('[data-role="strike-sel"]')?.value||card.querySelector('[data-role="strike-mode"]')?.value||'atm';
+    const lots=card.querySelector('[data-role="lots"]')?.value||'1';
+    const expiry=card.querySelector('[data-role="leg-expiry"]')?.value||'default';
+    const grp=card.querySelector('[data-role="leg-group"]')?.value||'';
+    const ifConds=card.querySelectorAll(`#cl_entry_if_${id} .simple-cond-row`).length;
+    const hasElse=!!card.querySelector(`#use_else_entry_${id}`)?.checked;
+    const elseConds=hasElse?card.querySelectorAll(`#cl_entry_else_${id} .simple-cond-row`).length:0;
+    const condTxt=hasElse?`IF ${ifConds} + ELSE ${elseConds}`:`IF ${ifConds}`;
+    return`${tag}: ${side}${opt?' '+opt:''} @ ${stk} × ${lots} lot${lots>1?'s':''} [${inst}${expiry!=='strategy_default'?' '+expiry:''}]${grp?' ['+grp+']':''} | ${condTxt} cond(s)`;
+  }).join('\n'):'No entry legs yet.';
+
+  const acs=[...document.querySelectorAll('#adjLegs .leg-card')];
+  $('adjSummary').textContent=acs.length?acs.map(card=>{
+    const id=card.id.replace('lc_adj_','');
+    const tag=card.querySelector('.leg-tag')?.textContent||'?';
+    const act=card.querySelector('[data-role="adj-action-type"]')?.value||'close_leg';
+    const ifConds=card.querySelectorAll(`#cl_adj_${id} .simple-cond-row`).length;
+    const hasElse=!!card.querySelector(`#use_else_adj_${id}`)?.checked;
+    const elseConds=hasElse?card.querySelectorAll(`#cl_adj_else_${id} .simple-cond-row`).length:0;
+    const elseAct=hasElse?(card.querySelector('[data-role="adj-else-action-type"]')?.value||'close_leg'):'';
+    const retrig=card.querySelector('[data-role="adj-retriger"]')?.value==='yes'?'↻ ':'';
+    const actLabel=ACTION_TYPES.find(a=>a.v===act)?.l.replace(/<[^>]+>/g,'')||act;
+    const elseLabel=elseAct?(ACTION_TYPES.find(a=>a.v===elseAct)?.l.replace(/<[^>]+>/g,'')||elseAct):'';
+    const condTxt=hasElse?`IF ${ifConds} + ELSE ${elseConds}`:`IF ${ifConds}`;
+    const actTxt=hasElse?`${actLabel} / ELSE ${elseLabel}`:actLabel;
+    return`${retrig}${tag}: ${actTxt} | ${condTxt} cond(s)`;
+  }).join('\n'):'No adjustment rules yet.';
+
+  const xcs=[...document.querySelectorAll('#exitLegs .leg-card')];
+  const tgt=gv('exitTargetAmt'),sl=gv('exitSlAmt'),trail=gv('exitTrailAmt');
+  const fixed=[tgt&&`TP≥₹${tgt}`,sl&&`SL≥₹${sl}`,trail&&`Trail ₹${trail}`].filter(Boolean);
+  const perLeg=xcs.map(card=>{
+    const ref=card.querySelector('[data-role="exit-ref"]')?.value||'all';
+    const conds=card.querySelectorAll('.simple-cond-row').length;
+    return`Exit[${ref}]: ${conds} cond(s)`;
+  });
+  $('exitSummary').textContent=[...fixed,...perLeg].join('\n')||'No exit rules yet.';
+
+  renderFlowchart();updateJSONPreview();
+}
+
+/* ========== FLOWCHART ========== */
+function _shortTxt(s, n=120){
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  return t.length > n ? `${t.slice(0, n-1)}…` : t;
+}
+function _fmtCond(c){
+  if(!c) return '';
+  const v2 = (c.value2 !== undefined && c.value2 !== null && `${c.value2}` !== '') ? `, ${c.value2}` : '';
+  return `${c.parameter} ${c.comparator} ${c.value}${v2}`;
+}
+function _condSummary(listId){
+  const box = $(listId);
+  if(!box) return 'Always true';
+  const conds = extractCondsList(box);
+  if(!conds.length) return 'Always true';
+  return _shortTxt(conds.map((c,i)=>{
+    const j = i===0 ? '' : ` ${c.join || 'AND'} `;
+    return `${j}${_fmtCond(c)}`;
+  }).join(''), 150);
+}
+function _actionLabel(v){
+  return ACTION_TYPES.find(a=>a.v===v)?.l.replace(/<[^>]+>/g,'') || v || 'N/A';
+}
+function _adjActionSummary(card, adjId, branch, actionType){
+  const detail = card.querySelector(`#adj_${branch}_detail_${adjId}`) || card;
+  const q = sel => detail.querySelector(sel);
+  
+  if(actionType==='close_leg') {
+    return `Close ${q('[data-role="close-leg-sel"]')?.value || 'selected leg'}`;
+  }
+  
+  if(actionType==='partial_close_lots') {
+    return `Partial close ${q('[data-role="partial-leg-sel"]')?.value || 'selected leg'} (${q('[data-role="partial-lots"]')?.value || '1'} lot)`;
+  }
+  
+  if(actionType==='reduce_by_pct') {
+    return `Reduce ${q('[data-role="reduce-leg-sel"]')?.value || 'selected leg'} by ${q('[data-role="reduce-pct"]')?.value || '50'}%`;
+  }
+  
+  if(actionType==='roll_to_next_expiry') {
+    const leg = q('[data-role="roll-leg-sel"]')?.value || 'selected leg';
+    const target = q('[data-role="roll-target-expiry"]')?.value || 'weekly_next';
+    const same = q('[data-role="roll-same-strike"]')?.value || 'yes';
+    return `Roll ${leg} to ${target} (${same === 'yes' ? 'same strike' : same})`;
+  }
+  
+  if(actionType==='open_hedge') {
+    return 'Open hedge leg';
+  }
+  
+  if(actionType==='convert_to_spread') {
+    return 'Convert into spread (add wing)';
+  }
+  
+  if(actionType==='simple_close_open_new'){
+    const swaps = [...(detail.querySelectorAll(`#swaps_${branch}_${adjId} .swap-card`) || [])];
+    if(!swaps.length) return 'Close/Open (swap)';
+    
+    // Build detailed swap descriptions
+    const swapDetails = swaps.map(sc => {
+      const closeTag = sc.querySelector('[data-role="swap-close"]')?.value || 'leg';
+      // NOTE: strikeModeHtml() uses "{prefix}-side", "{prefix}-opt", "{prefix}-stk-mode",
+      //       "{prefix}-stk-sel", "{prefix}-ref-leg" — use ends-with ($=) selectors.
+      const side = sc.querySelector('[data-role$="-side"]')?.value || '';
+      const optType = sc.querySelector('[data-role$="-opt"]')?.value || '';
+      const strikeMode = sc.querySelector('[data-role$="-stk-mode"]')?.value || '';
+      const strikeSel = sc.querySelector('[data-role$="-stk-sel"]')?.value || '';
+      const matchLeg = sc.querySelector('[data-role$="-ref-leg"]')?.value || '';
+      const matchParam = sc.querySelector('[data-role$="-match-param"]')?.value || '';
+      const matchOffset = sc.querySelector('[data-role$="-match-offset"]')?.value || '';
+      
+      let newLegDesc = '';
+      if (side && optType) {
+        newLegDesc = `${side} ${optType}`;
+        
+        if (strikeMode === 'match_leg' && matchLeg) {
+          newLegDesc += ` matching ${matchLeg}`;
+          if (matchParam) {
+            newLegDesc += ` ${matchParam}`;
+          }
+          if (matchOffset && matchOffset !== '0') {
+            newLegDesc += ` ${Number(matchOffset) > 0 ? '+' : ''}${matchOffset}`;
+          }
+        } else if (strikeSel) {
+          newLegDesc += ` @ ${strikeSel}`;
+        }
+      }
+      
+      return newLegDesc ? `${closeTag} → ${newLegDesc}` : closeTag;
+    });
+    
+    const fullDesc = swapDetails.join(', ');
+    return `Swap: ${fullDesc}`;
+  }
+  
+  return _actionLabel(actionType);
+}
+function renderFlowchart(){
+  const canvas=$('flowchartCanvas');
+  if(!canvas||!$('sec-flowchart')?.classList.contains('active'))return;
+  const entryCards=[...document.querySelectorAll('#entryLegs .leg-card')];
+  const adjCards=[...document.querySelectorAll('#adjLegs .leg-card')].sort((a,b)=>{
+    const ap=parseInt(a.querySelector('[data-role="adj-priority"]')?.value)||999;
+    const bp=parseInt(b.querySelector('[data-role="adj-priority"]')?.value)||999;
+    return ap-bp;
+  });
+  const sym=gv('sSymbol')||'SYMBOL';
+  const entryTime=gv('schEntry')||'09:18';const exitTime=gv('schExit')||'15:15';
+  const entryEndTime=gv('schEntryEnd')||'14:00';
+  const globalConds=document.querySelectorAll('#entryCombinedList .simple-cond-row').length;
+  const expiryMode=gv('schExpiry')||'weekly_current';
+  const arrow=(lbl='')=>`<div class="fc-arrow"><div class="fc-arrow-line"></div>${lbl?`<span class="fc-arrow-label">${esc(lbl)}</span><div class="fc-arrow-line"></div>`:''}<div class="fc-arrow-tip"></div></div>`;
+
+  let legsHtml='<div class="fc-legs-row">';
+  if(!entryCards.length){legsHtml+=`<div class="fc-node fc-node-gate" style="color:var(--muted);font-style:italic;">No entry legs defined yet</div>`;}
+  else{
+    entryCards.forEach(card=>{
+      const id=card.id.replace('lc_entry_','');
+      const tag=card.querySelector('.leg-tag')?.textContent||'?';
+      const inst=card.querySelector('[data-role="instrument"]')?.value||'OPT';
+      const side=card.querySelector('[data-role="side"]')?.value||'SELL';
+      const opt=card.querySelector('[data-role="opt-type"]')?.value||'';
+      const stk=card.querySelector('[data-role="strike-mode"]')?.value||'standard';
+      const lots=card.querySelector('[data-role="lots"]')?.value||'1';
+      const expiry=card.querySelector('[data-role="leg-expiry"]')?.value||'default';
+      const ifConds=card.querySelectorAll(`#cl_entry_if_${id} .simple-cond-row`).length;
+      const hasElse=card.querySelector('[id*="use_else_entry"]')?.checked;
+      const grp=card.querySelector('[data-role="leg-group"]')?.value||'';
+      const cls=side==='BUY'?'fc-node-buy':'fc-node-sell';
+      legsHtml+=`<div class="fc-node fc-node-leg ${cls}">
+        <div class="fc-node-leg-head">${esc(tag)}${grp?` <span style="font-size:9px;opacity:.7">[${esc(grp)}]</span>`:''}</div>
+        <div class="fc-node-leg-body">
+          ${ifConds?`<b>IF</b> ${ifConds} cond(s)<br>`:'Always enters<br>'}
+          → ${side} ${opt?opt+' ':''}${inst==='FUT'?'FUT':'@ '+stk} × ${lots}<br>
+          ${expiry!=='strategy_default'?`<span style="color:var(--teal)">Expiry: ${expiry}</span><br>`:''}
+          ${hasElse?'<span style="color:var(--danger)">ELSE enabled</span>':''}
+        </div>
+      </div>`;
+    });
+  }
+  legsHtml+='</div>';
+
+  let adjHtml='';
+  if(adjCards.length){
+    adjHtml=arrow('monitoring loop')+`<div class="fc-node fc-node-monitor">🔄 Live Monitor</div>`+arrow()+`<div class="fc-adj-row">`;
+    adjCards.forEach(card=>{
+      const id=card.id.replace('lc_adj_','');
+      const tag=card.querySelector('.leg-tag')?.textContent||'?';
+      const ruleName=card.querySelector('[data-role="adj-name"]')?.value||tag;
+      const pri=card.querySelector('[data-role="adj-priority"]')?.value||'?';
+      const cooldown=card.querySelector('[data-role="adj-cooldown"]')?.value||'0';
+      const act=card.querySelector('[data-role="adj-action-type"]')?.value||'close_leg';
+      const ifConds=card.querySelectorAll(`#cl_adj_${id} .simple-cond-row`).length;
+      const ifCondSummary=_condSummary(`cl_adj_${id}`);
+      const hasElse=!!card.querySelector(`#use_else_adj_${id}`)?.checked;
+      const elseConds=hasElse?card.querySelectorAll(`#cl_adj_else_${id} .simple-cond-row`).length:0;
+      const elseCondSummary=hasElse?_condSummary(`cl_adj_else_${id}`):'';
+      const elseAct=hasElse?(card.querySelector('[data-role="adj-else-action-type"]')?.value||'close_leg'):'';
+      const retrig=card.querySelector('[data-role="adj-retriger"]')?.value==='yes';
+      const actLabel=_actionLabel(act);
+      const elseLabel=hasElse?_actionLabel(elseAct):'';
+      const ifActionSummary=_adjActionSummary(card, id, 'if', act);
+      const elseActionSummary=hasElse?_adjActionSummary(card, id, 'else', elseAct):'';
+      adjHtml+=`<div class="fc-node fc-node-adj fc-adj-rule">
+        <div class="fc-adj-head">R${esc(pri)} · ${esc(ruleName)}${retrig?' · Retrigger':''} · Cooldown ${esc(cooldown)}s</div>
+        <div class="fc-adj-body">
+          <div class="fc-adj-branch">
+            <b>IF</b> (${ifConds} cond${ifConds===1?'':'s'})<br>
+            <span class="fc-adj-cond">${esc(ifCondSummary)}</span><br>
+            <span class="fc-adj-act">→ ${esc(actLabel)} · ${ifActionSummary}</span>
+          </div>
+          ${hasElse?`<div class="fc-adj-branch fc-adj-branch-else">
+            <b>ELSE</b> (${elseConds} cond${elseConds===1?'':'s'})<br>
+            <span class="fc-adj-cond">${esc(elseCondSummary)}</span><br>
+            <span class="fc-adj-act">→ ${esc(elseLabel)} · ${elseActionSummary}</span>
+          </div>`:''}
+        </div>
+      </div>`;
+    });
+    adjHtml+='</div>';
+  }else{
+    adjHtml=arrow('active position')+`<div class="fc-node fc-node-monitor">🔄 Position Monitor</div>`;
+  }
+
+  const tgt=gv('exitTargetAmt'),sl=gv('exitSlAmt'),trail=gv('exitTrailAmt');
+  const exitParts=[tgt&&`TP≥₹${tgt}`,sl&&`SL≥₹${sl}`,trail&&`Trail ₹${trail}`,`Time @ ${gv('exitTime')||'15:28'}`].filter(Boolean);
+
+  canvas.innerHTML=`<div class="fc-canvas">
+    <div class="fc-node fc-node-start">▶ STRATEGY START<br><small style="font-weight:400;opacity:.7">${esc(sym)} · ${getActiveDays().join(', ')} · Expiry: ${esc(expiryMode)}</small></div>
+    ${arrow()}
+    <div class="fc-node fc-node-schedule">⏰ Entry Window<br><small style="font-weight:400;opacity:.8">${entryTime} → ${entryEndTime} · EOD ${exitTime}</small></div>
+    ${arrow(globalConds?'schedule ✓':'entry window open')}
+    ${globalConds?`<div class="fc-node fc-node-gate">🔐 Global Entry Gate<br><small style="font-weight:400;opacity:.8">${globalConds} condition(s)</small></div>${arrow('gate passed')}`:''}
+    ${legsHtml}
+    ${adjHtml}
+    ${arrow('exit trigger')}
+    <div class="fc-node fc-node-exit">🚪 Exit<br><small style="font-weight:400;opacity:.8;font-size:9.5px;">${esc(exitParts.join(' · '))}</small></div>
+    ${arrow()}
+    <div class="fc-node fc-node-end">■ All positions squared off</div>
+  </div>`;
+}
+
+/* ========== NAV ========== */
+function switchSec(sec,btn){
+  document.querySelectorAll('.bsec').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-tab,.mob-nav-btn').forEach(t=>t.classList.remove('active'));
+  $(`sec-${sec}`)?.classList.add('active');
+  document.querySelector(`.nav-tab[data-sec="${sec}"]`)?.classList.add('active');
+  document.querySelector(`.mob-nav-btn[data-sec="${sec}"]`)?.classList.add('active');
+  if(sec==='flowchart') renderFlowchart();
+  if(sec==='json') updateJSONPreview();
+}
+
+/* ========== SYMBOL LOAD ========== */
+async function loadSymbols(){
+  const el=$('sSymbol');
+  try{
+    const r=await fetch('/dashboard/option-chain/active-symbols',{credentials:'include'});
+    if(!r.ok) throw 0;
+    const items=await r.json();
+    ST.symMap={};items.forEach(it=>ST.symMap[it.symbol]=it);
+    const di=items.findIndex(x=>x.symbol==='NIFTY');
+    el.innerHTML=items.map((it,i)=>`<option value="${it.symbol}"${i===(di>=0?di:0)?' selected':''}>${esc(it.symbol)}</option>`).join('');
+    if(items.length)onSymbolChange();
+    // If we have a pending symbol from loadStrategy, set it now
+    if (ST.pendingSymbol) {
+      el.value = ST.pendingSymbol;
+      onSymbolChange();
+      delete ST.pendingSymbol;
+    }
+  }catch(e){
+    el.innerHTML='<option value="NIFTY">NIFTY</option>';
+    // No DB file loading needed – fallback to NIFTY only.
+    onSymbolChange(); // Still update exchange etc.
+  }
+}
+async function onSymbolChange(){
+  const sym=gv('sSymbol');const item=ST.symMap[sym];
+  sv('sExchange',item?.exchange||'NFO');
+  updateJSONPreview();
+  markDirty();
+}
+function onNameInput(){
+  sv('sId',gv('sName').toUpperCase().replace(/\s+/g,'_').replace(/[^A-Z0-9_]/g,''));markDirty();
+}
+
+/* ========== JSON BUILD ========== */
+function buildJSON(){
+  const entryLegs=[...document.querySelectorAll('#entryLegs .leg-card')].map(card=>{
+    const tag=card.querySelector('.leg-tag')?.textContent||'';
+    const inst=card.querySelector('[data-role="instrument"]')?.value||'OPT';
+    const side=card.querySelector('[data-role="side"]')?.value||card.querySelector('[data-role="fut-side"]')?.value||'SELL';
+    const opt=card.querySelector('[data-role="opt-type"]')?.value||'CE';
+    const lots=parseInt(card.querySelector('[data-role="lots"]')?.value)||1;
+    const orderOvr=card.querySelector('[data-role="order-type"]')?.value||'';
+    const legExpiry=card.querySelector('[data-role="leg-expiry"]')?.value||'strategy_default';
+    const legLabel=card.querySelector('[data-role="leg-label"]')?.value||tag;
+    const legGroup=card.querySelector('[data-role="leg-group"]')?.value||'';
+    const strikeMode=card.querySelector('[data-role="strike-mode"]')?.value||'standard';
+    const strikeVal=card.querySelector('[data-role="strike-val"]')?.value||'';
+    const strikeSel=card.querySelector('[data-role="strike-sel"]')?.value||'delta';
+    const hasElse=card.querySelector('[id*="use_else_entry"]')?.checked;
+    const ifCondEl=card.querySelector('[id*="cl_entry_if_"]');
+    const elseCondEl=card.querySelector('[id*="cl_entry_else_"]');
+    return{tag,label:legLabel,group:legGroup,instrument:inst,side,
+      option_type:inst==='OPT'?opt:null,expiry:legExpiry,lots,
+      order_type:orderOvr||gv('sOrderType'),strike_mode:strikeMode,
+      strike_selection:strikeSel,strike_value:strikeVal,
+      conditions:ifCondEl?extractCondsList(ifCondEl):[],
+      else_enabled:hasElse,
+      else_conditions:hasElse&&elseCondEl?extractCondsList(elseCondEl):null,
+      else_action:hasElse?{side:card.querySelector('[data-role="else-side"]')?.value,option_type:card.querySelector('[data-role="else-opt-type"]')?.value,strike_selection:card.querySelector('[data-role="else-strike-sel"]')?.value,strike_value:card.querySelector('[data-role="else-strike-val"]')?.value,lots:parseInt(card.querySelector('[data-role="else-lots"]')?.value)||1}:null
+    };
+  });
+
+  const adjRules=[...document.querySelectorAll('#adjLegs .leg-card')].map((card,i)=>{
+    const adjId=card.id.replace('lc_adj_','');
+    const name=card.querySelector('[data-role="adj-name"]')?.value||`ADJ@${i+1}`;
+    const pri=parseInt(card.querySelector('[data-role="adj-priority"]')?.value)||i+1;
+    const maxDay=parseInt(card.querySelector('[data-role="adj-maxday"]')?.value)||5;
+    const maxTotal=parseInt(card.querySelector('[data-role="adj-maxtotal"]')?.value)||null;
+    const cooldown=parseInt(card.querySelector('[data-role="adj-cooldown"]')?.value)||60;
+    const retrigger=card.querySelector('[data-role="adj-retriger"]')?.value==='yes';
+    const legGuard=card.querySelector('[data-role="adj-leg-guard"]')?.value||'';
+    const actType=card.querySelector('[data-role="adj-action-type"]')?.value||'close_leg';
+    const hasElse=card.querySelector('[id*="use_else_adj"]')?.checked;
+    const elseActType=card.querySelector('[data-role="adj-else-action-type"]')?.value||'close_leg';
+    const ifCondEl=card.querySelector(`#cl_adj_${adjId}`);
+    const elseCondEl=card.querySelector(`#cl_adj_else_${adjId}`);
+
+    function buildAction(type,branch){
+      const branchDetail=card.querySelector(`#adj_${branch}_detail_${adjId}`)||card;
+      const q=sel=>branchDetail.querySelector(sel);
+      if(type==='simple_close_open_new'){
+        const swapsRoot=branchDetail.querySelector(`#swaps_${branch}_${adjId}`);
+        const swapCards=swapsRoot?[...swapsRoot.querySelectorAll('.swap-card')]:[];
+        return{type,leg_swaps:swapCards.map((sc,si)=>{const pfx=`sc_${adjId}_${branch}_${si}`;return{close_tag:sc.querySelector('[data-role="swap-close"]')?.value||'',new_leg:extractStrikeConfig(pfx)};})};
+      }
+      if(type==='close_leg') return{type,close_tag:q('[data-role="close-leg-sel"]')?.value||''};
+      if(type==='partial_close_lots') return{type,close_tag:q('[data-role="partial-leg-sel"]')?.value||'',lots:parseInt(q('[data-role="partial-lots"]')?.value)||1};
+      if(type==='reduce_by_pct') return{type,close_tag:q('[data-role="reduce-leg-sel"]')?.value||'',reduce_pct:parseFloat(q('[data-role="reduce-pct"]')?.value)||50};
+      if(type==='open_hedge') return{type,new_leg:extractStrikeConfig(`hedge_${adjId}_${branch}`)};
+      if(type==='roll_to_next_expiry') return{type,leg:q('[data-role="roll-leg-sel"]')?.value||'',target_expiry:q('[data-role="roll-target-expiry"]')?.value||'weekly_next',same_strike:q('[data-role="roll-same-strike"]')?.value||'yes'};
+      if(type==='convert_to_spread') return{type,wing_leg:extractStrikeConfig(`spread_${adjId}_${branch}`)};
+      return{type};
+    }
+    return{name,priority:pri,max_per_day:maxDay,max_total:maxTotal,cooldown_sec:cooldown,retriger:retrigger,leg_guard:legGuard,
+      conditions:ifCondEl?extractCondsList(ifCondEl):[],
+      action:buildAction(actType,'if'),
+      else_enabled:hasElse,
+      else_conditions:hasElse&&elseCondEl?extractCondsList(elseCondEl):[],
+      else_action:hasElse?buildAction(elseActType,'else'):null
+    };
+  });
+
+  const exitLegRules=[...document.querySelectorAll('#exitLegs .leg-card')].map((card,i)=>{
+    const exitId=card.id.replace('lc_exit_','');
+    const condEl=card.querySelector(`#cl_exit_${exitId}`);
+    return{exit_leg_ref:card.querySelector('[data-role="exit-ref"]')?.value||'all',action:card.querySelector('[data-role="exit-action"]')?.value||'close_leg',group:card.querySelector('[data-role="exit-group"]')?.value||'',conditions:condEl?extractCondsList(condEl):[]};
+  });
+
+  const sym=gv('sSymbol');
+  const out={
+    schema_version:'4.0',name:gv('sName')||'Unnamed',id:gv('sId')||'UNNAMED',
+    description:gv('sDesc'),type:gv('sType'),enabled:true,status:'IDLE',
+    identity:{exchange:gv('sExchange')||'NFO',underlying:sym,instrument_type:ST.preserve.instrument_type||'OPTIDX',product_type:gv('sProductType'),order_type:gv('sOrderType'),lots:parseInt(gv('sLots'))||1},
+    timing:{entry_window_start:gv('schEntry'),entry_window_end:gv('schEntryEnd'),eod_exit_time:gv('schExit')},
+    market_data:{source:'sqlite'},
+    entry:{
+      entry_sequence:gv('sEntrySeq')||'parallel',
+      global_conditions:extractConds('entryCombinedList'),
+      legs:entryLegs
+    },
+    adjustment:{enabled:adjRules.length>0,rules:adjRules},
+    exit:{
+      profit_target:{amount:parseFloat(gv('exitTargetAmt'))||null,pct:parseFloat(gv('exitTargetPct'))||null,action:gv('exitTargetAction'),lots:parseInt(gv('exitTargetLots'))||null},
+      stop_loss:{amount:parseFloat(gv('exitSlAmt'))||null,pct:parseFloat(gv('exitSlPct'))||null,action:gv('exitSlAction'),allow_reentry:gv('exitSlReentry')==='yes'},
+      trailing:{trail_amount:parseFloat(gv('exitTrailAmt'))||null,lock_in_at:parseFloat(gv('exitLockIn'))||null,trail_step:parseFloat(gv('exitTrailStep'))||null,step_trigger:parseFloat(gv('exitTrailStepTrigger'))||null},
+      profit_steps:{step_size:parseFloat(gv('profitStepSize'))||null,max_steps:parseInt(gv('profitStepMax'))||null,action:gv('profitStepAction')},
+      risk:{max_loss_per_day:parseFloat(gv('rMaxLoss'))||null,max_delta:parseFloat(gv('rMaxDelta'))||null,delta_breach_action:gv('rDeltaAction'),max_iv:parseFloat(gv('rMaxIv'))||null,min_iv:parseFloat(gv('rMinIv'))||null,max_lots:parseInt(gv('rMaxLots'))||4,breakeven_buffer:parseFloat(gv('rBreakevenBuffer'))||null},
+      time:{strategy_exit_time:gv('exitTime'),expiry_day_action:gv('expiryDayAction'),expiry_day_time:gv('expiryDayTime'),roll_target:gv('rollTarget')},
+      combined_conditions:{operator:'OR',rules:extractConds('exitCombinedList')},
+      leg_rules:exitLegRules,
+    },
+    schedule:{frequency:gv('schFreq'),active_days:getActiveDays(),entry_time:gv('schEntry'),entry_window_end:gv('schEntryEnd'),exit_time:gv('schExit'),expiry_mode:gv('schExpiry'),dte_min:parseInt(gv('schDteMin'))||null,dte_max:parseInt(gv('schDteMax'))||null,square_off_before_min:parseInt(gv('schSqoff'))||null,entry_on_expiry_day:gv('schEntryExpiry')==='yes',max_reentries_per_day:parseInt(gv('schMaxReentry'))||1},
+    meta:{schema_version:'4.0',created_at:new Date().toISOString()}
+  };
+  if(typeof ST.preserve.paper_mode!=='undefined') out.paper_mode=!!ST.preserve.paper_mode;
+  if(typeof ST.preserve.test_mode!=='undefined') out.test_mode=ST.preserve.test_mode;
+  if(typeof ST.preserve.identity_paper_mode!=='undefined') out.identity.paper_mode=!!ST.preserve.identity_paper_mode;
+  if(typeof ST.preserve.identity_test_mode!=='undefined') out.identity.test_mode=ST.preserve.identity_test_mode;
+  return out;
+}
+function updateJSONPreview(){const el=$('jsonOutput');if(!el)return;try{el.textContent=JSON.stringify(buildJSON(),null,2);}catch(e){}}
+
+/* ========== ACTIONS ========== */
+function exportJSON(){
+  const json=JSON.stringify(buildJSON(),null,2);
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([json],{type:'application/json'}));
+  a.download=`${gv('sName')||'strategy'}_v4.json`;a.click();URL.revokeObjectURL(a.href);
+}
+function resetForm(silent){
+  if(!silent && ST.dirty && !confirm('Unsaved changes. Reset anyway?'))return;
+  ['entryLegs','adjLegs','exitLegs','entryCombinedList','exitCombinedList'].forEach(id=>{const e=$(id);if(e)e.innerHTML='';});
+  ST.cnt={entry:0,adj:0,exit:0};ST.tags=[];
+  ST.preserve={};
+  sv('sName','');sv('sId','');sv('sDesc','');
+  addEntryLeg();['entry','adj','exit'].forEach(updBadge);refreshAdjAvail();updateSummaries();clearDirty();
+  if(!silent) showAlert('Form reset.','alert-info');
+}
+function closeBuilder(){if(!ST.dirty||confirm('Close without saving?'))window.location.href='/dashboard/web/strategy.html';}
+
+window.addEventListener('beforeunload',e=>{if(ST.dirty){e.preventDefault();e.returnValue='Unsaved changes.';}});
+
+/* ========== INIT ========== */
+async function init(){
+  await loadSymbols();
+  addEntryLeg();
+  refreshAdjAvail();updateSummaries();
+  
+  // Check URL for strategy name to load
+  const urlParams = new URLSearchParams(window.location.search);
+  const strategyName = urlParams.get('name');
+  if (strategyName) {
+    await loadStrategyFromServer(strategyName);
+  }
+  
+  switchSec('identity',null);
+  // Session restore hint
+  try{const ts=sessionStorage.getItem('sb_ts');if(ts&&Date.now()-parseInt(ts)<3600000)showAlert('💾 Auto-save available from last session.','alert-info');}catch(e){}
+}
+document.addEventListener('DOMContentLoaded',init);
+
+// Exit target lots visibility
+document.addEventListener('change',e=>{
+  if(e.target.id==='exitTargetAction'){
+    const g=$('exitTargetLotsGrp');if(g)g.style.display=e.target.value==='partial_lots'?'block':'none';
+  }
+});
+
+// ===== ADDED BY PATCHER: Helper functions for loading adjustment action details =====
+function populateStrikePanel(container, prefix, legConfig) {
+  if (!legConfig) return;
+  const side = container.querySelector(`[data-role="${prefix}-side"]`);
+  if (side) side.value = legConfig.side || 'SELL';
+  const opt = container.querySelector(`[data-role="${prefix}-opt"]`);
+  if (opt) opt.value = legConfig.option_type || 'CE';
+
+  const mode = container.querySelector(`[data-role="${prefix}-stk-mode"]`);
+  if (mode) {
+    mode.value = legConfig.strike_mode || 'standard';
+    onStrikeModeChange(mode, prefix);
+  }
+
+  const lots = container.querySelector(`[data-role="${prefix}-lots"]`);
+  if (lots) lots.value = legConfig.lots || 1;
+  const order = container.querySelector(`[data-role="${prefix}-order"]`);
+  if (order) order.value = legConfig.order_type || '';
+
+  const modeVal = legConfig.strike_mode || 'standard';
+  if (modeVal === 'standard') {
+    const sel = container.querySelector(`[data-role="${prefix}-stk-sel"]`);
+    if (sel) sel.value = legConfig.strike_selection || 'delta';
+    const val = container.querySelector(`[data-role="${prefix}-stk-val"]`);
+    if (val) val.value = legConfig.strike_value || '';
+  } else if (modeVal === 'exact') {
+    const exact = container.querySelector(`[data-role="${prefix}-stk-exact"]`);
+    if (exact) exact.value = legConfig.exact_strike || '';
+    const round = container.querySelector(`[data-role="${prefix}-stk-round"]`);
+    if (round) round.value = legConfig.rounding || 50;
+  } else if (modeVal === 'atm_points') {
+    const pts = container.querySelector(`[data-role="${prefix}-stk-pts"]`);
+    if (pts) pts.value = legConfig.atm_offset_points || 0;
+    const round = container.querySelector(`[data-role="${prefix}-stk-round2"]`);
+    if (round) round.value = legConfig.rounding || 50;
+  } else if (modeVal === 'atm_pct') {
+    const pct = container.querySelector(`[data-role="${prefix}-stk-pct"]`);
+    if (pct) pct.value = legConfig.atm_offset_pct || 0;
+    const round = container.querySelector(`[data-role="${prefix}-stk-round3"]`);
+    if (round) round.value = legConfig.rounding || 50;
+  } else if (modeVal === 'match_leg') {
+    const ref = container.querySelector(`[data-role="${prefix}-ref-leg"]`);
+    if (ref) ref.value = legConfig.match_leg || '';
+    const param = container.querySelector(`[data-role="${prefix}-match-param"]`);
+    if (param) param.value = legConfig.match_param || 'abs_delta';
+    const offset = container.querySelector(`[data-role="${prefix}-match-offset"]`);
+    if (offset) offset.value = legConfig.match_offset || 0;
+    const mult = container.querySelector(`[data-role="${prefix}-match-mult"]`);
+    if (mult) mult.value = legConfig.match_multiplier || 1;
+  }
+}
+
+function populateAdjActionDetail(card, branch, action) {
+  const adjId = card.id.replace('lc_adj_', '');
+  const detailDiv = $(`adj_${branch}_detail_${adjId}`);
+  if (!detailDiv) return;
+
+  const type = action.type;
+  if (type === 'close_leg') {
+    const sel = detailDiv.querySelector('[data-role="close-leg-sel"]');
+    if (sel) sel.value = action.close_tag || '';
+  } else if (type === 'partial_close_lots') {
+    const sel = detailDiv.querySelector('[data-role="partial-leg-sel"]');
+    if (sel) sel.value = action.close_tag || '';
+    const lots = detailDiv.querySelector('[data-role="partial-lots"]');
+    if (lots) lots.value = action.lots || 1;
+    const keep = detailDiv.querySelector('[data-role="partial-keep"]');
+    if (keep) keep.value = action.keep ? 'yes' : 'no';
+  } else if (type === 'reduce_by_pct') {
+    const sel = detailDiv.querySelector('[data-role="reduce-leg-sel"]');
+    if (sel) sel.value = action.close_tag || '';
+    const pct = detailDiv.querySelector('[data-role="reduce-pct"]');
+    if (pct) pct.value = action.reduce_pct || 50;
+  } else if (type === 'open_hedge') {
+    const prefix = `hedge_${adjId}_${branch}`;
+    populateStrikePanel(detailDiv, prefix, action.new_leg);
+  } else if (type === 'roll_to_next_expiry') {
+    const legSel = detailDiv.querySelector('[data-role="roll-leg-sel"]');
+    if (legSel) legSel.value = action.leg || '';
+    const target = detailDiv.querySelector('[data-role="roll-target-expiry"]');
+    if (target) target.value = action.target_expiry || 'weekly_next';
+    const same = detailDiv.querySelector('[data-role="roll-same-strike"]');
+    if (same) same.value = action.same_strike || 'yes';
+  } else if (type === 'convert_to_spread') {
+    const prefix = `spread_${adjId}_${branch}`;
+    populateStrikePanel(detailDiv, prefix, action.wing_leg);
+  } else if (type === 'simple_close_open_new') {
+    const swapsContainer = $(`swaps_${branch}_${adjId}`);
+    if (!swapsContainer) return;
+    swapsContainer.innerHTML = '';
+    if (action.leg_swaps && Array.isArray(action.leg_swaps)) {
+      action.leg_swaps.forEach((swap, idx) => {
+        addSwapCard(adjId, branch);
+        const newCard = swapsContainer.querySelector('.swap-card:last-child');
+        if (newCard) {
+          const prefix = `sc_${adjId}_${branch}_${idx}`;
+          const closeSel = newCard.querySelector('[data-role="swap-close"]');
+          if (closeSel) {
+            closeSel.value = swap.close_tag || '';
+            onSwapCloseChange(closeSel, prefix);
+          }
+          if (swap.new_leg) {
+            populateStrikePanel(newCard, prefix, swap.new_leg);
+          }
+        }
+      });
+    }
+  }
+}
+// ===== END OF ADDED FUNCTIONS =====
+</script>
+</body>
+</html>

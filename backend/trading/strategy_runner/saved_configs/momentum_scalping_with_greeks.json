@@ -1,0 +1,164 @@
+{
+  "schema_version": "4.0",
+  "name": "Momentum Scalping with Greeks",
+  "id": "MOMENTUM_GREEK_SCALP",
+  "description": "Buy ATM call when spot rises >0.5% and call delta >0.6; buy ATM put when spot falls >0.5% and put delta < -0.6.",
+  "type": "directional",
+  "enabled": true,
+  "status": "RUNNING",
+  "identity": {
+    "exchange": "NFO",
+    "underlying": "NIFTY",
+    "instrument_type": "OPTIDX",
+    "product_type": "NRML",
+    "order_type": "MARKET",
+    "lots": 1,
+    "paper_mode": true,
+    "test_mode": true
+  },
+  "timing": {
+    "entry_window_start": "09:18",
+    "entry_window_end": "14:00",
+    "eod_exit_time": "15:20"
+  },
+  "market_data": {
+    "source": "sqlite"
+  },
+  "entry": {
+    "entry_sequence": "parallel",
+    "global_conditions": [],
+    "legs": [
+      {
+        "tag": "LEG@1_CE",
+        "label": "Momentum Call",
+        "group": "",
+        "instrument": "OPT",
+        "side": "BUY",
+        "option_type": "CE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.6",
+        "conditions": [
+          {
+            "parameter": "spot_change_pct",
+            "comparator": ">",
+            "value": "0.5",
+            "join": "AND"
+          },
+          {
+            "parameter": "ce_delta",
+            "comparator": ">",
+            "value": "0.6"
+          }
+        ],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      },
+      {
+        "tag": "LEG@2_PE",
+        "label": "Momentum Put",
+        "group": "",
+        "instrument": "OPT",
+        "side": "BUY",
+        "option_type": "PE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.6",
+        "conditions": [
+          {
+            "parameter": "spot_change_pct",
+            "comparator": "<",
+            "value": "-0.5",
+            "join": "AND"
+          },
+          {
+            "parameter": "pe_delta",
+            "comparator": "<",
+            "value": "-0.6"
+          }
+        ],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      }
+    ]
+  },
+  "adjustment": {
+    "enabled": false,
+    "rules": []
+  },
+  "exit": {
+    "profit_target": {
+      "amount": 1000,
+      "pct": null,
+      "action": "exit_all",
+      "lots": null
+    },
+    "stop_loss": {
+      "amount": 500,
+      "pct": null,
+      "action": "exit_all",
+      "allow_reentry": false
+    },
+    "trailing": {
+      "trail_amount": null,
+      "lock_in_at": null,
+      "trail_step": null,
+      "step_trigger": null
+    },
+    "profit_steps": {
+      "step_size": null,
+      "max_steps": null,
+      "action": null
+    },
+    "risk": {
+      "max_loss_per_day": 5000,
+      "max_delta": 0.8,
+      "delta_breach_action": "alert",
+      "max_iv": null,
+      "min_iv": null,
+      "max_lots": 2,
+      "breakeven_buffer": null
+    },
+    "time": {
+      "strategy_exit_time": "15:20",
+      "expiry_day_action": "roll",
+      "expiry_day_time": "09:15",
+      "roll_target": "weekly_next",
+      "roll_note": "roll_target is evaluated when expiry_day_action=roll"
+    },
+    "combined_conditions": {
+      "operator": "OR",
+      "rules": []
+    },
+    "leg_rules": []
+  },
+  "schedule": {
+    "frequency": "daily",
+    "active_days": [
+      "mon",
+      "tue",
+      "wed",
+      "thu",
+      "fri"
+    ],
+    "entry_time": "09:18",
+    "expiry_mode": "weekly_auto",
+    "dte_min": null,
+    "dte_max": null,
+    "square_off_before_min": null,
+    "entry_on_expiry_day": false,
+    "max_reentries_per_day": 0,
+    "reentry_note": "reentries disabled because stop_loss.allow_reentry=false"
+  },
+  "created_at": "2026-03-10T17:55:29Z",
+  "updated_at": "2026-03-10T17:55:29Z",
+  "status_updated_at": "2026-03-11T09:01:01.694321Z"
+}

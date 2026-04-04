@@ -179,6 +179,28 @@ export const api = {
   // ── System ──
   health:       () => api.get('/health'),
   diagnostics:  () => api.get('/diagnostics'),
+
+  // ── Strategy Builder — config CRUD ──────────────────────────────────────
+  strategyConfigs: () =>
+    api.get<any[]>('/dashboard/strategy/configs'),
+  strategyConfig: (name: string) =>
+    api.get<any>(`/dashboard/strategy/config/${encodeURIComponent(name)}`),
+  saveStrategyConfig: (config: any) =>
+    api.post<{ ok: boolean; name: string; file: string }>(
+      '/dashboard/strategy/config/save-all', config),
+  deleteStrategyConfig: (name: string) =>
+    api.delete<{ ok: boolean; deleted: string }>(
+      `/dashboard/strategy/config/${encodeURIComponent(name)}`),
+  activeSymbols: () =>
+    api.get<{ symbol: string; exchange: string }[]>('/dashboard/option-chain/active-symbols'),
+
+  // ── Strategy Runner — run / stop / status ────────────────────────────────
+  runStrategy:  (name: string) =>
+    api.post<{ ok: boolean; name: string; status: string }>(`/strategy/run/${encodeURIComponent(name)}`, {}),
+  stopStrategy: (name: string) =>
+    api.post<{ ok: boolean; name: string; status: string }>(`/strategy/stop/${encodeURIComponent(name)}`, {}),
+  strategyStatus: () =>
+    api.get<any[]>('/strategy/status'),
 }
 
 export { ApiError }

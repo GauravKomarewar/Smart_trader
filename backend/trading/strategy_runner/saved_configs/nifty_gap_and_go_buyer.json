@@ -1,0 +1,266 @@
+{
+  "schema_version": "4.0",
+  "name": "nifty_gap_and_go_buyer",
+  "id": "NIFTY_GAP_GO",
+  "description": "Pure option buying strategy. Detects gap opens (up or down) in first 15 minutes and buys ATM options to ride the directional momentum. Hard exit at 10:30 AM. This is a BUYING strategy \u2014 maximum loss is premium paid. Works best on budget day, RBI policy day, or any event-driven morning gap.",
+  "type": "directional",
+  "enabled": true,
+  "status": "COMPLETED",
+  "identity": {
+    "exchange": "NFO",
+    "underlying": "NIFTY",
+    "instrument_type": "OPTIDX",
+    "product_type": "MIS",
+    "order_type": "MARKET",
+    "lots": 1,
+    "paper_mode": true,
+    "test_mode": true
+  },
+  "timing": {
+    "entry_window_start": "09:18",
+    "entry_window_end": "10:00",
+    "eod_exit_time": "10:30"
+  },
+  "market_data": {
+    "source": "sqlite"
+  },
+  "entry": {
+    "entry_sequence": "sequential",
+    "global_conditions": [
+      {
+        "parameter": "india_vix",
+        "comparator": "<",
+        "value": "20"
+      },
+      {
+        "parameter": "time_current",
+        "comparator": "between",
+        "value": "09:18",
+        "value2": "10:00",
+        "join": "AND"
+      }
+    ],
+    "legs": [
+      {
+        "tag": "LEG@1_CE",
+        "label": "Gap up CE buy",
+        "group": "GapUp",
+        "instrument": "OPT",
+        "side": "BUY",
+        "option_type": "CE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.50",
+        "conditions": [
+          {
+            "parameter": "spot_change_pct",
+            "comparator": ">",
+            "value": "0.5"
+          },
+          {
+            "parameter": "pcr",
+            "comparator": "<",
+            "value": "1.2",
+            "join": "AND"
+          }
+        ],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      },
+      {
+        "tag": "LEG@2_PE",
+        "label": "Gap down PE buy",
+        "group": "GapDown",
+        "instrument": "OPT",
+        "side": "BUY",
+        "option_type": "PE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.50",
+        "conditions": [
+          {
+            "parameter": "spot_change_pct",
+            "comparator": "<",
+            "value": "-0.5"
+          },
+          {
+            "parameter": "pcr",
+            "comparator": ">",
+            "value": "0.8",
+            "join": "AND"
+          }
+        ],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      }
+    ]
+  },
+  "adjustment": {
+    "enabled": true,
+    "rules": [
+      {
+        "name": "Trail winner \u2014 momentum extending",
+        "priority": 1,
+        "max_per_day": 5,
+        "max_total": null,
+        "cooldown_sec": 120,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "tag.LEG@1_CE.pnl_pct",
+            "comparator": ">=",
+            "value": "30"
+          },
+          {
+            "parameter": "spot_change_pct",
+            "comparator": ">",
+            "value": "0.8",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "reduce_by_pct",
+          "close_tag": "LEG@1_CE",
+          "reduce_pct": 50
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "Trail winner PE \u2014 momentum extending",
+        "priority": 2,
+        "max_per_day": 5,
+        "max_total": null,
+        "cooldown_sec": 120,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "tag.LEG@2_PE.pnl_pct",
+            "comparator": ">=",
+            "value": "30"
+          },
+          {
+            "parameter": "spot_change_pct",
+            "comparator": "<",
+            "value": "-0.8",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "reduce_by_pct",
+          "close_tag": "LEG@2_PE",
+          "reduce_pct": 50
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "Hard exit at 10:30 \u2014 no exceptions",
+        "priority": 3,
+        "max_per_day": 1,
+        "max_total": null,
+        "cooldown_sec": 60,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "time_current",
+            "comparator": ">=",
+            "value": "10:30"
+          }
+        ],
+        "action": {
+          "type": "close_leg",
+          "close_tag": "all"
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      }
+    ]
+  },
+  "exit": {
+    "profit_target": {
+      "amount": null,
+      "pct": 50,
+      "action": "exit_all",
+      "lots": 1
+    },
+    "stop_loss": {
+      "amount": null,
+      "pct": 30,
+      "action": "exit_all",
+      "allow_reentry": false
+    },
+    "trailing": {
+      "trail_amount": null,
+      "lock_in_at": null,
+      "trail_step": null,
+      "step_trigger": null
+    },
+    "profit_steps": {
+      "step_size": null,
+      "max_steps": null,
+      "action": "adj"
+    },
+    "risk": {
+      "max_loss_per_day": null,
+      "max_delta": null,
+      "delta_breach_action": "hedge",
+      "max_iv": null,
+      "min_iv": null,
+      "max_lots": 2,
+      "breakeven_buffer": null
+    },
+    "time": {
+      "strategy_exit_time": "10:30",
+      "expiry_day_action": "time",
+      "expiry_day_time": "10:00",
+      "roll_target": "weekly_next"
+    },
+    "combined_conditions": {
+      "operator": "OR",
+      "rules": []
+    },
+    "leg_rules": []
+  },
+  "schedule": {
+    "frequency": "daily",
+    "active_days": [
+      "mon",
+      "tue",
+      "wed",
+      "thu",
+      "fri"
+    ],
+    "entry_time": "09:18",
+    "entry_window_end": "10:00",
+    "exit_time": "10:30",
+    "expiry_mode": "weekly_auto",
+    "dte_min": 1,
+    "dte_max": null,
+    "square_off_before_min": null,
+    "entry_on_expiry_day": false,
+    "max_reentries_per_day": 1
+  },
+  "meta": {
+    "schema_version": "4.0",
+    "created_at": "2026-03-19T00:00:00.000Z",
+    "notes": "GAP & GO BUYING STRATEGY. Logic: (1) Detects significant gap open (spot_change_pct > 0.5% up or < -0.5% down) in the first 42 minutes of session. (2) Only one leg enters \u2014 CE if gap up + PCR neutral/bearish, PE if gap down + PCR supports. (3) Buys ATM (0.50 delta) for maximum delta exposure during the gap run. (4) Two partial exits at 30% profit to lock in gains while keeping 50% position for further run. (5) HARD EXIT at 10:30 regardless of P&L \u2014 gaps either confirm or fill by then, holding beyond is speculation not strategy. (6) No entry on expiry day \u2014 gamma makes options unpredictable in the morning. (7) VIX < 20 gate \u2014 on high-VIX days gaps are noise, not signal. BEST DAYS: Budget day, RBI policy day, FII data day, geopolitical overnight news."
+  },
+  "paper_mode": true,
+  "test_mode": true,
+  "status_updated_at": "2026-03-20T10:30:03.856735"
+}

@@ -1,0 +1,296 @@
+{
+  "schema_version": "4.0",
+  "name": "nifty_momentum_scalper",
+  "id": "NIFTY_MOM_SCALP",
+  "description": "Pure intraday option buying scalper. Detects 3 types of momentum signals: (1) fast spot move (spot_change crosses 0.4% threshold), (2) PCR collapse below 0.75 (pure bullish surge), (3) OI buildup on call side (short covering). Buys near-ATM options (0.45-0.50 delta) for quick 35-50% gains. Maximum 3 trades per day. 45-minute cooldown prevents overtrading. Works any time between 09:30 and 14:30.",
+  "type": "directional",
+  "enabled": true,
+  "status": "IDLE",
+  "identity": {
+    "exchange": "NFO",
+    "underlying": "NIFTY",
+    "instrument_type": "OPTIDX",
+    "product_type": "MIS",
+    "order_type": "MARKET",
+    "lots": 1,
+    "paper_mode": true,
+    "test_mode": true
+  },
+  "timing": {
+    "entry_window_start": "09:30",
+    "entry_window_end": "14:30",
+    "eod_exit_time": "15:00"
+  },
+  "market_data": {
+    "source": "sqlite"
+  },
+  "entry": {
+    "entry_sequence": "sequential",
+    "global_conditions": [
+      {
+        "parameter": "india_vix",
+        "comparator": "<",
+        "value": "22"
+      },
+      {
+        "parameter": "time_current",
+        "comparator": "between",
+        "value": "09:30",
+        "value2": "14:30"
+      }
+    ],
+    "legs": [
+      {
+        "tag": "LEG@1_CE",
+        "label": "Momentum CE scalp",
+        "group": "Scalp",
+        "instrument": "OPT",
+        "side": "BUY",
+        "option_type": "CE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.48",
+        "conditions": [
+          {
+            "parameter": "spot_change_pct",
+            "comparator": ">",
+            "value": "0.4"
+          },
+          {
+            "parameter": "pcr",
+            "comparator": "<",
+            "value": "1.1",
+            "join": "AND"
+          },
+          {
+            "parameter": "oi_buildup_ce",
+            "comparator": "<",
+            "value": "5",
+            "join": "AND"
+          }
+        ],
+        "else_enabled": true,
+        "else_conditions": [
+          {
+            "parameter": "spot_change_pct",
+            "comparator": "<",
+            "value": "-0.4"
+          },
+          {
+            "parameter": "pcr",
+            "comparator": ">",
+            "value": "0.9",
+            "join": "AND"
+          },
+          {
+            "parameter": "oi_buildup_pe",
+            "comparator": "<",
+            "value": "5",
+            "join": "AND"
+          }
+        ],
+        "else_action": {
+          "side": "BUY",
+          "option_type": "PE",
+          "strike_selection": "delta",
+          "strike_value": "0.48",
+          "lots": 1,
+          "order_type": "MARKET"
+        }
+      }
+    ]
+  },
+  "adjustment": {
+    "enabled": true,
+    "rules": [
+      {
+        "name": "Pyramid — momentum extending strongly",
+        "priority": 1,
+        "max_per_day": 2,
+        "max_total": null,
+        "cooldown_sec": 300,
+        "retriger": false,
+        "leg_guard": "LEG@1_CE",
+        "conditions": [
+          {
+            "parameter": "tag.LEG@1_CE.pnl_pct",
+            "comparator": ">=",
+            "value": "25"
+          },
+          {
+            "parameter": "spot_change_pct",
+            "comparator": ">",
+            "value": "0.7",
+            "join": "AND"
+          },
+          {
+            "parameter": "india_vix",
+            "comparator": "<",
+            "value": "17",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "open_hedge",
+          "new_leg": {
+            "side": "BUY",
+            "option_type": "CE",
+            "lots": 1,
+            "order_type": "MARKET",
+            "strike_mode": "standard",
+            "strike_selection": "delta",
+            "strike_value": "0.40"
+          }
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "Partial exit at 25% — bank some",
+        "priority": 2,
+        "max_per_day": 3,
+        "max_total": null,
+        "cooldown_sec": 120,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "combined_pnl_pct",
+            "comparator": ">=",
+            "value": "25"
+          }
+        ],
+        "action": {
+          "type": "reduce_by_pct",
+          "close_tag": "MOST_PROFITABLE_LEG",
+          "reduce_pct": 50
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "Momentum stalls — close all",
+        "priority": 3,
+        "max_per_day": 3,
+        "max_total": null,
+        "cooldown_sec": 180,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "spot_change_pct",
+            "comparator": "between",
+            "value": "-0.2",
+            "value2": "0.2"
+          },
+          {
+            "parameter": "time_in_position_sec",
+            "comparator": ">",
+            "value": "900",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "close_leg",
+          "close_tag": "all"
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "Hard exit at 15:00 — no intraday carry",
+        "priority": 4,
+        "max_per_day": 1,
+        "max_total": null,
+        "cooldown_sec": 30,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "time_current",
+            "comparator": ">=",
+            "value": "15:00"
+          }
+        ],
+        "action": {
+          "type": "close_leg",
+          "close_tag": "all"
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      }
+    ]
+  },
+  "exit": {
+    "profit_target": {
+      "amount": null,
+      "pct": 45,
+      "action": "exit_all",
+      "lots": 1
+    },
+    "stop_loss": {
+      "amount": null,
+      "pct": 28,
+      "action": "exit_all",
+      "allow_reentry": true
+    },
+    "trailing": {
+      "trail_amount": null,
+      "lock_in_at": null,
+      "trail_step": null,
+      "step_trigger": null
+    },
+    "profit_steps": {
+      "step_size": null,
+      "max_steps": null,
+      "action": "adj"
+    },
+    "risk": {
+      "max_loss_per_day": 4000,
+      "max_delta": null,
+      "delta_breach_action": "hedge",
+      "max_iv": null,
+      "min_iv": null,
+      "max_lots": 3,
+      "breakeven_buffer": null
+    },
+    "time": {
+      "strategy_exit_time": "15:00",
+      "expiry_day_action": "time",
+      "expiry_day_time": "14:00",
+      "roll_target": "weekly_next"
+    },
+    "combined_conditions": {
+      "operator": "OR",
+      "rules": []
+    },
+    "leg_rules": []
+  },
+  "schedule": {
+    "frequency": "daily",
+    "active_days": ["mon", "tue", "wed", "thu", "fri"],
+    "entry_time": "09:30",
+    "entry_window_end": "14:30",
+    "exit_time": "15:00",
+    "expiry_mode": "weekly_auto",
+    "dte_min": 1,
+    "dte_max": null,
+    "square_off_before_min": null,
+    "entry_on_expiry_day": false,
+    "max_reentries_per_day": 3
+  },
+  "meta": {
+    "schema_version": "4.0",
+    "created_at": "2026-03-19T00:00:00.000Z",
+    "notes": "MOMENTUM SCALPER. Three-signal entry system: (1) spot_change_pct > 0.4% + PCR < 1.1 + no fresh CE OI buildup (pure buy momentum, not a hedged move). ELSE: same for down. (2) Buys 0.48 delta — very close to ATM for maximum delta exposure during the move. (3) PYRAMID RULE: if first trade goes +25% and spot still running, opens a SECOND smaller lot at 0.40 delta (slightly OTM) to ride the extended move. (4) STALL RULE: if after 15 minutes spot is flat (±0.2%), close position — momentum is dead, theta killing us. (5) PARTIAL EXIT at 25% P&L on any leg — locks in half position so the rest rides free. (6) max_reentries: 3 — scalper can fire 3 times per day with 45-min cooldown between entries. (7) allow_reentry after SL: true — if stopped out, strategy can enter again on a fresh signal (subject to max 3 total). AVOID on: low VIX slow-chop days, options near expiry (excessive gamma), budget day opening 30 min (too fast, spreads widen)."
+  },
+  "paper_mode": true,
+  "test_mode": true
+}

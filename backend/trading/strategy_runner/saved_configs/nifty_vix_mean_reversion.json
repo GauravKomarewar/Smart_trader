@@ -1,0 +1,275 @@
+{
+  "schema_version": "4.0",
+  "name": "nifty_vix_mean_reversion",
+  "id": "NIFTY_VIX_MEAN_REV",
+  "description": "Enters ONLY when India VIX spikes above 18 (fear/event-driven). Sells wider strikes (0.20 delta) and profits from the inevitable VIX mean-reversion (IV crush). This is the strategy specifically designed for the Iran/war/gap-down scenario \u2014 it WAITS for the spike, then sells into it. Uses a 2-day holding strategy with Thursday/Friday focus.",
+  "type": "neutral",
+  "enabled": true,
+  "status": "COMPLETED",
+  "identity": {
+    "exchange": "NFO",
+    "underlying": "NIFTY",
+    "instrument_type": "OPTIDX",
+    "product_type": "NRML",
+    "order_type": "MARKET",
+    "lots": 1,
+    "paper_mode": true,
+    "test_mode": true
+  },
+  "timing": {
+    "entry_window_start": "09:20",
+    "entry_window_end": "12:00",
+    "eod_exit_time": "15:25"
+  },
+  "market_data": {
+    "source": "sqlite"
+  },
+  "entry": {
+    "entry_sequence": "parallel",
+    "global_conditions": [
+      {
+        "parameter": "india_vix",
+        "comparator": ">=",
+        "value": "18"
+      },
+      {
+        "parameter": "days_to_expiry",
+        "comparator": "between",
+        "value": "1",
+        "value2": "5",
+        "join": "AND"
+      }
+    ],
+    "legs": [
+      {
+        "tag": "LEG@1_CE",
+        "label": "Wide Short CE",
+        "group": "",
+        "instrument": "OPT",
+        "side": "SELL",
+        "option_type": "CE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.20",
+        "conditions": [],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      },
+      {
+        "tag": "LEG@2_PE",
+        "label": "Wide Short PE",
+        "group": "",
+        "instrument": "OPT",
+        "side": "SELL",
+        "option_type": "PE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.20",
+        "conditions": [],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      }
+    ]
+  },
+  "adjustment": {
+    "enabled": true,
+    "rules": [
+      {
+        "name": "VIX crushed \u2014 take profit early (IV crush captured)",
+        "priority": 1,
+        "max_per_day": 1,
+        "max_total": null,
+        "cooldown_sec": 600,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "india_vix",
+            "comparator": "<",
+            "value": "15"
+          },
+          {
+            "parameter": "total_premium_decay_pct",
+            "comparator": ">=",
+            "value": "40",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "close_leg",
+          "close_tag": "all"
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "PANIC \u2014 extreme VIX spike, market in freefall",
+        "priority": 2,
+        "max_per_day": 5,
+        "max_total": null,
+        "cooldown_sec": 60,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "max_leg_delta",
+            "comparator": ">=",
+            "value": "0.60"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "HIGHER_DELTA_LEG",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "MATCH_CLOSING",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.15"
+              }
+            }
+          ]
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "Delta rebalance when skewed",
+        "priority": 3,
+        "max_per_day": 10,
+        "max_total": null,
+        "cooldown_sec": 120,
+        "retriger": true,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "abs(net_delta)",
+            "comparator": ">=",
+            "value": "0.15"
+          },
+          {
+            "parameter": "max_leg_delta",
+            "comparator": "<",
+            "value": "0.60",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "LOWER_DELTA_LEG",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "MATCH_CLOSING",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "match_leg",
+                "strike_selection": "match_leg_param",
+                "match_leg": "HIGHER_DELTA_LEG",
+                "match_param": "abs_delta",
+                "match_offset": 0,
+                "match_multiplier": 1
+              }
+            }
+          ]
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      }
+    ]
+  },
+  "exit": {
+    "profit_target": {
+      "amount": null,
+      "pct": 70,
+      "action": "exit_all",
+      "lots": 1
+    },
+    "stop_loss": {
+      "amount": 4000,
+      "pct": null,
+      "action": "exit_all",
+      "allow_reentry": false
+    },
+    "trailing": {
+      "trail_amount": 800,
+      "lock_in_at": 1500,
+      "trail_step": 400,
+      "step_trigger": 800
+    },
+    "profit_steps": {
+      "step_size": null,
+      "max_steps": null,
+      "action": "adj"
+    },
+    "risk": {
+      "max_loss_per_day": 4000,
+      "max_delta": null,
+      "delta_breach_action": "adjust",
+      "max_iv": null,
+      "min_iv": null,
+      "max_lots": 4,
+      "breakeven_buffer": 30
+    },
+    "time": {
+      "strategy_exit_time": "15:25",
+      "expiry_day_action": "time",
+      "expiry_day_time": "14:00",
+      "roll_target": "weekly_next"
+    },
+    "combined_conditions": {
+      "operator": "OR",
+      "rules": [
+        {
+          "parameter": "india_vix",
+          "comparator": ">=",
+          "value": "28"
+        }
+      ]
+    },
+    "leg_rules": []
+  },
+  "schedule": {
+    "frequency": "daily",
+    "active_days": [
+      "mon",
+      "tue",
+      "wed",
+      "thu",
+      "fri"
+    ],
+    "entry_time": "09:20",
+    "entry_window_end": "12:00",
+    "exit_time": "15:25",
+    "expiry_mode": "weekly_auto",
+    "dte_min": 1,
+    "dte_max": 5,
+    "square_off_before_min": null,
+    "entry_on_expiry_day": true,
+    "max_reentries_per_day": 1
+  },
+  "meta": {
+    "schema_version": "4.0",
+    "created_at": "2026-03-19T00:00:00.000Z",
+    "notes": "VIX mean reversion strategy \u2014 COUNTERINTUITIVE but powerful. Logic: (1) ONLY enters when VIX>=18 (fear spike). On these days, IV is inflated \u2014 you're selling expensive premium. (2) Uses wider 0.20 delta strikes because the underlying is already far from ATM. (3) Primary profit driver is IV crush, not theta \u2014 if VIX reverts from 20 back to 15, you make money even if spot barely moves. (4) Auto-exits when VIX < 15 AND 40% of premium decayed \u2014 IV crush trade complete. (5) Hard exit at VIX>=28 \u2014 if fear escalates further, cut losses. (6) Breakeven buffer tightened to 30pts \u2014 less room to breathe but forces discipline. This strategy COMPLEMENTS the DNSS_IMPROVED \u2014 run them together: DNSS handles normal days, VIX_MEAN_REV activates on event days."
+  },
+  "paper_mode": true,
+  "test_mode": true,
+  "status_updated_at": "2026-03-20T08:57:53.052397"
+}

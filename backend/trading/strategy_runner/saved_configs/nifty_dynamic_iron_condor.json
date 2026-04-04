@@ -1,0 +1,350 @@
+{
+  "schema_version": "4.0",
+  "name": "nifty_dynamic_iron_condor",
+  "id": "NIFTY_DYNAMIC_IC",
+  "description": "VIX-aware Iron Condor. Sell strikes at 0.25 delta, buy wings at 0.10 delta for defined risk. Automatically rolls short strikes inward when VIX falls (collect more premium) and exits wings early when position profits 60% of max profit. Much safer than naked strangle in volatile markets.",
+  "type": "spread",
+  "enabled": true,
+  "status": "IDLE",
+  "identity": {
+    "exchange": "NFO",
+    "underlying": "NIFTY",
+    "instrument_type": "OPTIDX",
+    "product_type": "NRML",
+    "order_type": "MARKET",
+    "lots": 1,
+    "paper_mode": true,
+    "test_mode": true
+  },
+  "timing": {
+    "entry_window_start": "09:20",
+    "entry_window_end": "13:00",
+    "eod_exit_time": "15:20"
+  },
+  "market_data": {
+    "source": "sqlite"
+  },
+  "entry": {
+    "entry_sequence": "parallel",
+    "global_conditions": [
+      {
+        "parameter": "india_vix",
+        "comparator": "between",
+        "value": "12",
+        "value2": "22"
+      },
+      {
+        "parameter": "days_to_expiry",
+        "comparator": ">=",
+        "value": "2",
+        "join": "AND"
+      }
+    ],
+    "legs": [
+      {
+        "tag": "LEG@1_CE",
+        "label": "Short CE (sell side)",
+        "group": "Short",
+        "instrument": "OPT",
+        "side": "SELL",
+        "option_type": "CE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.25",
+        "conditions": [],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      },
+      {
+        "tag": "LEG@2_PE",
+        "label": "Short PE (sell side)",
+        "group": "Short",
+        "instrument": "OPT",
+        "side": "SELL",
+        "option_type": "PE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.25",
+        "conditions": [],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      },
+      {
+        "tag": "LEG@3_CE",
+        "label": "Long CE wing (protection)",
+        "group": "Wing",
+        "instrument": "OPT",
+        "side": "BUY",
+        "option_type": "CE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.10",
+        "conditions": [],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      },
+      {
+        "tag": "LEG@4_PE",
+        "label": "Long PE wing (protection)",
+        "group": "Wing",
+        "instrument": "OPT",
+        "side": "BUY",
+        "option_type": "PE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.10",
+        "conditions": [],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      }
+    ]
+  },
+  "adjustment": {
+    "enabled": true,
+    "rules": [
+      {
+        "name": "CE short leg breached — emergency roll up",
+        "priority": 1,
+        "max_per_day": 2,
+        "max_total": null,
+        "cooldown_sec": 300,
+        "retriger": false,
+        "leg_guard": "LEG@1_CE",
+        "conditions": [
+          {
+            "parameter": "tag.LEG@1_CE.abs_delta",
+            "comparator": ">=",
+            "value": "0.50"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "LEG@1_CE",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "CE",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.25"
+              }
+            },
+            {
+              "close_tag": "LEG@3_CE",
+              "new_leg": {
+                "side": "BUY",
+                "option_type": "CE",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.10"
+              }
+            }
+          ]
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "PE short leg breached — emergency roll down",
+        "priority": 2,
+        "max_per_day": 2,
+        "max_total": null,
+        "cooldown_sec": 300,
+        "retriger": false,
+        "leg_guard": "LEG@2_PE",
+        "conditions": [
+          {
+            "parameter": "tag.LEG@2_PE.abs_delta",
+            "comparator": ">=",
+            "value": "0.50"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "LEG@2_PE",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "PE",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.25"
+              }
+            },
+            {
+              "close_tag": "LEG@4_PE",
+              "new_leg": {
+                "side": "BUY",
+                "option_type": "PE",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.10"
+              }
+            }
+          ]
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      },
+      {
+        "name": "VIX falls — tighten shorts to collect more premium",
+        "priority": 3,
+        "max_per_day": 1,
+        "max_total": null,
+        "cooldown_sec": 1800,
+        "retriger": false,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "india_vix",
+            "comparator": "<",
+            "value": "13"
+          },
+          {
+            "parameter": "abs(net_delta)",
+            "comparator": "<",
+            "value": "0.15",
+            "join": "AND"
+          },
+          {
+            "parameter": "combined_pnl",
+            "comparator": ">",
+            "value": "500",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "LEG@1_CE",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "CE",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.30"
+              }
+            },
+            {
+              "close_tag": "LEG@2_PE",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "PE",
+                "lots": 1,
+                "order_type": "MARKET",
+                "strike_mode": "standard",
+                "strike_selection": "delta",
+                "strike_value": "0.30"
+              }
+            }
+          ]
+        },
+        "else_enabled": false,
+        "else_conditions": [],
+        "else_action": null
+      }
+    ]
+  },
+  "exit": {
+    "profit_target": {
+      "amount": null,
+      "pct": 60,
+      "action": "exit_all",
+      "lots": 1
+    },
+    "stop_loss": {
+      "amount": null,
+      "pct": 200,
+      "action": "exit_all",
+      "allow_reentry": false
+    },
+    "trailing": {
+      "trail_amount": null,
+      "lock_in_at": null,
+      "trail_step": null,
+      "step_trigger": null
+    },
+    "profit_steps": {
+      "step_size": null,
+      "max_steps": null,
+      "action": "adj"
+    },
+    "risk": {
+      "max_loss_per_day": null,
+      "max_delta": null,
+      "delta_breach_action": "hedge",
+      "max_iv": null,
+      "min_iv": null,
+      "max_lots": 4,
+      "breakeven_buffer": null
+    },
+    "time": {
+      "strategy_exit_time": "15:20",
+      "expiry_day_action": "time",
+      "expiry_day_time": "14:30",
+      "roll_target": "weekly_next"
+    },
+    "combined_conditions": {
+      "operator": "OR",
+      "rules": [
+        {
+          "parameter": "india_vix",
+          "comparator": ">=",
+          "value": "25"
+        }
+      ]
+    },
+    "leg_rules": []
+  },
+  "schedule": {
+    "frequency": "daily",
+    "active_days": ["mon", "tue", "wed", "thu", "fri"],
+    "entry_time": "09:20",
+    "entry_window_end": "13:00",
+    "exit_time": "15:20",
+    "expiry_mode": "weekly_auto",
+    "dte_min": 2,
+    "dte_max": null,
+    "square_off_before_min": 30,
+    "entry_on_expiry_day": false,
+    "max_reentries_per_day": 1
+  },
+  "meta": {
+    "schema_version": "4.0",
+    "created_at": "2026-03-19T00:00:00.000Z",
+    "notes": "Iron Condor with defined risk. Strategy: (1) Sell 0.25 delta CE+PE, buy 0.10 delta wings for protection. (2) Max loss is capped at wing-to-short spread width minus premium collected. (3) Profit target: 60% of premium — statistically the sweet spot before gamma risk explodes. (4) Rolls the breached side completely (short+wing together) to maintain wing protection. (5) VIX-tightening rule opportunistically moves shorts to 0.30 delta when market is calm. (6) No entry on expiry day — gamma risk too high for condors. (7) Early EOD exit at 15:20 on expiry days."
+  },
+  "paper_mode": true,
+  "test_mode": true
+}

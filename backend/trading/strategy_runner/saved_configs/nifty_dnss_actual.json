@@ -1,0 +1,232 @@
+{
+  "schema_version": "4.0",
+  "name": "nifty_dnss_actual",
+  "id": "NIFTY_DNSS_ACTUAL",
+  "description": "",
+  "type": "neutral",
+  "enabled": true,
+  "status": "COMPLETED",
+  "identity": {
+    "exchange": "NFO",
+    "underlying": "NIFTY",
+    "instrument_type": "OPTIDX",
+    "product_type": "NRML",
+    "order_type": "MARKET",
+    "lots": 1,
+    "paper_mode": true,
+    "test_mode": "SUCCESS"
+  },
+  "timing": {
+    "entry_window_start": "09:18",
+    "entry_window_end": "15:10",
+    "eod_exit_time": "15:28"
+  },
+  "market_data": {
+    "source": "sqlite"
+  },
+  "entry": {
+    "entry_sequence": "parallel",
+    "global_conditions": [],
+    "legs": [
+      {
+        "tag": "LEG@1_CE",
+        "label": "Leg 1",
+        "group": "",
+        "instrument": "OPT",
+        "side": "SELL",
+        "option_type": "CE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.3",
+        "conditions": [],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      },
+      {
+        "tag": "LEG@2_PE",
+        "label": "Leg 2",
+        "group": "",
+        "instrument": "OPT",
+        "side": "SELL",
+        "option_type": "PE",
+        "expiry": "strategy_default",
+        "lots": 1,
+        "order_type": "MARKET",
+        "strike_mode": "standard",
+        "strike_selection": "delta",
+        "strike_value": "0.3",
+        "conditions": [],
+        "else_enabled": false,
+        "else_conditions": null,
+        "else_action": null
+      }
+    ]
+  },
+  "adjustment": {
+    "enabled": true,
+    "rules": [
+      {
+        "name": "Adjustment 1",
+        "priority": 1,
+        "max_per_day": 20,
+        "max_total": null,
+        "cooldown_sec": 60,
+        "leg_guard": "",
+        "conditions": [
+          {
+            "parameter": "abs(net_delta)",
+            "comparator": ">=",
+            "value": "0.2"
+          },
+          {
+            "parameter": "combined_pnl",
+            "comparator": ">=",
+            "value": "1000",
+            "join": "OR"
+          },
+          {
+            "parameter": "max_leg_delta",
+            "comparator": "<",
+            "value": "0.65",
+            "join": "AND"
+          }
+        ],
+        "action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "LOWER_DELTA_LEG",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "MATCH_CLOSING",
+                "lots": 1,
+                "order_type": "",
+                "strike_mode": "match_leg",
+                "strike_selection": "match_leg_param",
+                "match_leg": "HIGHER_DELTA_LEG",
+                "match_param": "abs_delta",
+                "match_offset": 0,
+                "match_multiplier": 1
+              }
+            }
+          ]
+        },
+        "else_enabled": true,
+        "else_conditions": [
+          {
+            "parameter": "abs(net_delta)",
+            "comparator": ">=",
+            "value": "0.2"
+          },
+          {
+            "parameter": "combined_pnl",
+            "comparator": ">=",
+            "value": "1000",
+            "join": "OR"
+          },
+          {
+            "parameter": "max_leg_delta",
+            "comparator": ">=",
+            "value": "0.65",
+            "join": "AND"
+          }
+        ],
+        "else_action": {
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "HIGHER_DELTA_LEG",
+              "new_leg": {
+                "side": "SELL",
+                "option_type": "MATCH_CLOSING",
+                "lots": 1,
+                "order_type": "",
+                "strike_mode": "match_leg",
+                "strike_selection": "match_leg_param",
+                "match_leg": "LOWER_DELTA_LEG",
+                "match_param": "abs_delta",
+                "match_offset": 0,
+                "match_multiplier": 1
+              }
+            }
+          ]
+        },
+        "retrigger": true
+      }
+    ]
+  },
+  "exit": {
+    "profit_target": {
+      "amount": null,
+      "pct": null,
+      "action": "exit_all",
+      "lots": 1
+    },
+    "stop_loss": {
+      "amount": 5000,
+      "pct": null,
+      "action": "exit_all",
+      "allow_reentry": false
+    },
+    "trailing": {
+      "trail_amount": null,
+      "lock_in_at": null,
+      "trail_step": null,
+      "step_trigger": null
+    },
+    "profit_steps": {
+      "step_size": null,
+      "max_steps": null,
+      "action": "adj"
+    },
+    "risk": {
+      "max_loss_per_day": null,
+      "max_delta": null,
+      "delta_breach_action": "hedge",
+      "max_iv": null,
+      "min_iv": null,
+      "max_lots": 4,
+      "breakeven_buffer": null
+    },
+    "time": {
+      "strategy_exit_time": "15:28",
+      "expiry_day_action": "none",
+      "expiry_day_time": "09:15",
+      "roll_target": "weekly_next"
+    },
+    "combined_conditions": {
+      "operator": "OR",
+      "rules": []
+    },
+    "leg_rules": []
+  },
+  "schedule": {
+    "frequency": "daily",
+    "active_days": [
+      "mon",
+      "tue",
+      "wed",
+      "thu",
+      "fri"
+    ],
+    "expiry_mode": "weekly_auto",
+    "dte_min": null,
+    "dte_max": null,
+    "square_off_before_min": null,
+    "entry_on_expiry_day": true,
+    "max_reentries_per_day": 1
+  },
+  "meta": {
+    "schema_version": "4.0",
+    "created_at": "2026-02-26T09:44:35.873Z"
+  },
+  "paper_mode": true,
+  "test_mode": true,
+  "created_at": "2026-02-27T12:53:41Z",
+  "updated_at": "2026-03-26T09:03:09",
+  "status_updated_at": "2026-04-02T15:28:05.356098"
+}

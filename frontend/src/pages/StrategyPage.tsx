@@ -2,6 +2,7 @@
    Strategy Page — strategy management hub
    ════════════════════════════════════════════ */
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { createChart, LineSeries, type IChartApi, type UTCTimestamp } from 'lightweight-charts'
 import { useToastStore } from '../stores'
 import { api } from '../lib/api'
@@ -11,7 +12,7 @@ import {
   Plus, Settings2, BarChart2, Clock, CheckCircle, AlertCircle,
   XCircle, Zap, FlaskConical, ToggleLeft, ToggleRight, ChevronDown,
   Activity, ArrowUpRight, ArrowDownRight, Eye, Wifi, AlertTriangle,
-  Loader2, PauseCircle, PlayCircle,
+  Loader2, PauseCircle, PlayCircle, Cpu, Pencil, Trash2,
 } from 'lucide-react'
 
 // ── Types ─────────────────────────────────────────
@@ -402,11 +403,198 @@ function LiveMonitorPanel() {
   )
 }
 
+// ── Saved Strategies Panel (from Strategy Builder backend) ────────────────────
+interface SavedStrategiesPanelProps {
+  strategies: any[]
+  loading: boolean
+  onRefresh: () => void
+  onRun: (name: string) => void
+  onStop: (name: string) => void
+  onEdit: (name: string) => void
+  onDelete: (name: string) => void
+}
+
+function SavedStrategiesPanel({
+  strategies, loading, onRefresh, onRun, onStop, onEdit, onDelete,
+}: SavedStrategiesPanelProps) {
+  if (loading && strategies.length === 0) {
+    return (
+      <div className="bg-bg-surface border border-border rounded-xl p-4">
+        <div className="flex items-center gap-2 text-[12px] text-text-muted">
+          <Loader2 className="w-4 h-4 animate-spin" /> Loading saved strategies…
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="bg-bg-surface border border-border rounded-xl overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+        <Cpu className="w-4 h-4 text-brand" />
+        <span className="text-[12px] font-semibold text-text-bright">Saved Strategies</span>
+        <span className="text-[10px] text-text-muted bg-bg-elevated px-2 py-0.5 rounded-full">
+          {strategies.length}
+        </span>
+        <div className="flex-1" />
+        <button
+          onClick={onRefresh}
+          className="text-text-muted hover:text-text-bright p-1 rounded transition-colors"
+          title="Refresh"
+        >
+          <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
+        </button>
+      </div>
+
+      {strategies.length === 0 ? (
+        <div className="p-8 text-center">
+          <Cpu className="w-8 h-8 mx-auto mb-2 text-text-muted opacity-40" />
+          <p className="text-[12px] text-text-muted mb-3">No strategies saved yet.</p>
+          <p className="text-[11px] text-text-muted opacity-60">
+            Use the Strategy Builder to create and save your first strategy.
+          </p>
+        </div>
+      ) : (
+        <div className="divide-y divide-border">
+          {strategies.map((s: any) => {
+            const isRunning = s.status === 'running'
+            const isError   = s.status === 'error'
+            return (
+              <div key={s.name} className="flex items-center gap-3 px-4 py-3 hover:bg-bg-hover transition-colors">
+                {/* Status dot */}
+                <span className={cn(
+                  'w-2 h-2 rounded-full shrink-0',
+                  isRunning ? 'bg-profit animate-pulse' :
+                  isError   ? 'bg-loss' :
+                  'bg-text-muted opacity-40'
+                )} />
+
+                {/* Info */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[12px] font-semibold text-text-bright truncate">
+                      {s.display_name || s.name}
+                    </span>
+                    {s.underlying && (
+                      <span className="text-[10px] text-brand bg-brand/10 px-1.5 py-0.5 rounded">
+                        {s.underlying}
+                      </span>
+                    )}
+                    <span className={cn(
+                      'text-[10px] px-1.5 py-0.5 rounded font-medium',
+                      s.paper_mode
+                        ? 'bg-text-muted/10 text-text-muted'
+                        : 'bg-profit/10 text-profit'
+                    )}>
+                      {s.paper_mode ? 'PAPER' : 'LIVE'}
+                    </span>
+                    {isError && (
+                      <span className="text-[10px] text-loss" title={s.error}>⚠ ERROR</span>
+                    )}
+                  </div>
+                  {s.description && (
+                    <div className="text-[10px] text-text-muted truncate mt-0.5">{s.description}</div>
+                  )}
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-1 shrink-0">
+                  {isRunning ? (
+                    <button
+                      onClick={() => onStop(s.name)}
+                      title="Stop"
+                      className="p-1.5 rounded-lg text-loss hover:bg-loss/10 transition-colors border border-loss/20"
+                    >
+                      <Square className="w-3.5 h-3.5" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => onRun(s.name)}
+                      title="Run"
+                      className="p-1.5 rounded-lg text-profit hover:bg-profit/10 transition-colors border border-profit/20"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => onEdit(s.name)}
+                    title="Edit in Builder"
+                    className="p-1.5 rounded-lg text-brand hover:bg-brand/10 transition-colors border border-brand/20"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => onDelete(s.name)}
+                    title="Delete"
+                    className="p-1.5 rounded-lg text-text-muted hover:text-loss hover:bg-loss/10 transition-colors border border-transparent hover:border-loss/20"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function StrategyPage() {
   const toast = useToastStore(s => s.toast)
+  const navigate = useNavigate()
   const [tab, setTab] = useState<PageTab>('all')
   const [strategies, setStrategies] = useState(DEMO_STRATEGIES)
   const [selected, setSelected] = useState<string | null>(null)
+
+  // ── Real strategies from backend ───────────────────────────────────────────
+  const [savedStrategies, setSavedStrategies] = useState<any[]>([])
+  const [savedLoading, setSavedLoading] = useState(false)
+
+  const loadSaved = useCallback(async () => {
+    setSavedLoading(true)
+    try {
+      const data = await api.strategyStatus()
+      setSavedStrategies(data || [])
+    } catch {
+      // backend may not have any strategies yet
+    } finally {
+      setSavedLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { loadSaved() }, [loadSaved])
+
+  async function handleRun(name: string) {
+    try {
+      await api.runStrategy(name)
+      toast(`Strategy "${name}" started`, 'success')
+      loadSaved()
+    } catch (e: any) {
+      toast(e?.message || 'Failed to start strategy', 'error')
+    }
+  }
+
+  async function handleStop(name: string) {
+    try {
+      await api.stopStrategy(name)
+      toast(`Strategy "${name}" stopped`, 'warning')
+      loadSaved()
+    } catch (e: any) {
+      toast(e?.message || 'Failed to stop strategy', 'error')
+    }
+  }
+
+  async function handleDelete(name: string) {
+    if (!confirm(`Delete strategy "${name}"?`)) return
+    try {
+      await api.deleteStrategyConfig(name)
+      toast(`Strategy "${name}" deleted`, 'info')
+      loadSaved()
+    } catch (e: any) {
+      toast(e?.message || 'Failed to delete strategy', 'error')
+    }
+  }
 
   const filtered = strategies.filter(s => {
     if (tab === 'live')       return s.mode === 'live'
@@ -458,12 +646,25 @@ export default function StrategyPage() {
           </div>
           <div className="flex-1" />
           <button
-            onClick={() => toast('Strategy builder coming soon', 'info')}
+            onClick={() => navigate('/app/strategy-builder')}
             className="btn-primary btn-sm"
           >
-            <Plus className="w-3.5 h-3.5" /> New Strategy
+            <Cpu className="w-3.5 h-3.5" /> Strategy Builder
           </button>
         </div>
+
+        {/* ── Saved Strategies Panel ── */}
+        {tab !== 'monitor' && (
+          <SavedStrategiesPanel
+            strategies={savedStrategies}
+            loading={savedLoading}
+            onRefresh={loadSaved}
+            onRun={handleRun}
+            onStop={handleStop}
+            onEdit={name => navigate(`/app/strategy-builder?name=${encodeURIComponent(name)}`)}
+            onDelete={handleDelete}
+          />
+        )}
 
         {/* Summary KPIs — hide on monitor tab */}
         {tab !== 'monitor' && <SummaryKPIs strategies={strategies} />}

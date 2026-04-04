@@ -77,6 +77,7 @@ from routers.orders          import router as orders_router
 from routers.websocket       import router as ws_router
 from routers.admin           import router as admin_router
 from routers.broker_sessions import router as broker_router
+from routers.strategy        import router as strategy_router
 from trading.oms             import oms_router
 from trading.supreme_risk    import risk_router
 from trading.trading_bot     import alert_router
@@ -110,8 +111,9 @@ app.include_router(market_router,  prefix="/api")
 app.include_router(orders_router,  prefix="/api")
 app.include_router(ws_router)
 app.include_router(admin_router,   prefix="/api")
-app.include_router(broker_router,  prefix="/api")
-app.include_router(oms_router,     prefix="/api")
+app.include_router(broker_router,   prefix="/api")
+app.include_router(strategy_router, prefix="/api")
+app.include_router(oms_router,      prefix="/api")
 app.include_router(risk_router,    prefix="/api")
 app.include_router(alert_router,   prefix="/api")
 
