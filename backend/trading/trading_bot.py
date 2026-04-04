@@ -202,7 +202,7 @@ def _process_alert(user_id: str, alert: AlertPayload, db) -> dict:
             "success": True,
             "strategy": alert.strategy,
             "action": "status",
-            "risk_status": risk.get_status().to_dict(),
+            "risk_status": risk.get_status(),
             "open_positions": oms.get_positions(alert.strategy),
             "guard_positions": guard.get_strategy_positions(alert.strategy),
             "timestamp": datetime.now(timezone.utc).isoformat(),

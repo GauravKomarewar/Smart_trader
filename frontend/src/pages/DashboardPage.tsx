@@ -152,7 +152,7 @@ function BrokerMiniCard({ acc }: { acc: any }) {
   const isLive    = acc.is_live
   const available = acc.available ?? 0
   const used      = acc.used ?? 0
-  const total     = acc.total ?? (available + used) || 0
+  const total     = (acc.total ?? (available + used)) || 0
   const usedPct   = total > 0 ? Math.min((used / total) * 100, 100) : 0
   const modeColor = isLive ? 'text-profit border-profit/20 bg-profit/5' : 'text-text-muted border-border bg-bg-surface'
 

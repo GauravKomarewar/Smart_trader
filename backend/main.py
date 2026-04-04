@@ -78,8 +78,12 @@ from routers.websocket       import router as ws_router
 from routers.admin           import router as admin_router
 from routers.broker_sessions import router as broker_router
 from routers.strategy        import router as strategy_router
+from routers.risk            import risk_router
+from routers.positions       import positions_router
+from routers.greeks          import greeks_router
+from routers.option_chain    import oc_router
+from routers.analytics       import analytics_router
 from trading.oms             import oms_router
-from trading.supreme_risk    import risk_router
 from trading.trading_bot     import alert_router
 
 # ── Create FastAPI app ─────────────────────────────────────────────────────────
@@ -113,9 +117,13 @@ app.include_router(ws_router)
 app.include_router(admin_router,   prefix="/api")
 app.include_router(broker_router,   prefix="/api")
 app.include_router(strategy_router, prefix="/api")
-app.include_router(oms_router,      prefix="/api")
-app.include_router(risk_router,    prefix="/api")
-app.include_router(alert_router,   prefix="/api")
+app.include_router(oms_router,        prefix="/api")
+app.include_router(risk_router,       prefix="/api")
+app.include_router(positions_router,  prefix="/api")
+app.include_router(greeks_router,     prefix="/api")
+app.include_router(oc_router,         prefix="/api")
+app.include_router(analytics_router,  prefix="/api")
+app.include_router(alert_router,      prefix="/api")
 
 # ── Health check ───────────────────────────────────────────────────────────────
 @app.get("/health", tags=["health"])
@@ -142,6 +150,14 @@ async def on_startup():
     # Initialize database tables
     from db.database import create_tables
     create_tables()
+
+    # Initialize PostgreSQL trading tables
+    try:
+        from db.trading_db import init_trading_db
+        init_trading_db()
+    except Exception as exc:
+        import logging
+        logging.getLogger("smart_trader").warning("trading_db init failed: %s", exc)
 
     # Seed admin + demo users
     from db.database import SessionLocal, User

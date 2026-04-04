@@ -9,7 +9,7 @@ import { useInstrumentSearch } from '../../hooks'
 import { cn, fmtINR, fmtNum } from '../../lib/utils'
 import { api } from '../../lib/api'
 import { X, Search, AlertTriangle, CheckCircle, ChevronDown } from 'lucide-react'
-import type { PlaceOrderForm } from '../../types'
+import type { PlaceOrderForm, Exchange } from '../../types'
 
 type OrderType     = 'MARKET' | 'LIMIT' | 'SL' | 'SL-M'
 type ProductType   = 'MIS' | 'NRML' | 'CNC'
@@ -48,7 +48,7 @@ export default function PlaceOrderModal() {
 
   const [side, setSide]               = useState<'BUY' | 'SELL'>('BUY')
   const [symbol, setSymbol]           = useState('')
-  const [exchange, setExchange]       = useState('NSE')
+  const [exchange, setExchange]       = useState<Exchange>('NSE')
   const [searchQ, setSearchQ]         = useState('')
   const [showSearch, setShowSearch]   = useState(false)
   const [orderType, setOrderType]     = useState<OrderType>('MARKET')
