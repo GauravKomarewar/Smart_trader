@@ -26,7 +26,7 @@ from scripts.scriptmaster import get_future, universal_symbol_search
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DB_FOLDER = _PROJECT_ROOT / "shoonya_platform" / "market_data" / "option_chain" / "data"
+DB_FOLDER = _PROJECT_ROOT / "data" / "option_chain"
 
 # Allowed match parameters for strike selection (map to SQL expressions)
 MATCH_PARAM_TO_SQL = {

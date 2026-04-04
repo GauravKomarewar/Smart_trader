@@ -727,17 +727,19 @@ class StrategyExecutorService:
         orders created by other subsystems are left untouched.
         """
         try:
-            from shoonya_platform.persistence.database import get_connection
+            from db.trading_db import get_trading_conn
             today = datetime.now().strftime("%Y-%m-%d")
-            conn = get_connection()
-            cursor = conn.execute(
-                "UPDATE orders SET status = 'EXPIRED', updated_at = ? "
-                "WHERE status = 'CREATED' AND created_at < ? "
+            conn = get_trading_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE orders SET status = 'EXPIRED', updated_at = NOW() "
+                "WHERE status = 'CREATED' AND created_at < %s "
                 "AND source = 'STRATEGY'",
-                (datetime.now().isoformat(), today),
+                (today,),
             )
-            count = cursor.rowcount
+            count = cur.rowcount
             conn.commit()
+            conn.close()
             if count > 0:
                 logger.warning("Expired %d stale CREATED strategy orders from previous days", count)
         except Exception as e:
@@ -792,18 +794,19 @@ class StrategyExecutorService:
         or got stuck are cleaned up so they don't leak into the next day.
         """
         try:
-            from shoonya_platform.persistence.database import get_connection
+            from db.trading_db import get_trading_conn
             now = datetime.now()
-            conn = get_connection()
-            cursor = conn.execute(
+            conn = get_trading_conn()
+            cur = conn.cursor()
+            cur.execute(
                 "UPDATE orders SET status = 'EXPIRED', "
-                "  updated_at = ?, "
+                "  updated_at = NOW(), "
                 "  tag = COALESCE(tag, '') || '|EOD_CLEANUP' "
                 "WHERE status IN ('CREATED', 'SENT_TO_BROKER')",
-                (now.isoformat(),),
             )
-            count = cursor.rowcount
+            count = cur.rowcount
             conn.commit()
+            conn.close()
             if count > 0:
                 logger.warning(
                     "EOD_CLEANUP | expired %d pending orders (CREATED/SENT_TO_BROKER) at %s",
@@ -1823,18 +1826,20 @@ class PerStrategyExecutor:
         auto-squared by the broker at market close).
         """
         try:
-            from shoonya_platform.persistence.database import get_connection
+            from db.trading_db import get_trading_conn
             today_str = now.strftime("%Y-%m-%d")
-            conn = get_connection()
-            cursor = conn.execute(
-                "UPDATE orders SET status = 'EXPIRED', updated_at = ? "
+            conn = get_trading_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE orders SET status = 'EXPIRED', updated_at = NOW() "
                 "WHERE status IN ('CREATED', 'SENT_TO_BROKER') "
-                "AND created_at < ? "
-                "AND strategy_name = ?",
-                (now.isoformat(), today_str, self.name),
+                "AND created_at < %s "
+                "AND strategy_name = %s",
+                (today_str, self.name),
             )
-            count = cursor.rowcount
+            count = cur.rowcount
             conn.commit()
+            conn.close()
             if count > 0:
                 logger.warning(
                     "DAILY_EXPIRE_STALE_ORDERS | strategy=%s | expired %d stale orders from previous days",

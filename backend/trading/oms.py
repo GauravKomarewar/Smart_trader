@@ -399,10 +399,29 @@ _oms_lock = threading.Lock()
 
 
 def get_oms(user_id: str) -> "OrderManagementSystem":
+    """
+    Get or create an OMS instance for a user.
+    Automatically attaches a live broker adapter if the user has a connected session.
+    """
     with _oms_lock:
         if user_id not in _oms_instances:
             _oms_instances[user_id] = OrderManagementSystem()
-        return _oms_instances[user_id]
+
+        oms = _oms_instances[user_id]
+
+        # Attach broker adapter if user has a live session and OMS has no broker
+        if oms.broker is None:
+            try:
+                from broker.multi_broker import registry as mb
+                primary = mb.get_primary_session(user_id)
+                if primary and primary._adapter is not None:
+                    oms.broker = primary._adapter
+                    logger.info("OMS: attached live broker adapter for user=%s broker=%s",
+                                user_id[:8], primary.broker_id)
+            except Exception as e:
+                logger.debug("OMS: broker attach skipped: %s", e)
+
+        return oms
 
 
 class PlaceOrderBody(BaseModel):

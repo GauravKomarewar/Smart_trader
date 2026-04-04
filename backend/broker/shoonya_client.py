@@ -2,22 +2,16 @@
 Smart Trader — Shoonya Broker Client Wrapper
 ============================================
 
-Bridges Smart Trader backend ↔ Shoonya Broker using the existing
-shoonya_platform code at /home/ubuntu/shoonya_platform/.
+Self-contained Shoonya broker integration for Smart Trader.
+No external project dependencies — uses local oauth_login + NorenApi.
 
 Architecture:
-  - Lazily imports shoonya_platform to avoid startup errors if not installed
+  - Uses broker.oauth_login for daily SEBI-compliant OAuth token
+  - Uses NorenRestApiPy (NorenApi) for REST + WebSocket
   - Falls back to DEMO mode when credentials are not configured
   - Thread-safe singleton per session
-  - Market data cached for rate-limiting compliance
-
-Integration path:
-  1. Use shoonya_platform's run_oauth_login() for daily token
-  2. Use ShoonyaClient (extends NorenApi) for REST + WebSocket
-  3. Normalize responses to Smart Trader domain types
 """
 
-import sys
 import os
 import logging
 import threading
@@ -27,20 +21,15 @@ from pathlib import Path
 
 logger = logging.getLogger("smart_trader.broker")
 
-# ── Add shoonya_platform to Python path ──────────────────────────────────────
-_SHOONYA_ROOT = Path("/home/ubuntu/shoonya_platform")
-if _SHOONYA_ROOT.exists() and str(_SHOONYA_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SHOONYA_ROOT))
-
-# ── Try importing shoonya_platform ───────────────────────────────────────────
+# ── Import local OAuth login ─────────────────────────────────────────────────
 try:
-    from shoonya_platform.brokers.shoonya.oauth_login import run_oauth_login  # type: ignore[import]
+    from broker.oauth_login import run_oauth_login
     _SHOONYA_AVAILABLE = True
-    logger.info("shoonya_platform imported successfully")
+    logger.info("Smart Trader OAuth login module loaded")
 except ImportError as e:
     _SHOONYA_AVAILABLE = False
     run_oauth_login = None  # type: ignore[assignment]
-    logger.warning("shoonya_platform not available: %s — running in DEMO mode", e)
+    logger.warning("OAuth login not available: %s — running in DEMO mode", e)
 
 try:
     from NorenRestApiPy.NorenApi import NorenApi  # type: ignore[import]
@@ -160,7 +149,7 @@ class BrokerSession:
 
         OAuth flow:
           1. Checks if cached token is still valid (< 8 hours old)
-          2. Runs headless Chrome OAuth via run_oauth_login()
+          2. Runs headless Firefox OAuth via run_oauth_login()
           3. Stores token and initializes ShoonyaClient
         """
         with self._lock:
@@ -169,7 +158,7 @@ class BrokerSession:
                 return True
 
             if not _SHOONYA_AVAILABLE:
-                logger.error("shoonya_platform not available — cannot login")
+                logger.error("OAuth login module not available — cannot login")
                 return False
 
             if not _NOREN_AVAILABLE:
@@ -198,22 +187,26 @@ class BrokerSession:
             self._session_token = token
             logger.info("OAuth login successful — token acquired")
 
-            # Initialize ShoonyaClient with the injected token
+            # Initialize NorenApi client with the injected token
             try:
-                from shoonya_platform.brokers.shoonya.client import ShoonyaClient
-                minimal_cfg = _MinimalShoonyaConfig(
+                cfg = _MinimalShoonyaConfig(
                     user_id=self._cfg.SHOONYA_USER_ID,
                     password=self._cfg.SHOONYA_PASSWORD,
                     totp_key=self._cfg.SHOONYA_TOTP_KEY,
                     vendor_code=self._cfg.SHOONYA_VENDOR_CODE,
                     api_secret=self._cfg.SHOONYA_OAUTH_SECRET,
                 )
-                self._client = ShoonyaClient(minimal_cfg, enable_auto_recovery=False)
-                # set_session() is the ONLY correct way to restore a session —
-                # it initialises all name-mangled NorenApi attributes.
-                self._client.set_session(self._cfg.SHOONYA_USER_ID, "", token)
-                self._client._logged_in = True
-                logger.info("ShoonyaClient initialized with OAuth token")
+                client = NorenApi(
+                    host=cfg.shoonya_host,
+                    websocket=cfg.shoonya_websocket,
+                )
+                client.set_session(
+                    userid=self._cfg.SHOONYA_USER_ID,
+                    password="",
+                    usertoken=token,
+                )
+                self._client = client
+                logger.info("NorenApi client initialized with OAuth token")
             except Exception as e:
                 logger.exception("Failed to initialize ShoonyaClient: %s", e)
                 return False
@@ -446,14 +439,13 @@ class BrokerSession:
         Uses _MinimalShoonyaConfig so no .env file is required; only the
         credentials dict passed in by the caller is used.
         """
-        if not _SHOONYA_AVAILABLE or not _NOREN_AVAILABLE:
-            logger.warning("inject_token: shoonya_platform/NorenRestApiPy not available")
+        if not _NOREN_AVAILABLE:
+            logger.warning("inject_token: NorenRestApiPy not available")
             return False
 
         with self._lock:
             try:
-                from shoonya_platform.brokers.shoonya.client import ShoonyaClient
-                minimal_cfg = _MinimalShoonyaConfig(
+                cfg = _MinimalShoonyaConfig(
                     user_id=creds.get("USER_ID", ""),
                     password=creds.get("PASSWORD", ""),
                     totp_key=creds.get("TOKEN", ""),
@@ -461,11 +453,15 @@ class BrokerSession:
                     api_secret=creds.get("APP_KEY", ""),
                     imei=creds.get("IMEI", "mac"),
                 )
-                client = ShoonyaClient(minimal_cfg, enable_auto_recovery=False)
-                # set_session() is the ONLY correct way to restore a Shoonya session —
-                # it initialises all name-mangled NorenApi attributes properly.
-                client.set_session(creds.get("USER_ID", ""), "", token)
-                client._logged_in = True
+                client = NorenApi(
+                    host=cfg.shoonya_host,
+                    websocket=cfg.shoonya_websocket,
+                )
+                client.set_session(
+                    userid=creds.get("USER_ID", ""),
+                    password="",
+                    usertoken=token,
+                )
 
                 self._client = client
                 self._session_token = token

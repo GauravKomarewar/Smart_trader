@@ -14,8 +14,13 @@ from .exit_engine import ExitEngine
 from .reconciliation import BrokerReconciliation
 from .persistence import StatePersistence
 
-# NEW: Import index subscriber for live index data
-from shoonya_platform.market_data.feeds import index_tokens_subscriber
+# Stub for index subscriber — Smart_trader does not use shoonya_platform feeds
+class _NullIndexSubscriber:
+    @staticmethod
+    def get_index_prices():
+        return {}
+
+index_tokens_subscriber = _NullIndexSubscriber()
 
 logger = logging.getLogger(__name__)
 

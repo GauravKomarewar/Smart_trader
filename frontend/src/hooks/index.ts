@@ -10,10 +10,42 @@ import {
   useOptionChainStore, useToastStore,
 } from '../stores'
 import {
-  DEMO_DASHBOARD, DEMO_INDICES, DEMO_SCREENER,
+  DEMO_INDICES, DEMO_SCREENER,
   generateOptionChain,
 } from '../lib/mockData'
-import type { DashboardData, IndexQuote, ScreenerRow } from '../types'
+import type { DashboardData, IndexQuote, ScreenerRow, RiskMetrics } from '../types'
+
+// ── Empty dashboard (no fake data - used when no broker connected) ──
+const EMPTY_RISK: RiskMetrics = {
+  accountId: '',
+  dailyPnl: 0,
+  dailyPnlLimit: 0,
+  mtmPnl: 0,
+  maxPositionValue: 0,
+  leverageUsed: 0,
+  maxLeverage: 0,
+  positionCount: 0,
+  maxPositions: 0,
+  riskStatus: 'SAFE',
+  alerts: [],
+}
+
+const EMPTY_DASHBOARD: DashboardData = {
+  positions: [],
+  holdings: [],
+  orders: [],
+  trades: [],
+  riskMetrics: EMPTY_RISK,
+  accountSummary: {
+    totalEquity: 0,
+    dayPnl: 0,
+    dayPnlPct: 0,
+    unrealizedPnl: 0,
+    realizedPnl: 0,
+    usedMargin: 0,
+    availableMargin: 0,
+  },
+}
 
 // ── Auth check on mount ──────────────────────────
 export function useAuthCheck() {
@@ -94,19 +126,21 @@ export function useDashboardData() {
 
   const fetch = useCallback(async () => {
     if (!isAuthenticated) {
-      setData(DEMO_DASHBOARD)
+      // Not logged in — show empty dashboard (not fake demo data)
+      setData(EMPTY_DASHBOARD)
       return
     }
     if (!isBrokerLive) {
-      setData(DEMO_DASHBOARD)
+      // Logged in but no broker connected — show empty dashboard with clear state
+      setData(EMPTY_DASHBOARD)
       return
     }
     try {
       const data = await api.liveDashboard() as DashboardData
-      // Only use demo data if source explicitly says demo AND we have no real data
+      // Only use empty data if source explicitly says demo AND we have no real data
       if ((data as any).source === 'demo' && !(data as any).positions?.length) {
         // Broker connected but no positions yet — show empty dashboard, not fake demo
-        setData({ ...data, positions: [], orders: [], holdings: [] } as DashboardData)
+        setData({ ...data, positions: [], orders: [], holdings: [], trades: [] } as DashboardData)
       } else {
         setData(data)
       }
@@ -127,27 +161,26 @@ export function useDashboardData() {
 // ── Market indices polling ───────────────────────
 export function useMarketIndices() {
   const { setIndices } = useMarketStore()
-  const { isAuthenticated, isBrokerLive } = useAuthStore()
+  const { isAuthenticated } = useAuthStore()
 
   useEffect(() => {
     const load = async () => {
       try {
-        if (!isAuthenticated) { setIndices(DEMO_INDICES); return }
+        // Always try live API first — Fyers provides data even without broker login
         const res = await api.indices() as any
         const data = Array.isArray(res) ? res : (res.data ?? [])
         if (data.length > 0) {
           setIndices(data)
-        } else if (!isBrokerLive) {
-          setIndices(DEMO_INDICES)
+          return
         }
-      } catch {
-        if (!isBrokerLive) setIndices(DEMO_INDICES)
-      }
+      } catch { /* fall through */ }
+      // Only use demo indices if API completely fails
+      setIndices(DEMO_INDICES)
     }
     load()
     const t = setInterval(load, 5000)
     return () => clearInterval(t)
-  }, [isAuthenticated, isBrokerLive])
+  }, [isAuthenticated])
 }
 
 // ── Screener data ────────────────────────────────
@@ -158,13 +191,15 @@ export function useScreenerData() {
   useEffect(() => {
     const load = async () => {
       try {
-        if (!isAuthenticated) { setScreener(DEMO_SCREENER); return }
+        // Always try API — screener works with Fyers (no broker login needed)
         const res = await api.screener({}) as any
         const data = Array.isArray(res) ? res : (res.data ?? [])
-        setScreener(data)
-      } catch {
-        setScreener(DEMO_SCREENER)
-      }
+        if (data.length > 0) {
+          setScreener(data)
+          return
+        }
+      } catch { /* fall through */ }
+      setScreener(DEMO_SCREENER)
     }
     load()
     const t = setInterval(load, 30000)
@@ -201,33 +236,25 @@ function demoOptionChain(underlying: string, expiry: string) {
 
 export function useOptionChain() {
   const { selectedUnderlying, selectedExpiry, setData, setLoading } = useOptionChainStore()
-  const { isAuthenticated } = useAuthStore()  // Fyers is admin-configured universal data — no broker login required
 
   useEffect(() => {
     const load = async () => {
       setLoading(true)
       try {
-        if (!isAuthenticated) {
-          setData(demoOptionChain(selectedUnderlying, selectedExpiry || '10Apr2026'))
-          return
-        }
-        // Always try live API first — Fyers provides data for all users
+        // Always try live API first — Fyers provides option chain data for all users
         const data = await api.optionChain(selectedUnderlying, selectedExpiry || undefined) as any
         if (data && data.rows && data.rows.length > 0) {
           setData(data)
           return
         }
-        // Fall to demo only if API returned nothing
-        setData(demoOptionChain(selectedUnderlying, selectedExpiry || '10Apr2026'))
-      } catch {
-        // API error — show demo
-        setData(demoOptionChain(selectedUnderlying, selectedExpiry || '10Apr2026'))
-      }
+      } catch { /* fall through */ }
+      // Fall to demo only if API returned nothing or failed
+      setData(demoOptionChain(selectedUnderlying, selectedExpiry || '10Apr2026'))
     }
     load()
     const t = setInterval(load, 5000)
     return () => clearInterval(t)
-  }, [selectedUnderlying, selectedExpiry, isAuthenticated])
+  }, [selectedUnderlying, selectedExpiry])
 }
 
 // ── Instrument search ────────────────────────────

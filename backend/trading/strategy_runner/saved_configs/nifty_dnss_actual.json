@@ -5,7 +5,7 @@
   "description": "",
   "type": "neutral",
   "enabled": true,
-  "status": "COMPLETED",
+  "status": "RUNNING",
   "identity": {
     "exchange": "NFO",
     "underlying": "NIFTY",

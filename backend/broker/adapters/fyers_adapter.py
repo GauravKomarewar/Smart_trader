@@ -1,7 +1,7 @@
 """
 Smart Trader — Fyers Broker Adapter
 =====================================
-Wraps FyersBrokerClient (from shoonya_platform) and translates responses
+Wraps fyers_apiv3 FyersModel and translates responses
 to normalised Smart Trader models.
 
 Fyers field reference
@@ -20,20 +20,11 @@ Funds:     fund_limit list: [{title, equityAmount}]
 from __future__ import annotations
 
 import logging
-import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from broker.adapters.base import BrokerAdapter, Funds, Holding, Order, Position, Trade
 
 logger = logging.getLogger("smart_trader.broker.fyers")
-
-
-def _ensure_shoonya_path() -> None:
-    """Add shoonya_platform to sys.path so FyersBrokerClient can be imported."""
-    _root = Path("/home/ubuntu/shoonya_platform")
-    if _root.exists() and str(_root) not in sys.path:
-        sys.path.insert(0, str(_root))
 
 
 _FYERS_STATUS_MAP = {1: "PENDING", 2: "COMPLETE", 4: "CANCELLED",
@@ -74,92 +65,41 @@ class FyersAdapter(BrokerAdapter):
         if token:
             self._build_client(token)
 
-    # ── Internal: build the FyersBrokerClient ─────────────────────────────────
+    # ── Internal: build the Fyers client ─────────────────────────────────────
 
     def _build_client(self, token: str) -> None:
-        """Instantiate FyersBrokerClient and inject the token."""
-        _ensure_shoonya_path()
+        """Build a FyersModel client with a pre-acquired token."""
         try:
-            from shoonya_platform.brokers.fyers.client import FyersBrokerClient  # type: ignore[import]
-            from shoonya_platform.brokers.fyers.config import FyersConfig  # type: ignore[import]
+            from fyers_apiv3.fyersModel import FyersModel
         except ImportError as e:
-            logger.error("Cannot import FyersBrokerClient: %s", e)
+            logger.error("fyers_apiv3 not installed: %s", e)
             return
 
         app_id    = self._creds.get("APP_ID", "")
         client_id = self._creds.get("CLIENT_ID", "")
-        secret_id = self._creds.get("SECRET_KEY", "")
-        totp_key  = self._creds.get("TOTP_KEY", "")
-        pin       = self._creds.get("PIN", "")
-        redirect_url = self._creds.get("REDIRECT_URL", "https://trade.fyers.in/api-login/redirect-uri/index.html")
 
-        # FyersConfig requires all fields; gracefully fall back if missing
-        if not all([client_id, app_id, secret_id]):
-            logger.error("Missing required Fyers credentials (CLIENT_ID / APP_ID / SECRET_KEY)")
+        if not all([client_id, app_id]):
+            logger.error("Missing required Fyers credentials (CLIENT_ID / APP_ID)")
             return
 
+        # Token may arrive as "APP_ID:raw_token" or just "raw_token"
+        if ":" in token:
+            raw_access_token = token.split(":", 1)[1]
+        else:
+            raw_access_token = token
+
         try:
-            fyers_cfg = FyersConfig(
-                fyers_id=client_id,   # correct field name
-                app_id=app_id,
-                secret_id=secret_id,  # correct field name
-                totp_key=totp_key or "AAAA",  # placeholder; token already acquired
-                pin=pin or "0000",
-                redirect_url=redirect_url or "https://trade.fyers.in/api-login/redirect-uri/index.html",
+            self._client = FyersModel(
+                client_id=app_id,
+                token=raw_access_token,
+                log_level="ERROR",
             )
-            self._client = FyersBrokerClient(fyers_cfg)
-            # Inject the pre-acquired token so no login flow is needed
-            self._inject_token(token)
-        except Exception as e:
-            logger.error("FyersBrokerClient init failed: %s", e)
-
-    def _inject_token(self, token: str) -> bool:
-        """Directly set the access token on the underlying FyersV3Client."""
-        if self._client is None:
-            return False
-        try:
-            # FyersBrokerClient stores FyersV3Client in ._fyers_client
-            fv3 = getattr(self._client, "_fyers_client", None)
-            if fv3 is None:
-                return False
-
-            app_id = self._creds.get("APP_ID", "")
-            # Token may arrive as "APP_ID:raw_token" or just "raw_token"
-            if ":" in token:
-                raw_access_token = token.split(":", 1)[1]
-            else:
-                raw_access_token = token
-
-            # Inject onto FyersV3Client (it stores it as access_token)
-            fv3.access_token = raw_access_token
-
-            # FyersModel expects "app_id:access_token" as the authorization header
-            fyers_model = getattr(fv3, "fyers", None)
-            if fyers_model is None:
-                # login() was never called — create FyersModel directly
-                try:
-                    from fyers_apiv3.fyersModel import FyersModel
-                    fyers_model = FyersModel(
-                        client_id=app_id,
-                        token=raw_access_token,
-                        log_level="ERROR",
-                    )
-                    fv3.fyers = fyers_model
-                except Exception as _fe:
-                    logger.warning("FyersModel direct creation failed: %s", _fe)
-
-            if fyers_model is not None:
-                fyers_model.token = raw_access_token
-                # Rebuild header that FyersModel uses internally
-                fyers_model.header = f"{app_id}:{raw_access_token}"
-
-            self._client._logged_in = True
             self._connected = True
-            logger.info("Fyers token injected for client=%s", self.client_id)
-            return True
+            logger.info("Fyers client initialised for client=%s", client_id)
         except Exception as e:
-            logger.error("_inject_token error: %s", e)
-            return False
+            logger.error("FyersModel init failed: %s", e)
+
+    # _inject_token removed — _build_client now creates FyersModel directly
 
     # ── Connection ─────────────────────────────────────────────────────────────
 
@@ -173,9 +113,11 @@ class FyersAdapter(BrokerAdapter):
             return []
         assert self._client is not None  # guaranteed by is_connected()
         try:
-            # FyersBrokerClient.get_positions() already returns partially normalised dicts
-            raw_list = self._client.get_positions()
-            return [self._enrich(self._map_position(p)) for p in (raw_list or [])]
+            resp = self._client.positions()
+            if not isinstance(resp, dict) or resp.get("s") != "ok":
+                return []
+            raw_list = resp.get("netPositions") or []
+            return [self._enrich(self._map_position(p)) for p in raw_list]
         except Exception as e:
             logger.error("get_positions error: %s", e)
             return []
@@ -221,8 +163,11 @@ class FyersAdapter(BrokerAdapter):
             return []
         assert self._client is not None  # guaranteed by is_connected()
         try:
-            raw_list = self._client.get_order_book()
-            return [self._enrich(self._map_order(o)) for o in (raw_list or [])]
+            resp = self._client.orderbook()
+            if not isinstance(resp, dict) or resp.get("s") != "ok":
+                return []
+            raw_list = resp.get("orderBook") or []
+            return [self._enrich(self._map_order(o)) for o in raw_list]
         except Exception as e:
             logger.error("get_order_book error: %s", e)
             return []
@@ -271,11 +216,19 @@ class FyersAdapter(BrokerAdapter):
             return self._enrich(Funds(available_cash=0.0))
         assert self._client is not None  # guaranteed by is_connected()
         try:
-            raw = self._client.get_limits()
+            resp = self._client.funds()
+            if not isinstance(resp, dict) or resp.get("s") != "ok":
+                return self._enrich(Funds(available_cash=0.0))
+            # fund_limit is a list of dicts with 'title' and 'equityAmount' keys
+            fund_list = resp.get("fund_limit") or []
+            fund_map = {item.get("title", ""): item for item in fund_list}
+            available = float(fund_map.get("Available Balance", {}).get("equityAmount", 0))
+            used = float(fund_map.get("Used Margin", {}).get("equityAmount", 0))
+            total = float(fund_map.get("Total Balance", {}).get("equityAmount", 0))
             return self._enrich(Funds(
-                available_cash=float(raw.get("available_cash", 0)),
-                used_margin=float(raw.get("used_margin", 0)),
-                total_balance=float(raw.get("total_balance", 0)),
+                available_cash=available,
+                used_margin=used,
+                total_balance=total,
             ))
         except Exception as e:
             logger.error("get_funds error: %s", e)
@@ -288,8 +241,11 @@ class FyersAdapter(BrokerAdapter):
             return []
         assert self._client is not None  # guaranteed by is_connected()
         try:
-            raw_list = self._client.get_holdings()
-            return [self._enrich(self._map_holding(h)) for h in (raw_list or [])]
+            resp = self._client.holdings()
+            if not isinstance(resp, dict) or resp.get("s") != "ok":
+                return []
+            raw_list = resp.get("holdings") or []
+            return [self._enrich(self._map_holding(h)) for h in raw_list]
         except Exception as e:
             logger.warning("get_holdings error: %s", e)
             return []
@@ -318,11 +274,9 @@ class FyersAdapter(BrokerAdapter):
     def get_tradebook(self) -> List[Trade]:
         if not self.is_connected():
             return []
+        assert self._client is not None  # guaranteed by is_connected()
         try:
-            fv3 = getattr(self._client, "_fyers_client", None)
-            if fv3 is None or not hasattr(fv3, "fyers"):
-                return []
-            resp = fv3.fyers.tradebook()
+            resp = self._client.tradebook()
             if not isinstance(resp, dict) or resp.get("s") != "ok":
                 return []
             raw_list = resp.get("tradeBook") or []
@@ -397,13 +351,14 @@ class FyersAdapter(BrokerAdapter):
                 "offlineOrder":  False,
             }
 
-            result = self._client.place_order(fyers_order)  # type: ignore[union-attr]
-            # FyersBrokerClient.place_order returns OrderResult dataclass
-            if hasattr(result, "success"):
+            result = self._client.place_order(data=fyers_order)
+            # FyersModel.place_order returns dict: {"s": "ok", "id": "...", "code": 1101, "message": "..."}
+            if isinstance(result, dict):
+                ok = result.get("s") == "ok"
                 return {
-                    "success": result.success,
-                    "order_id": getattr(result, "order_id", ""),
-                    "message": getattr(result, "error_message", "") or "Order placed",
+                    "success": ok,
+                    "order_id": result.get("id", ""),
+                    "message": result.get("message", "") or ("Order placed" if ok else "Order failed"),
                 }
             return {"success": False, "message": "Unexpected response"}
         except Exception as e:
@@ -415,13 +370,11 @@ class FyersAdapter(BrokerAdapter):
             return {"success": False, "message": "Not connected"}
         assert self._client is not None  # guaranteed by is_connected()
         try:
-            result = self._client.cancel_order(order_id)
-            if result is None:
-                return {"success": False, "message": "Cancel failed"}
+            result = self._client.cancel_order(data={"id": order_id})
             if isinstance(result, dict):
                 ok = result.get("s") == "ok"
                 return {"success": ok, "message": result.get("message", "")}
-            return {"success": True, "message": "Cancelled"}
+            return {"success": False, "message": "Cancel failed"}
         except Exception as e:
             logger.error("cancel_order error: %s", e)
             return {"success": False, "message": str(e)}
@@ -431,7 +384,8 @@ class FyersAdapter(BrokerAdapter):
             return {"success": False, "message": "Not connected"}
         assert self._client is not None  # guaranteed by is_connected()
         try:
-            result = self._client.modify_order(order_id, modifications)
+            modify_data = {"id": order_id, **modifications}
+            result = self._client.modify_order(data=modify_data)
             if isinstance(result, dict):
                 ok = result.get("s") == "ok"
                 return {"success": ok, "message": result.get("message", "")}

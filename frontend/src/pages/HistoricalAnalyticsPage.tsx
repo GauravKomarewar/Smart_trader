@@ -65,7 +65,7 @@ export default function HistoricalAnalyticsPage() {
           <select
             value={days}
             onChange={e => setDays(Number(e.target.value))}
-            className="input-field text-sm"
+            className="input-base text-sm"
           >
             <option value={7}>7 days</option>
             <option value={14}>14 days</option>

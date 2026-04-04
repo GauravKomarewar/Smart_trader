@@ -304,39 +304,110 @@ def _normalize_order(o: dict, idx: int) -> dict:
 
 @router.get("/dashboard")
 async def get_dashboard(payload: dict = Depends(current_user), db: Session = Depends(get_db)):
-    """Return normalized live dashboard data: positions, orders, account summary."""
-    session = _resolve_session(payload["sub"], db)
+    """
+    Return normalized live dashboard data: positions, orders, holdings, trades, account summary.
+    Aggregates across all connected broker accounts (multi-broker aware).
+    Falls back to legacy single session if no multi-broker sessions exist.
+    """
+    user_id = payload["sub"]
+    from broker.multi_broker import registry as mb
 
-    raw_positions = session.get_positions() or []
-    raw_orders    = session.get_order_book() or []
+    live_sessions = mb.list_live_sessions(user_id)
+    all_raw_positions = []
+    all_raw_orders = []
+    all_raw_holdings = []
+    all_raw_trades = []
+    all_limits = {}
+    is_live = False
 
-    positions = [_normalize_position(p, i) for i, p in enumerate(raw_positions)]
-    orders    = [_normalize_order(o, i)    for i, o in enumerate(raw_orders)]
+    if live_sessions:
+        is_live = True
+        for sess in live_sessions:
+            try:
+                raw_pos = sess.get_positions() or []
+                all_raw_positions.extend(raw_pos)
+            except Exception as e:
+                logger.warning("Dashboard: get_positions failed for %s: %s", sess.client_id, e)
+            try:
+                raw_ord = sess.get_order_book() or []
+                all_raw_orders.extend(raw_ord)
+            except Exception as e:
+                logger.warning("Dashboard: get_order_book failed for %s: %s", sess.client_id, e)
+            try:
+                raw_hold = sess.get_holdings() or []
+                all_raw_holdings.extend(raw_hold)
+            except Exception as e:
+                logger.debug("Dashboard: get_holdings failed for %s: %s", sess.client_id, e)
+            try:
+                raw_trades = sess.get_tradebook() or []
+                all_raw_trades.extend(raw_trades)
+            except Exception as e:
+                logger.debug("Dashboard: get_tradebook failed for %s: %s", sess.client_id, e)
+        # Aggregate limits from first live session (primary account)
+        try:
+            all_limits = live_sessions[0].get_limits() or {}
+        except Exception:
+            pass
+    else:
+        # Legacy single-session fallback
+        session = _resolve_session(user_id, db)
+        is_live = not session.is_demo
+        all_raw_positions = session.get_positions() or []
+        all_raw_orders = session.get_order_book() or []
+        if is_live:
+            all_limits = session.get_limits() or {}
 
-    # Account summary — include limits if available
-    limits = session.get_limits() if not session.is_demo else {}
-    total_pnl    = sum(p["pnl"]    for p in positions)
-    realized_pnl = sum(float((raw_positions[i].get("rpnl") or 0)) for i in range(len(raw_positions)))
-    unrealized   = total_pnl - realized_pnl
+    positions = [_normalize_position(p, i) for i, p in enumerate(all_raw_positions)]
+    orders = [_normalize_order(o, i) for i, o in enumerate(all_raw_orders)]
+
+    # Normalize holdings
+    holdings = []
+    for i, h in enumerate(all_raw_holdings):
+        if isinstance(h, dict):
+            holdings.append(h)
+        else:
+            try:
+                holdings.append(h.to_dict() if hasattr(h, 'to_dict') else vars(h))
+            except Exception:
+                pass
+
+    # Normalize trades
+    trades = []
+    for i, t in enumerate(all_raw_trades):
+        if isinstance(t, dict):
+            trades.append(t)
+        else:
+            try:
+                trades.append(t.to_dict() if hasattr(t, 'to_dict') else vars(t))
+            except Exception:
+                pass
+
+    # Account summary — aggregate P&L from positions
+    total_pnl = sum(p["pnl"] for p in positions)
+    realized_pnl = 0.0
+    for rp in all_raw_positions:
+        if isinstance(rp, dict):
+            realized_pnl += float(rp.get("rpnl") or rp.get("realised_pnl") or rp.get("realized_pnl") or 0)
+    unrealized = total_pnl - realized_pnl
 
     return {
         "positions": positions,
-        "holdings":  [],
-        "orders":    orders,
-        "trades":    [],
+        "holdings": holdings,
+        "orders": orders,
+        "trades": trades,
         "riskMetrics": None,
         "accountSummary": {
-            "totalEquity":     limits.get("totalBalance", 0.0),
-            "dayPnl":          total_pnl,
-            "dayPnlPct":       0.0,
-            "unrealizedPnl":   unrealized,
-            "realizedPnl":     realized_pnl,
-            "usedMargin":      limits.get("marginUsed", 0.0),
-            "availableMargin": limits.get("marginAvailable", limits.get("cash", 0.0)),
-            "cash":            limits.get("cash", 0.0),
-            "payin":           limits.get("payin", 0.0),
+            "totalEquity": all_limits.get("totalBalance") or all_limits.get("grossAvailableMargin", 0.0),
+            "dayPnl": total_pnl,
+            "dayPnlPct": 0.0,
+            "unrealizedPnl": unrealized,
+            "realizedPnl": realized_pnl,
+            "usedMargin": all_limits.get("marginUsed") or all_limits.get("utilizedDebits", 0.0),
+            "availableMargin": all_limits.get("marginAvailable") or all_limits.get("cash", 0.0),
+            "cash": all_limits.get("cash", 0.0),
+            "payin": all_limits.get("payin", 0.0),
         },
-        "source": "live" if not session.is_demo else "demo",
+        "source": "live" if is_live else "demo",
     }
 
 

@@ -33,7 +33,7 @@ def list_strategy_templates() -> List[Dict[str, str]]:
                 "id": slug.upper(),
                 "folder": "strategy_runner",
                 "file": file.name,
-                "module": f"shoonya_platform.strategy_runner.{slug}",
+                "module": f"trading.strategy_runner.{slug}",
                 "label": slug.replace("_", " ").title(),
                 "slug": slug,
             }

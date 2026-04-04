@@ -180,22 +180,38 @@ def user_broker_status(
     """
     Return this user's broker connection status.
     Checks:
-      1. In-memory per-user session registry (set on UI connect)
-      2. DB BrokerSession table (persisted across restarts)
-      3. Global singleton (env-var-configured Shoonya)
+      1. Multi-broker registry (any live/paper session)
+      2. Legacy in-memory per-user Shoonya session
+      3. DB BrokerSession table (persisted across restarts)
+      4. Global singleton (env-var-configured Shoonya)
     """
     from broker.shoonya_client import get_user_session, get_session as _global_sess
+    from broker.multi_broker import registry
     from db.database import BrokerSession as DBSession, BrokerConfig
 
     user_id = payload["sub"]
 
-    # 1. In-memory live session (fastest, most reliable)
+    # 1. Multi-broker registry — covers Fyers, Shoonya, Paper
+    live_sessions = registry.list_live_sessions(user_id)
+    if live_sessions:
+        brokers = list({s.broker_id for s in live_sessions})
+        primary = live_sessions[0]
+        return {
+            "isLive": True,
+            "broker": primary.broker_id,
+            "brokers": brokers,
+            "mode": "paper" if primary.is_paper else "live",
+            "clientId": primary.client_id,
+            "loginAt": None,
+        }
+
+    # 2. Legacy in-memory Shoonya session
     live = get_user_session(user_id)
     if live and not live.is_demo:
-        return {"isLive": True, "broker": "shoonya", "mode": "live",
-                "clientId": None, "loginAt": None}
+        return {"isLive": True, "broker": "shoonya", "brokers": ["shoonya"],
+                "mode": "live", "clientId": None, "loginAt": None}
 
-    # 2. DB session (persisted; try to restore in-memory session from it)
+    # 3. DB session (persisted; try to restore in-memory session from it)
     db_sessions = (
         db.query(DBSession)
         .filter(DBSession.user_id == user_id, DBSession.is_logged_in == True)
@@ -206,8 +222,6 @@ def user_broker_status(
         cfg = db.query(BrokerConfig).filter(BrokerConfig.id == ds.config_id).first()
         if not cfg:
             continue
-        # If we have a stored token, restore the in-memory session.
-        # Only USER_ID + token are needed for REST API calls (no OAuth creds required).
         if ds.session_token and ds.broker_id == "shoonya":
             try:
                 from broker.shoonya_client import register_user_session
@@ -219,19 +233,21 @@ def user_broker_status(
         return {
             "isLive": True,
             "broker": ds.broker_id,
+            "brokers": [ds.broker_id],
             "clientId": cfg.client_id,
             "mode": ds.mode,
             "loginAt": ds.login_at.isoformat() if ds.login_at else None,
         }
 
-    # 3. Global singleton (env-var Shoonya config)
+    # 4. Global singleton (env-var Shoonya config)
     g = _global_sess()
     if not g.is_demo and g.is_logged_in:
         from core.config import config
-        return {"isLive": True, "broker": "shoonya", "mode": "live",
-                "clientId": config.SHOONYA_USER_ID, "loginAt": None}
+        return {"isLive": True, "broker": "shoonya", "brokers": ["shoonya"],
+                "mode": "live", "clientId": config.SHOONYA_USER_ID, "loginAt": None}
 
-    return {"isLive": False, "broker": None, "mode": "demo", "clientId": None, "loginAt": None}
+    return {"isLive": False, "broker": None, "brokers": [], "mode": "demo",
+            "clientId": None, "loginAt": None}
 
 
 @router.post("/shoonya-connect")

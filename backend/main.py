@@ -197,6 +197,110 @@ async def on_startup():
 
     logger.info("FastAPI startup complete — listening on %s:%d", config.HOST, config.PORT)
 
+    # ── Restore broker sessions from DB ──────────────────────────────────────
+    # This allows sessions to survive server restarts (session tokens are persistent)
+    try:
+        _restore_broker_sessions()
+    except Exception as exc:
+        logger.warning("Broker session restore failed (non-fatal): %s", exc)
+
+
+def _restore_broker_sessions():
+    """
+    Restore previously connected broker sessions from DB on startup.
+    For each saved session with a valid token, re-inject into multi-broker registry.
+    This mimics shoonya_platform's recovery service pattern.
+    """
+    from db.database import SessionLocal, BrokerSession as DBSession, BrokerConfig
+    from broker.multi_broker import registry
+    from core.security import decrypt_credentials
+
+    db = SessionLocal()
+    try:
+        active_sessions = (
+            db.query(DBSession)
+            .filter(DBSession.is_logged_in == True)
+            .all()
+        )
+        if not active_sessions:
+            logger.info("No active broker sessions to restore")
+            return
+
+        restored = 0
+        for db_sess in active_sessions:
+            cfg = db.query(BrokerConfig).filter(BrokerConfig.id == db_sess.config_id).first()
+            if not cfg:
+                continue
+
+            try:
+                creds = decrypt_credentials(str(cfg.credentials))
+            except Exception as e:
+                logger.warning("Cannot decrypt creds for config=%s: %s", cfg.id[:8], e)
+                continue
+
+            client_id = cfg.client_id or creds.get("USER_ID") or creds.get("CLIENT_ID") or "?"
+            token = db_sess.session_token
+
+            if db_sess.broker_id == "shoonya" and token:
+                try:
+                    sess = registry.register_shoonya(
+                        user_id=db_sess.user_id,
+                        config_id=cfg.id,
+                        client_id=client_id,
+                        creds=creds,
+                        token=token,
+                    )
+                    if sess.is_live:
+                        restored += 1
+                        logger.info(
+                            "Restored Shoonya session: user=%s client=%s",
+                            db_sess.user_id[:8], client_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Shoonya session restore failed (token may be expired): user=%s client=%s",
+                            db_sess.user_id[:8], client_id,
+                        )
+                        # Mark as logged out in DB since token is stale
+                        db_sess.is_logged_in = False
+                        db.commit()
+                except Exception as e:
+                    logger.warning("Shoonya restore error for user=%s: %s", db_sess.user_id[:8], e)
+
+            elif db_sess.broker_id == "fyers" and token:
+                try:
+                    sess = registry.register_fyers(
+                        user_id=db_sess.user_id,
+                        config_id=cfg.id,
+                        client_id=client_id,
+                        creds=creds,
+                        token=token,
+                    )
+                    if sess.is_live:
+                        restored += 1
+                        logger.info(
+                            "Restored Fyers session: user=%s client=%s",
+                            db_sess.user_id[:8], client_id,
+                        )
+                except Exception as e:
+                    logger.warning("Fyers restore error for user=%s: %s", db_sess.user_id[:8], e)
+
+            elif db_sess.broker_id == "paper_trade":
+                try:
+                    registry.register_paper(
+                        user_id=db_sess.user_id,
+                        config_id=cfg.id,
+                        client_id="PAPER",
+                    )
+                    restored += 1
+                    logger.info("Restored paper session: user=%s", db_sess.user_id[:8])
+                except Exception as e:
+                    logger.warning("Paper restore error: %s", e)
+
+        logger.info("Session restore complete: %d/%d sessions restored", restored, len(active_sessions))
+    finally:
+        db.close()
+
 
 @app.on_event("shutdown")
 async def on_shutdown():

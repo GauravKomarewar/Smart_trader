@@ -6,7 +6,7 @@ Simulation harness for testing strategies.
 import json
 import time
 import logging
-from shoonya_platform.strategy_runner.executor import StrategyExecutor
+from trading.strategy_runner.executor import StrategyExecutor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 

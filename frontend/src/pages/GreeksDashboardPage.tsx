@@ -83,7 +83,7 @@ export default function GreeksDashboardPage() {
               value={form.expiry}
               onChange={handleChange}
               placeholder="25JUL25"
-              className="input-field w-full font-mono"
+              className="input-base w-full font-mono"
             />
           </div>
           <div>
@@ -92,7 +92,7 @@ export default function GreeksDashboardPage() {
               name="option_type"
               value={form.option_type}
               onChange={handleChange}
-              className="input-field w-full"
+              className="input-base w-full"
             >
               <option value="CE">CE (Call)</option>
               <option value="PE">PE (Put)</option>
@@ -176,7 +176,7 @@ function Field({ label, name, type = 'text', value, onChange, step, placeholder 
         value={value}
         onChange={onChange}
         placeholder={placeholder}
-        className="input-field w-full"
+        className="input-base w-full"
       />
     </div>
   )

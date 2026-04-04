@@ -310,9 +310,9 @@ function LiveMonitorPanel() {
       setMode('live')
       setError('')
     } catch {
-      // Fall back to demo data
-      setPositions(demoPositions())
-      setMode('demo')
+      // Show empty state instead of fake demo data
+      setPositions([])
+      setMode('live')
       setError('')
     } finally {
       setLoading(false)
@@ -544,7 +544,7 @@ export default function StrategyPage() {
   const toast = useToastStore(s => s.toast)
   const navigate = useNavigate()
   const [tab, setTab] = useState<PageTab>('all')
-  const [strategies, setStrategies] = useState(DEMO_STRATEGIES)
+  const [strategies, setStrategies] = useState<StrategyCard[]>([])
   const [selected, setSelected] = useState<string | null>(null)
 
   // ── Real strategies from backend ───────────────────────────────────────────
@@ -706,6 +706,12 @@ export default function StrategyPage() {
                   onToggleStatus={() => toggleStatus(s.id)}
                 />
               ))}
+              {filtered.length === 0 && (
+                <div className="col-span-full card flex flex-col items-center justify-center h-40 text-text-muted text-sm gap-2">
+                  <GitBranch className="w-6 h-6" />
+                  No strategies found. Use the Strategy Builder to create one.
+                </div>
+              )}
             </div>
 
             {/* Expanded detail panel */}

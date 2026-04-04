@@ -30,19 +30,13 @@ Usage:
     result = registry.execute_order(user_id, config_id, order_dict)
 """
 
-import sys
 import threading
 import logging
-from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any
 
 logger = logging.getLogger("smart_trader.broker.registry")
 
-# ── shoonya_platform path ─────────────────────────────────────────────────────
-_SHOONYA_ROOT = Path("/home/ubuntu/shoonya_platform")
-if _SHOONYA_ROOT.exists() and str(_SHOONYA_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SHOONYA_ROOT))
 
 
 # ── Broker-aware logger adapter ───────────────────────────────────────────────
@@ -107,7 +101,6 @@ class BrokerAccountSession:
         Called after successful OAuth login in broker_sessions.py.
         """
         try:
-            from shoonya_platform.brokers.shoonya.client import ShoonyaClient  # type: ignore[import]
             from NorenRestApiPy.NorenApi import NorenApi  # type: ignore[import]
 
             from broker.shoonya_client import _MinimalShoonyaConfig
@@ -122,9 +115,9 @@ class BrokerAccountSession:
 
             with self._lock:
                 if self._client is None:
-                    self._client = ShoonyaClient(
-                        config=min_cfg,
-                        enable_auto_recovery=False,
+                    self._client = NorenApi(
+                        host=min_cfg.shoonya_host,
+                        websocket=min_cfg.shoonya_websocket,
                     )
                 self._client.set_session(
                     userid=creds.get("USER_ID", ""),

@@ -191,9 +191,12 @@ function OptionChainTable() {
   }
 
   if (!data) return <Skeleton />
+  if (data.rows.length === 0) return (
+    <div className="card flex items-center justify-center h-40 text-text-muted text-sm">No option chain data available. Select an underlying and expiry above.</div>
+  )
 
-  const maxCallOI = Math.max(...data.rows.map(r => r.call.oi))
-  const maxPutOI  = Math.max(...data.rows.map(r => r.put.oi))
+  const maxCallOI = Math.max(...data.rows.map(r => r.call.oi), 1)
+  const maxPutOI  = Math.max(...data.rows.map(r => r.put.oi), 1)
 
   // Ordered call-side columns (left to right): oiChange, oi, volume, iv, delta, gamma, theta, vega
   const callCols  = COLUMN_DEFS.filter(c => visibleCols.has(c.id))
@@ -329,9 +332,12 @@ function OptionChainTable() {
 function OptionAnalytics() {
   const { data } = useOptionChainStore()
   if (!data) return <Skeleton />
+  if (data.rows.length === 0) return (
+    <div className="card flex items-center justify-center h-40 text-text-muted text-sm">No analytics data — option chain is empty.</div>
+  )
 
-  const maxCallOI = Math.max(...data.rows.map(r => r.call.oi))
-  const maxPutOI  = Math.max(...data.rows.map(r => r.put.oi))
+  const maxCallOI = Math.max(...data.rows.map(r => r.call.oi), 1)
+  const maxPutOI  = Math.max(...data.rows.map(r => r.put.oi), 1)
   const maxCallOIRow = data.rows.find(r => r.call.oi === maxCallOI)
   const maxPutOIRow  = data.rows.find(r => r.put.oi  === maxPutOI)
 

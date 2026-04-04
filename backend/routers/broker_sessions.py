@@ -15,7 +15,7 @@ Per-account risk limits are managed by broker.account_risk.AccountRiskManager.
 Connect flow (Shoonya):
   1. Decrypt credentials from DB (Fernet)
   2. Temporarily export creds to env vars
-  3. Call shoonya_platform.run_oauth_login() (headless Chrome TOTP login)
+  3. Call broker.oauth_login.run_oauth_login() (headless Firefox TOTP login)
   4. Receive session token
   5. Register in MultiAccountRegistry (in-memory)
   6. Save token + status to BrokerSession DB row
@@ -29,7 +29,6 @@ Error handling:
 
 import logging
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List
@@ -44,11 +43,6 @@ from core.deps import current_user
 
 logger = logging.getLogger("smart_trader.broker_sessions")
 router = APIRouter(prefix="/broker", tags=["broker"])
-
-# Ensure shoonya_platform is on path
-_SHOONYA_ROOT = Path("/home/ubuntu/shoonya_platform")
-if _SHOONYA_ROOT.exists() and str(_SHOONYA_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SHOONYA_ROOT))
 
 
 # ── Broker-contextual logger ──────────────────────────────────────────────────
@@ -388,7 +382,7 @@ def connect_broker(
     """
     Connect a broker account.
 
-    Shoonya:    Full TOTP-based OAuth login via headless Chrome.
+    Shoonya:    Full TOTP-based OAuth login via headless Firefox.
     Paper:      Activate paper trading immediately.
     Others:     Saved for manual token injection (future implementation).
 
@@ -738,7 +732,7 @@ def _connect_shoonya(
     Steps:
       1. Validate all required credential fields
       2. Set environment variables (run_oauth_login reads from env)
-      3. Run headless Chrome Selenium login with TOTP
+      3. Run headless Firefox Selenium login with TOTP
       4. Obtain session token
       5. Register in MultiAccountRegistry
       6. Register in legacy BrokerSession singleton (backward-compat)
@@ -784,15 +778,14 @@ def _connect_shoonya(
     token = None
     try:
         # ── Step 3: Run OAuth login ───────────────────────────────────────────
-        log.info("Launching headless Chrome for Shoonya OAuth (TOTP auto-fill)...")
+        log.info("Launching headless Firefox for Shoonya OAuth (TOTP auto-fill)...")
         try:
-            from shoonya_platform.brokers.shoonya.oauth_login import run_oauth_login  # type: ignore[import]
+            from broker.oauth_login import run_oauth_login
         except ImportError as ie:
-            log.error("shoonya_platform not importable: %s", ie)
+            log.error("OAuth login module not available: %s", ie)
             raise HTTPException(
                 503,
-                "shoonya_platform library is not available on this server. "
-                "Ensure /home/ubuntu/shoonya_platform is installed."
+                "OAuth login module is not available on this server."
             )
 
         try:
@@ -965,7 +958,7 @@ def _connect_fyers(
 
     Steps:
       1. Validate required credential fields
-      2. Run Fyers authcode login via shoonya_platform FyersBrokerClient
+      2. Run Fyers authcode login via fyers_apiv3 (direct)
       3. Obtain access token
       4. Register in MultiAccountRegistry
       5. Persist session to DB
@@ -990,49 +983,18 @@ def _connect_fyers(
             ),
         )
 
-    log.info("Step 2: Starting Fyers OAuth login (headless)")
+    log.info("Step 2: Starting Fyers OAuth login")
 
-    # ── Attempt login via shoonya_platform FyersBrokerClient ─────────────────
+    # ── Fyers direct login via fyers_apiv3 ───────────────────────────────────────
     token: str = ""
     try:
-        from shoonya_platform.brokers.fyers.client import FyersBrokerClient  # type: ignore[import]
-        from shoonya_platform.brokers.fyers.config import FyersConfig  # type: ignore[import]
-
-        redirect_url = creds.get(
-            "REDIRECT_URL",
-            "https://trade.fyers.in/api-login/redirect-uri/index.html",
-        )
-        fyers_cfg = FyersConfig(
-            fyers_id=client_id,          # FyersConfig field is fyers_id, not client_id
-            app_id=app_id,
-            secret_id=creds.get("SECRET_KEY", ""),  # field is secret_id
-            totp_key=creds.get("TOTP_KEY", ""),
-            pin=creds.get("PIN", ""),
-            redirect_url=redirect_url,
-        )
-        broker_client = FyersBrokerClient(config=fyers_cfg)
-        # login() returns bool; actual access_token is on the internal client
-        ok = broker_client.login()
-        if not ok:
-            raise RuntimeError("FyersBrokerClient.login() returned False")
-        # Retrieve raw access token then prepend app_id per Fyers convention
-        raw_token = getattr(broker_client._fyers_client, "access_token", None)
-        if not raw_token:
-            raise RuntimeError("login() succeeded but access_token is empty")
-        # Store as app_id:token (Fyers auth header format)
-        token = f"{app_id}:{raw_token}" if ":" not in raw_token else raw_token
-        log.info("Step 3: Fyers token acquired (len=%d)", len(token))
+        token = _fyers_direct_login(creds, log)
     except Exception as e:
-        log.error("Fyers login via shoonya_platform failed: %s", e, exc_info=True)
-        # Fallback: try fyers_apiv3 direct
-        try:
-            token = _fyers_direct_login(creds, log)
-        except Exception as e2:
-            log.error("Fyers direct login also failed: %s", e2, exc_info=True)
-            raise HTTPException(
-                status_code=502,
-                detail=f"Fyers login failed: {e2}",
-            )
+        log.error("Fyers login failed: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Fyers login failed: {e}",
+        )
 
     if not token or len(token) < 10:
         raise HTTPException(

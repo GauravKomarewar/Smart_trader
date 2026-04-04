@@ -56,6 +56,12 @@ function IndicesPanel() {
   const indices = useMarketStore(s => s.indices)
   const { openChartModal } = useUIStore()
 
+  if (indices.length === 0) return (
+    <div className="card flex items-center justify-center h-40 text-text-muted text-sm">
+      No index data available. Connect a broker or wait for market data to load.
+    </div>
+  )
+
   return (
     <div className="space-y-4">
       {/* Index cards grid */}
@@ -157,6 +163,12 @@ function IndexCard({ idx, onChart }: { idx: IndexQuote; onChart: () => void }) {
 function GlobalMarketsPanel() {
   const globalMarkets = useMarketStore(s => s.globalMarkets)
 
+  if (globalMarkets.length === 0) return (
+    <div className="card flex items-center justify-center h-40 text-text-muted text-sm">
+      No global market data available. Connect Fyers API from Settings for live prices.
+    </div>
+  )
+
   const commodities = globalMarkets.filter(r => r.category === 'commodity')
   const forex       = globalMarkets.filter(r => r.category === 'forex')
 
@@ -245,6 +257,13 @@ function GlobalCard({ item }: { item: any }) {
 function HeatmapPanel() {
   const indices = useMarketStore(s => s.indices)
   const screener = useMarketStore(s => s.screener)
+
+  if (indices.length === 0 && screener.length === 0) return (
+    <div className="card flex items-center justify-center h-40 text-text-muted text-sm">
+      No heatmap data — waiting for market data to load.
+    </div>
+  )
+
   const allRows  = [...screener].sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
 
   function heatColor(pct: number): string {
@@ -424,6 +443,13 @@ function ScreenerPanel() {
                 </td>
               </tr>
             ))}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={11} className="px-4 py-8 text-center text-text-muted text-sm">
+                  {screener.length === 0 ? 'No screener data available.' : 'No stocks match your filter.'}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
