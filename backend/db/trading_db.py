@@ -215,6 +215,24 @@ def trading_cursor():
 
 # ─── Schema init ────────────────────────────────────────────────────────────
 
+def _migrate_pnl_history(cur):
+    """
+    Migrate pnl_history from the old OHLC-based schema to the current
+    strategy/trade-count schema.  Safe to call on every startup — it's a
+    no-op when the schema is already correct.
+    """
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name='pnl_history'"
+    )
+    cols = {r[0] for r in cur.fetchall()}
+    if cols and "trade_count" not in cols:
+        logger.warning("pnl_history has old schema — running migration")
+        cur.execute("ALTER TABLE pnl_history RENAME TO pnl_history_old")
+        cur.execute(_CREATE_PNL_HISTORY.strip())
+        logger.info("pnl_history migrated to new schema (old data in pnl_history_old)")
+
+
 def init_trading_db():
     """Create all tables if they don't exist. Call once at startup."""
     ddls = [
@@ -228,6 +246,7 @@ def init_trading_db():
     ]
     with get_trading_conn() as conn:
         cur = conn.cursor()
+        _migrate_pnl_history(cur)
         for ddl in ddls:
             cur.execute(ddl)
         conn.commit()

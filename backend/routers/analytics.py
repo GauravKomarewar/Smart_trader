@@ -20,9 +20,15 @@ def _get_analytics(user_sub: str):
     for key, bot in _bots.items():
         if key.startswith(f"{user_sub}:"):
             return bot.analytics
-    # Fallback: create a read-only instance using the user_id as both fields
+    # Fallback: create a read-only instance.
+    # user_sub is a UUID — convert to stable integer via uuid's 128-bit int.
     from trading.analytics.historical_service import HistoricalAnalyticsService
-    return HistoricalAnalyticsService(int(user_sub), "")
+    try:
+        import uuid as _uuid
+        uid_int = _uuid.UUID(user_sub).int % 2_147_483_647
+    except (ValueError, AttributeError):
+        uid_int = abs(hash(user_sub)) % 2_147_483_647
+    return HistoricalAnalyticsService(uid_int, "")
 
 
 @analytics_router.get("/equity-curve")

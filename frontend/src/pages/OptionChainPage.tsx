@@ -184,7 +184,7 @@ function OptionChainTable() {
   function toggleCol(id: string, on: boolean) {
     setVisibleCols(prev => {
       const next = new Set(prev)
-      on ? next.add(id) : next.delete(id)
+      if (on) { next.add(id) } else { next.delete(id) }
       localStorage.setItem(COL_STORAGE_KEY, JSON.stringify([...next]))
       return next
     })
