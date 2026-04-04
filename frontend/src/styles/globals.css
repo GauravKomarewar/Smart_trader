@@ -1,0 +1,319 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ═══════════════════════════════════════════════════
+   SMART TRADER  —  PRO TRADING TERMINAL CSS
+   TradingView-inspired dark terminal aesthetic
+   ═══════════════════════════════════════════════════ */
+
+:root {
+  /* ── Fixed semantic colors (same across themes) ── */
+  --profit:  #22c55e;
+  --loss:    #f43f5e;
+  --warning: #f59e0b;
+  --info:    #3b82f6;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", monospace;
+  --font-sans: "Inter", "Space Grotesk", system-ui, sans-serif;
+
+  /* ── Theme-sensitive colors stored as R G B tuples ──
+     Tailwind reads these as: rgb(var(--c-name) / alpha)
+     Default: dark terminal theme                         */
+  --c-brand:         34 211 238;   /* #22d3ee cyan        */
+  --c-accent:        129 140 248;  /* #818cf8 indigo       */
+  --c-bg-base:       11 14 23;     /* #0b0e17              */
+  --c-bg-surface:    17 21 32;     /* #111520              */
+  --c-bg-card:       22 27 40;     /* #161b28              */
+  --c-bg-elevated:   28 33 51;     /* #1c2133              */
+  --c-bg-hover:      35 40 64;     /* #232840              */
+  --c-bg-input:      20 25 36;     /* #141924              */
+  --c-border:        37 43 59;     /* #252b3b              */
+  --c-text-bright:   240 243 248;  /* #f0f3f8              */
+  --c-text-pri:      200 205 216;  /* #c8cdd8              */
+  --c-text-sec:      123 131 152;  /* #7b8398              */
+  --c-text-muted:    78 86 104;    /* #4e5668              */
+}
+
+/* ── Theme: Deep Navy (midnight) ── */
+html[data-theme="midnight"] {
+  --c-bg-base:       8 12 22;
+  --c-bg-surface:    13 17 32;
+  --c-bg-card:       18 24 40;
+  --c-bg-elevated:   24 30 48;
+  --c-bg-hover:      28 36 56;
+  --c-bg-input:      24 30 48;
+  --c-border:        30 37 53;
+}
+
+/* ── Theme: Charcoal (warm grey) ── */
+html[data-theme="charcoal"] {
+  --c-bg-base:       24 24 24;
+  --c-bg-surface:    31 31 31;
+  --c-bg-card:       37 37 37;
+  --c-bg-elevated:   42 42 42;
+  --c-bg-hover:      48 48 48;
+  --c-bg-input:      42 42 42;
+  --c-border:        54 54 54;
+}
+
+/* ── Theme: Light Day (professional) ── */
+html[data-theme="light"] {
+  --c-brand:         2 132 199;    /* #0284c7 sky-600      */
+  --c-accent:        99 102 241;   /* #6366f1 indigo-500   */
+  --c-bg-base:       241 245 249;  /* #f1f5f9 slate-100    */
+  --c-bg-surface:    255 255 255;  /* white                */
+  --c-bg-card:       248 250 252;  /* #f8fafc slate-50     */
+  --c-bg-elevated:   226 232 240;  /* #e2e8f0 slate-200    */
+  --c-bg-hover:      203 213 225;  /* #cbd5e1 slate-300    */
+  --c-bg-input:      255 255 255;  /* white                */
+  --c-border:        203 213 225;  /* #cbd5e1 slate-300    */
+  --c-text-bright:   15 23 42;     /* #0f172a slate-900    */
+  --c-text-pri:      30 41 59;     /* #1e293b slate-800    */
+  --c-text-sec:      71 85 105;    /* #475569 slate-600    */
+  --c-text-muted:    148 163 184;  /* #94a3b8 slate-400    */
+}
+
+/* ── Theme: Ocean Depth ── */
+html[data-theme="ocean"] {
+  --c-brand:         56 189 248;   /* #38bdf8 sky-400      */
+  --c-bg-base:       3 7 18;       /* near-black ocean     */
+  --c-bg-surface:    6 14 32;
+  --c-bg-card:       9 20 44;
+  --c-bg-elevated:   13 26 56;
+  --c-bg-hover:      18 34 70;
+  --c-bg-input:      13 26 56;
+  --c-border:        25 47 80;
+  --c-text-bright:   224 242 254;
+  --c-text-pri:      186 230 253;
+  --c-text-sec:      96 165 250;
+  --c-text-muted:    59 130 246;
+}
+
+/* ── Font size overrides ── */
+html[data-fontsize="small"]  { font-size: 11px; }
+html[data-fontsize="medium"] { font-size: 13px; }
+html[data-fontsize="large"]  { font-size: 15px; }
+
+/* ── Reset ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+}
+
+body {
+  background-color: rgb(var(--c-bg-base));
+  background-image:
+    radial-gradient(ellipse at 12% 8%, rgba(34,211,238,.07) 0%, transparent 38%),
+    radial-gradient(ellipse at 88% 4%, rgba(129,140,248,.08) 0%, transparent 30%);
+  color: rgb(var(--c-text-pri));
+  min-height: 100dvh;
+  overflow-x: hidden;
+}
+
+/* Light theme — subtle background gradient */
+html[data-theme="light"] body {
+  background-image:
+    radial-gradient(ellipse at 12% 8%, rgba(2,132,199,.06) 0%, transparent 38%),
+    radial-gradient(ellipse at 88% 4%, rgba(99,102,241,.05) 0%, transparent 30%);
+}
+
+#root { min-height: 100dvh; display: flex; flex-direction: column; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgb(var(--c-border)); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--c-bg-hover)); }
+
+/* ── Focus ring ── */
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 4px; }
+
+/* ── Selection ── */
+::selection { background: rgba(34,211,238,.22); color: #f0f3f8; }
+
+/* ─────────────────────────────────────────────
+   UTILITY COMPONENTS
+   ───────────────────────────────────────────── */
+
+/* Glass card */
+.glass {
+  background: rgba(var(--c-bg-card), 0.7);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(var(--c-border), 0.8);
+}
+
+/* Data table base */
+.data-table {
+  @apply w-full text-xs border-collapse;
+}
+.data-table thead tr {
+  @apply border-b border-border/50;
+}
+.data-table thead th {
+  @apply px-3 py-2 text-left font-medium text-text-muted uppercase tracking-wider text-[10px];
+}
+.data-table tbody tr {
+  @apply border-b border-border/30 transition-colors duration-100;
+}
+.data-table tbody tr:hover {
+  @apply bg-bg-hover/50;
+}
+.data-table tbody td {
+  @apply px-3 py-2;
+}
+
+/* Mono numbers */
+.num { font-family: var(--font-mono); }
+
+/* Profit / Loss color tokens */
+.c-profit { color: var(--profit); }
+.c-loss   { color: var(--loss); }
+.c-warn   { color: var(--warning); }
+.c-brand  { color: var(--brand); }
+.c-muted  { color: var(--text-muted); }
+.c-sec    { color: var(--text-sec); }
+
+/* Badges */
+.badge {
+  @apply inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider;
+}
+.badge-buy    { @apply bg-profit/15 text-profit; }
+.badge-sell   { @apply bg-loss/15 text-loss; }
+.badge-safe   { @apply bg-profit/15 text-profit; }
+.badge-warn   { @apply bg-warning/15 text-warning; }
+.badge-danger { @apply bg-loss/15 text-loss; }
+.badge-neutral{ @apply bg-bg-elevated text-text-sec; }
+.badge-brand  { @apply bg-brand/15 text-brand; }
+
+/* KPI card */
+.kpi-card {
+  @apply bg-bg-card border border-border rounded-lg px-4 py-3 space-y-1;
+}
+
+/* Input base */
+.input-base {
+  @apply w-full px-3 py-2 bg-bg-input border border-border rounded text-sm text-text-pri
+         placeholder:text-text-muted
+         focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand/30
+         transition-colors;
+}
+
+/* Select base */
+.select-base {
+  @apply input-base appearance-none cursor-pointer;
+}
+
+/* Btn variants */
+.btn {
+  @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded font-medium text-sm
+         transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed;
+}
+.btn-primary {
+  @apply btn bg-brand text-bg-base hover:bg-brand/90 active:scale-[.98] shadow-brand;
+}
+.btn-buy {
+  @apply btn bg-profit text-white hover:bg-profit/90 active:scale-[.98];
+}
+.btn-sell {
+  @apply btn bg-loss text-white hover:bg-loss/90 active:scale-[.98];
+}
+.btn-ghost {
+  @apply btn bg-transparent text-text-sec hover:bg-bg-hover hover:text-text-bright;
+}
+.btn-outline {
+  @apply btn border border-border text-text-pri bg-transparent hover:border-brand/60 hover:text-brand hover:bg-brand/5;
+}
+.btn-danger {
+  @apply btn bg-loss/10 text-loss border border-loss/20 hover:bg-loss/20;
+}
+.btn-sm     { @apply btn text-xs px-3 py-1.5; }
+.btn-xs     { @apply btn text-[11px] px-2 py-1; }
+
+/* Table row flash animations */
+.row-flash-buy  { animation: flash-buy  .7s ease-out; }
+.row-flash-sell { animation: flash-sell .7s ease-out; }
+
+@keyframes flash-buy {
+  from { background-color: rgba(34,197,94,.18); }
+  to   { background-color: transparent; }
+}
+@keyframes flash-sell {
+  from { background-color: rgba(244,63,94,.18); }
+  to   { background-color: transparent; }
+}
+
+/* Skeleton shimmer */
+.skeleton {
+  background: linear-gradient(90deg, rgb(var(--c-bg-elevated)) 25%, rgb(var(--c-bg-hover)) 50%, rgb(var(--c-bg-elevated)) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+  border-radius: 4px;
+}
+
+/* Heatmap cell */
+.heatmap-cell {
+  @apply flex items-center justify-center flex-col rounded text-center cursor-pointer
+         transition-all duration-200 select-none hover:scale-[1.04] hover:z-10;
+}
+
+/* Option chain strike highlight */
+.oc-atm {
+  @apply bg-brand/10 border-l-2 border-brand;
+}
+
+/* Sidebar nav item */
+.nav-item {
+  @apply flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13px] font-medium
+         transition-colors duration-100 text-text-sec hover:bg-bg-hover hover:text-text-bright
+         cursor-pointer;
+}
+.nav-item.active {
+  @apply bg-brand/10 text-brand;
+}
+
+/* Page container */
+.page-root {
+  @apply flex-1 overflow-y-auto p-4 space-y-4;
+}
+
+/* Section header */
+.section-title {
+  @apply text-[11px] font-semibold uppercase tracking-widest text-text-muted;
+}
+
+/* ── Keyboard shortcut pill ── */
+.kbd {
+  @apply inline-flex items-center px-1.5 py-0.5 rounded bg-bg-elevated border border-border
+         text-[10px] font-mono text-text-sec;
+}
+
+/* ── Divider ── */
+.divider {
+  @apply w-full h-px bg-border;
+}
+
+/* ── Btn brand (cyan) ── */
+.btn-brand {
+  @apply btn bg-brand text-bg-base hover:bg-brand/90 active:scale-[.98] shadow-brand;
+}
+
+/* ── Badges with colors ── */
+.badge-blue   { @apply bg-info/15 text-info; }
+.badge-green  { @apply bg-profit/15 text-profit; }
+.badge-red    { @apply bg-loss/15 text-loss; }
+.badge-yellow { @apply bg-warning/15 text-warning; }
+
+/* ── Form field label ── */
+.field-label {
+  @apply block text-[11px] font-medium text-text-muted mb-1;
+}
+
+/* ── Tooltip ── */
+[data-tooltip] {
+  position: relative;
+}

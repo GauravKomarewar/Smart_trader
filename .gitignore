@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/build/
+frontend/.env.local
+
+# Environment & secrets
+*.env
+*.env.*
+!*.env.example
+certs/
+*.pem
+*.key
+*.crt
+
+# DB files
+*.db
+*.sqlite3
+
+# Logs & temp
+*.log
+/tmp/
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
