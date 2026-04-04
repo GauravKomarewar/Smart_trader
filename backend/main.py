@@ -41,9 +41,10 @@ import logging
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 # ── Resolve paths ──────────────────────────────────────────────────────────────
 _HERE = Path(__file__).parent
@@ -310,6 +311,39 @@ async def on_shutdown():
     except Exception:
         pass
     logger.info("Smart Trader Backend shutting down")
+
+
+# ── Serve frontend (Vite build) ───────────────────────────────────────────────
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    # Mount static assets (JS/CSS/images) under /assets
+    _ASSETS_DIR = _FRONTEND_DIST / "assets"
+    if _ASSETS_DIR.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="frontend-assets")
+
+    # Serve other static files at root (logo.svg, etc.)
+    @app.get("/logo.svg", include_in_schema=False)
+    async def _logo():
+        return FileResponse(str(_FRONTEND_DIST / "logo.svg"))
+
+    # SPA catch-all: any non-API, non-docs route serves index.html
+    _INDEX_HTML = _FRONTEND_DIST / "index.html"
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _spa_catch_all(request: Request, full_path: str):
+        # Skip API, docs, health, and websocket paths
+        if full_path.startswith(("api/", "docs", "redoc", "openapi.json", "health", "ws")):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        # Serve actual static files if they exist in dist
+        candidate = _FRONTEND_DIST / full_path
+        if candidate.is_file() and ".." not in full_path:
+            return FileResponse(str(candidate))
+        # Otherwise serve index.html for SPA routing
+        return HTMLResponse(_INDEX_HTML.read_text())
+
+    logger.info("Frontend served from %s", _FRONTEND_DIST)
+else:
+    logger.warning("Frontend dist not found at %s — run 'npm run build' in frontend/", _FRONTEND_DIST)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
