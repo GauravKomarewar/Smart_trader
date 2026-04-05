@@ -79,10 +79,16 @@ async def list_configs(payload: dict = Depends(current_user)):
                 "enabled": c.get("enabled", True),
                 "paper_mode": c.get("identity", {}).get("paper_mode", True),
                 "underlying": c.get("identity", {}).get("underlying", ""),
+                "exchange": c.get("identity", {}).get("exchange", "NFO"),
+                "lots": c.get("identity", {}).get("lots", 1),
+                "legs": len(c.get("entry", {}).get("legs", [])),
+                "entry_time": c.get("timing", {}).get("entry_time", ""),
+                "exit_time": c.get("timing", {}).get("exit_time", ""),
                 "status": "running" if is_alive else entry.get("status", "stopped"),
                 "error": entry.get("error"),
                 "file": path.name,
                 "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+                "schema_version": c.get("schema_version", ""),
             })
         except Exception as exc:
             logger.warning("Failed to read config %s: %s", path, exc)
@@ -207,6 +213,23 @@ async def run_strategy(name: str, payload: dict = Depends(current_user)):
         thread: Optional[threading.Thread] = entry.get("thread")
         if thread and thread.is_alive():
             raise HTTPException(status_code=409, detail=f"Strategy '{name}' is already running")
+
+    # Pre-validate config before spawning thread
+    try:
+        with open(path) as fp:
+            cfg = json.load(fp)
+        from trading.strategy_runner.config_schema import validate_config
+        ok, errors = validate_config(cfg)
+        if not ok and errors:
+            msgs = [str(e) for e in errors[:5]]
+            raise HTTPException(
+                status_code=422,
+                detail=f"Config validation failed: {'; '.join(msgs)}"
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Cannot read config: {exc}")
 
     # Patch config file BEFORE starting thread to avoid race condition
     try:

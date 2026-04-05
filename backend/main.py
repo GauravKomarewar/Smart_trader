@@ -336,8 +336,13 @@ if _FRONTEND_DIST.is_dir():
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         # Serve actual static files if they exist in dist
         candidate = _FRONTEND_DIST / full_path
-        if candidate.is_file() and ".." not in full_path:
+        if ".." in full_path:
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        if candidate.is_file():
             return FileResponse(str(candidate))
+        # Serve directory index.html (e.g. /strategy_builder/ → strategy_builder/index.html)
+        if candidate.is_dir() and (candidate / "index.html").is_file():
+            return FileResponse(str(candidate / "index.html"))
         # Otherwise serve index.html for SPA routing
         return HTMLResponse(_INDEX_HTML.read_text())
 

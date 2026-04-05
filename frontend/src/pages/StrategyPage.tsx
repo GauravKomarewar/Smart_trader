@@ -12,6 +12,8 @@ import {
   ChevronDown,
   Wifi,
   Loader2, PauseCircle, PlayCircle, Cpu, Pencil, Trash2,
+  Clock, Layers, TrendingUp, Settings2, Zap, Shield,
+  BarChart3, Target,
 } from 'lucide-react'
 
 // ── Types ─────────────────────────────────────────
@@ -320,128 +322,263 @@ interface SavedStrategiesPanelProps {
   onDelete: (name: string) => void
 }
 
+const TYPE_CONFIG: Record<string, { icon: typeof TrendingUp; color: string; bg: string; label: string }> = {
+  neutral:    { icon: Target,      color: 'text-brand',    bg: 'bg-brand/10',    label: 'Neutral' },
+  bullish:    { icon: TrendingUp,  color: 'text-profit',   bg: 'bg-profit/10',   label: 'Bullish' },
+  bearish:    { icon: BarChart3,   color: 'text-loss',     bg: 'bg-loss/10',     label: 'Bearish' },
+  scalping:   { icon: Zap,         color: 'text-yellow-400', bg: 'bg-yellow-400/10', label: 'Scalping' },
+  hedging:    { icon: Shield,      color: 'text-cyan-400', bg: 'bg-cyan-400/10', label: 'Hedging' },
+}
+
+function StrategyCard({ s, onRun, onStop, onEdit, onDelete }: {
+  s: any
+  onRun: (n: string) => void
+  onStop: (n: string) => void
+  onEdit: (n: string) => void
+  onDelete: (n: string) => void
+}) {
+  const isRunning = s.status === 'running'
+  const isError   = s.status === 'error'
+  const isStopped = !isRunning && !isError
+  const typeConf  = TYPE_CONFIG[s.type] || TYPE_CONFIG.neutral
+  const TypeIcon  = typeConf.icon
+
+  const displayName = (s.name || s.id || '').replace(/_/g, ' ')
+  const modifiedDate = s.modified
+    ? new Date(s.modified).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' })
+    : ''
+  const modifiedTime = s.modified
+    ? new Date(s.modified).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+    : ''
+
+  return (
+    <div className={cn(
+      'group bg-bg-card border rounded-xl overflow-hidden transition-all duration-200 hover:shadow-lg hover:shadow-brand/5',
+      isRunning ? 'border-profit/40 shadow-sm shadow-profit/10' :
+      isError   ? 'border-loss/40 shadow-sm shadow-loss/10' :
+      'border-border hover:border-brand/30',
+    )}>
+      {/* Top status bar */}
+      <div className={cn(
+        'h-1 w-full',
+        isRunning ? 'bg-profit' : isError ? 'bg-loss' : 'bg-border',
+      )} />
+
+      <div className="p-4 space-y-3">
+        {/* Header: Name + Type badge */}
+        <div className="flex items-start gap-3">
+          <div className={cn('p-2 rounded-lg shrink-0', typeConf.bg)}>
+            <TypeIcon className={cn('w-4 h-4', typeConf.color)} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h3 className="text-[13px] font-bold text-text-bright leading-tight capitalize truncate">
+              {displayName}
+            </h3>
+            {s.description && (
+              <p className="text-[10px] text-text-muted mt-0.5 line-clamp-2 leading-relaxed">
+                {s.description}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* Info grid */}
+        <div className="grid grid-cols-2 gap-2">
+          {/* Underlying */}
+          <div className="bg-bg-elevated/60 rounded-lg px-2.5 py-2">
+            <div className="text-[9px] text-text-muted uppercase tracking-wider">Underlying</div>
+            <div className="text-[12px] font-bold text-text-bright mt-0.5 font-mono">
+              {s.underlying || '—'}
+            </div>
+          </div>
+          {/* Type */}
+          <div className="bg-bg-elevated/60 rounded-lg px-2.5 py-2">
+            <div className="text-[9px] text-text-muted uppercase tracking-wider">Type</div>
+            <div className={cn('text-[12px] font-semibold mt-0.5 capitalize', typeConf.color)}>
+              {typeConf.label}
+            </div>
+          </div>
+          {/* Legs */}
+          <div className="bg-bg-elevated/60 rounded-lg px-2.5 py-2">
+            <div className="text-[9px] text-text-muted uppercase tracking-wider flex items-center gap-1">
+              <Layers className="w-3 h-3" /> Legs
+            </div>
+            <div className="text-[12px] font-bold text-text-bright mt-0.5">
+              {s.legs ?? '—'}
+            </div>
+          </div>
+          {/* Lots */}
+          <div className="bg-bg-elevated/60 rounded-lg px-2.5 py-2">
+            <div className="text-[9px] text-text-muted uppercase tracking-wider flex items-center gap-1">
+              <Settings2 className="w-3 h-3" /> Lots
+            </div>
+            <div className="text-[12px] font-bold text-text-bright mt-0.5">
+              {s.lots ?? 1}
+            </div>
+          </div>
+        </div>
+
+        {/* Timing row */}
+        {(s.entry_time || s.exit_time) && (
+          <div className="flex items-center gap-2 text-[10px] text-text-muted bg-bg-elevated/40 rounded-lg px-2.5 py-1.5">
+            <Clock className="w-3 h-3 shrink-0" />
+            <span>Entry: <span className="text-text-sec font-mono">{s.entry_time || '—'}</span></span>
+            <span className="text-border">|</span>
+            <span>Exit: <span className="text-text-sec font-mono">{s.exit_time || '—'}</span></span>
+          </div>
+        )}
+
+        {/* Error message */}
+        {isError && s.error && (
+          <div className="flex items-start gap-1.5 text-[10px] text-loss bg-loss/5 border border-loss/20 rounded-lg px-2.5 py-2">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            <span className="line-clamp-2">{s.error}</span>
+          </div>
+        )}
+
+        {/* Footer: badges + actions */}
+        <div className="flex items-center gap-2 pt-1 border-t border-border/50">
+          {/* Mode badge */}
+          <span className={cn(
+            'text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider',
+            s.paper_mode
+              ? 'bg-text-muted/10 text-text-muted border border-text-muted/20'
+              : 'bg-profit/10 text-profit border border-profit/20'
+          )}>
+            {s.paper_mode ? 'Paper' : 'Live'}
+          </span>
+          {/* Status badge */}
+          <span className={cn(
+            'text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider flex items-center gap-1',
+            isRunning ? 'bg-profit/10 text-profit border border-profit/20' :
+            isError   ? 'bg-loss/10 text-loss border border-loss/20' :
+            'bg-bg-elevated text-text-muted border border-border'
+          )}>
+            {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-profit animate-pulse inline-block" />}
+            {s.status || 'stopped'}
+          </span>
+          {/* Exchange */}
+          {s.exchange && (
+            <span className="text-[9px] px-2 py-0.5 rounded-full bg-brand/10 text-brand border border-brand/20 font-semibold">
+              {s.exchange}
+            </span>
+          )}
+
+          <div className="flex-1" />
+
+          {/* Modified date */}
+          {modifiedDate && (
+            <span className="text-[9px] text-text-muted hidden sm:block" title={`Modified: ${modifiedDate} ${modifiedTime}`}>
+              {modifiedDate}
+            </span>
+          )}
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex items-center gap-1.5">
+          {isRunning ? (
+            <button
+              onClick={() => onStop(s.name)}
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[11px] font-semibold
+                         bg-loss/10 text-loss border border-loss/20 hover:bg-loss/20 transition-colors"
+            >
+              <Square className="w-3.5 h-3.5" /> Stop
+            </button>
+          ) : (
+            <button
+              onClick={() => onRun(s.name)}
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[11px] font-semibold
+                         bg-profit/10 text-profit border border-profit/20 hover:bg-profit/20 transition-colors"
+            >
+              <Play className="w-3.5 h-3.5" /> Run
+            </button>
+          )}
+          <button
+            onClick={() => onEdit(s.name)}
+            className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[11px] font-semibold
+                       bg-brand/10 text-brand border border-brand/20 hover:bg-brand/20 transition-colors"
+          >
+            <Pencil className="w-3.5 h-3.5" /> Edit
+          </button>
+          <button
+            onClick={() => onDelete(s.name)}
+            className="p-2 rounded-lg text-text-muted hover:text-loss hover:bg-loss/10 border border-transparent
+                       hover:border-loss/20 transition-colors"
+            title="Delete strategy"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SavedStrategiesPanel({
   strategies, loading, onRefresh, onRun, onStop, onEdit, onDelete,
 }: SavedStrategiesPanelProps) {
   if (loading && strategies.length === 0) {
     return (
-      <div className="bg-bg-surface border border-border rounded-xl p-4">
-        <div className="flex items-center gap-2 text-[12px] text-text-muted">
-          <Loader2 className="w-4 h-4 animate-spin" /> Loading saved strategies…
-        </div>
+      <div className="flex items-center justify-center h-40">
+        <Loader2 className="w-6 h-6 animate-spin text-brand" />
+      </div>
+    )
+  }
+
+  if (strategies.length === 0) {
+    return (
+      <div className="bg-bg-card border border-border rounded-xl p-10 text-center">
+        <Cpu className="w-10 h-10 mx-auto mb-3 text-text-muted opacity-30" />
+        <p className="text-[13px] text-text-sec font-semibold mb-1">No strategies yet</p>
+        <p className="text-[11px] text-text-muted">
+          Use the Strategy Builder to create your first trading strategy.
+        </p>
       </div>
     )
   }
 
   return (
-    <div className="bg-bg-surface border border-border rounded-xl overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
-        <Cpu className="w-4 h-4 text-brand" />
-        <span className="text-[12px] font-semibold text-text-bright">Saved Strategies</span>
-        <span className="text-[10px] text-text-muted bg-bg-elevated px-2 py-0.5 rounded-full">
-          {strategies.length}
+    <div className="space-y-3">
+      {/* Summary bar */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <span className="text-[11px] text-text-muted">
+          <span className="font-bold text-text-bright">{strategies.length}</span> strategies
         </span>
+        {strategies.filter(s => s.status === 'running').length > 0 && (
+          <span className="text-[10px] text-profit flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-profit animate-pulse" />
+            {strategies.filter(s => s.status === 'running').length} running
+          </span>
+        )}
+        {strategies.filter(s => s.status === 'error').length > 0 && (
+          <span className="text-[10px] text-loss flex items-center gap-1">
+            <AlertCircle className="w-3 h-3" />
+            {strategies.filter(s => s.status === 'error').length} errors
+          </span>
+        )}
         <div className="flex-1" />
         <button
           onClick={onRefresh}
-          className="text-text-muted hover:text-text-bright p-1 rounded transition-colors"
+          className="text-text-muted hover:text-text-bright p-1.5 rounded-lg hover:bg-bg-hover transition-colors"
           title="Refresh"
         >
-          <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
+          <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />
         </button>
       </div>
 
-      {strategies.length === 0 ? (
-        <div className="p-8 text-center">
-          <Cpu className="w-8 h-8 mx-auto mb-2 text-text-muted opacity-40" />
-          <p className="text-[12px] text-text-muted mb-3">No strategies saved yet.</p>
-          <p className="text-[11px] text-text-muted opacity-60">
-            Use the Strategy Builder to create and save your first strategy.
-          </p>
-        </div>
-      ) : (
-        <div className="divide-y divide-border">
-          {strategies.map((s: any) => {
-            const isRunning = s.status === 'running'
-            const isError   = s.status === 'error'
-            return (
-              <div key={s.name} className="flex items-center gap-3 px-4 py-3 hover:bg-bg-hover transition-colors">
-                {/* Status dot */}
-                <span className={cn(
-                  'w-2 h-2 rounded-full shrink-0',
-                  isRunning ? 'bg-profit animate-pulse' :
-                  isError   ? 'bg-loss' :
-                  'bg-text-muted opacity-40'
-                )} />
-
-                {/* Info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[12px] font-semibold text-text-bright truncate">
-                      {s.display_name || s.name}
-                    </span>
-                    {s.underlying && (
-                      <span className="text-[10px] text-brand bg-brand/10 px-1.5 py-0.5 rounded">
-                        {s.underlying}
-                      </span>
-                    )}
-                    <span className={cn(
-                      'text-[10px] px-1.5 py-0.5 rounded font-medium',
-                      s.paper_mode
-                        ? 'bg-text-muted/10 text-text-muted'
-                        : 'bg-profit/10 text-profit'
-                    )}>
-                      {s.paper_mode ? 'PAPER' : 'LIVE'}
-                    </span>
-                    {isError && (
-                      <span className="text-[10px] text-loss" title={s.error}>⚠ ERROR</span>
-                    )}
-                  </div>
-                  {s.description && (
-                    <div className="text-[10px] text-text-muted truncate mt-0.5">{s.description}</div>
-                  )}
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center gap-1 shrink-0">
-                  {isRunning ? (
-                    <button
-                      onClick={() => onStop(s.name)}
-                      title="Stop"
-                      className="p-1.5 rounded-lg text-loss hover:bg-loss/10 transition-colors border border-loss/20"
-                    >
-                      <Square className="w-3.5 h-3.5" />
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => onRun(s.name)}
-                      title="Run"
-                      className="p-1.5 rounded-lg text-profit hover:bg-profit/10 transition-colors border border-profit/20"
-                    >
-                      <Play className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                  <button
-                    onClick={() => onEdit(s.name)}
-                    title="Edit in Builder"
-                    className="p-1.5 rounded-lg text-brand hover:bg-brand/10 transition-colors border border-brand/20"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => onDelete(s.name)}
-                    title="Delete"
-                    className="p-1.5 rounded-lg text-text-muted hover:text-loss hover:bg-loss/10 transition-colors border border-transparent hover:border-loss/20"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
+      {/* Card grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {strategies.map((s: any) => (
+          <StrategyCard
+            key={s.name}
+            s={s}
+            onRun={onRun}
+            onStop={onStop}
+            onEdit={onEdit}
+            onDelete={onDelete}
+          />
+        ))}
+      </div>
     </div>
   )
 }
@@ -475,7 +612,16 @@ export default function StrategyPage() {
       toast(`Strategy "${name}" started`, 'success')
       loadSaved()
     } catch (e: any) {
-      toast(e?.message || 'Failed to start strategy', 'error')
+      // Parse backend error detail
+      let msg = 'Failed to start strategy'
+      try {
+        const parsed = JSON.parse(e?.message || '{}')
+        msg = parsed.detail || e?.message || msg
+      } catch {
+        msg = e?.message || msg
+      }
+      toast(msg, 'error')
+      loadSaved()
     }
   }
 
