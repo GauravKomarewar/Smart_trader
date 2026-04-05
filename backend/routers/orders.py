@@ -8,6 +8,10 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from broker.shoonya_client import get_best_session, register_user_session
+from broker.symbol_normalizer import (
+    to_broker_symbol, from_broker_symbol, normalize_position_from_broker,
+    lookup_by_trading_symbol, get_lot_size,
+)
 from core.deps import current_user
 from db.database import get_db, BrokerSession as DBSession, BrokerConfig
 
@@ -114,11 +118,13 @@ async def place_order(
                 user_id[:8], mb_sess.broker_id, mb_sess.client_id,
                 req.transactionType, req.symbol, req.quantity, req.price, req.accountId[:8],
             )
+            # Convert canonical symbol to broker-specific format
+            broker_symbol = to_broker_symbol(req.symbol, req.exchange, mb_sess.broker_id)
             result = mb_sess.place_order({
                 "transaction_type": req.transactionType,
                 "product_type":     req.productType,
                 "exchange":         req.exchange,
-                "symbol":           req.symbol,
+                "symbol":           broker_symbol,
                 "quantity":         req.quantity,
                 "price_type":       req.orderType,
                 "price":            req.price,
@@ -230,8 +236,14 @@ def _order_type_map(prctyp: str) -> str:
     }.get(str(prctyp).upper(), "LIMIT")
 
 def _normalize_position(p: dict, idx: int) -> dict:
-    """Map raw Shoonya position fields to frontend Position schema."""
+    """Map raw Shoonya position fields to frontend Position schema.
+
+    Enriches with ScriptMaster data (lot_size, underlying, expiry, etc.)
+    for consistent display across all brokers.
+    """
     tsym = p.get("tsym") or p.get("tradingsymbol") or p.get("symbol", f"UNKNOWN{idx}")
+    # Strip exchange prefix for canonical symbol
+    clean_sym = tsym.split(":", 1)[-1] if ":" in tsym else tsym
     netqty = float(p.get("netqty") or p.get("net_quantity") or p.get("qty", 0))
     lp     = float(p.get("lp")    or p.get("last_price") or p.get("ltp", 0))
     avgprc = float(p.get("avgprc") or p.get("average_price") or p.get("avg_price", 0))
@@ -242,11 +254,24 @@ def _normalize_position(p: dict, idx: int) -> dict:
     abs_qty = abs(int(netqty))
     pnl = rpnl + urmtom
     value = lp * abs_qty
+
+    # Enrich with ScriptMaster metadata
+    inst = lookup_by_trading_symbol(clean_sym)
+    if not inst:
+        inst = lookup_by_trading_symbol(tsym)  # try with exchange prefix
+    lot_size = inst.lot_size if inst else 1
+    underlying = inst.symbol if inst else clean_sym
+    inst_type = inst.instrument_type if inst else (
+        "OPT" if "CE" in clean_sym or "PE" in clean_sym else
+        ("FUT" if "FUT" in clean_sym else "EQ")
+    )
     return {
         "id": p.get("token") or p.get("symboltoken") or f"pos-{idx}",
         "accountId": p.get("actid") or "live",
-        "symbol": tsym,
-        "tradingsymbol": tsym,
+        "symbol": clean_sym,
+        "trading_symbol": clean_sym,
+        "tradingsymbol": clean_sym,
+        "underlying": underlying,
         "exchange": exch,
         "product": prd,
         "quantity": int(netqty),
@@ -257,8 +282,12 @@ def _normalize_position(p: dict, idx: int) -> dict:
         "dayPnl": urmtom,
         "value": value,
         "multiplier": 1,
+        "lot_size": lot_size,
         "side": _side_from_qty(netqty),
-        "type": "OPT" if "CE" in tsym or "PE" in tsym else ("FUT" if "FUT" in tsym else "EQ"),
+        "type": inst_type,
+        "expiry": inst.expiry if inst else "",
+        "strike": inst.strike if inst else 0,
+        "option_type": inst.option_type if inst else "",
     }
 
 def _normalize_order(o: dict, idx: int) -> dict:

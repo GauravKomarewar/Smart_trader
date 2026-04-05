@@ -360,7 +360,11 @@ export default function PlaceOrderModal() {
                       <button
                         key={i}
                         onClick={() => {
-                          setSymbol(r.symbol)
+                          // For F&O instruments, use trading_symbol; for equity/index use symbol
+                          const sym = (r.type === 'FUT' || r.type === 'OPT')
+                            ? (r.trading_symbol || r.tradingsymbol || r.symbol)
+                            : r.symbol
+                          setSymbol(sym)
                           setExchange(r.exchange ?? 'NSE')
                           setSearchQ('')
                           setShowSearch(false)
@@ -368,8 +372,8 @@ export default function PlaceOrderModal() {
                         className="w-full flex items-center justify-between px-3 py-2 hover:bg-white/5 text-left"
                       >
                         <div>
-                          <div className="text-[12px] font-semibold text-white">{r.symbol}</div>
-                          <div className="text-[10px] text-white/40">{r.exchange} · {r.type}</div>
+                          <div className="text-[12px] font-semibold text-white">{r.trading_symbol || r.tradingsymbol || r.symbol}</div>
+                          <div className="text-[10px] text-white/40">{r.exchange} · {r.type}{r.lot_size > 1 ? ` · Lot: ${r.lot_size}` : ''}</div>
                         </div>
                         <span className="text-[9px] font-bold text-white/50 bg-white/10 px-2 py-0.5 rounded">{r.exchange}</span>
                       </button>

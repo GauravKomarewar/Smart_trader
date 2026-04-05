@@ -7,6 +7,11 @@ from typing import Optional
 
 from broker.fyers_client import get_fyers_client
 from broker.shoonya_client import get_session, _make_demo_quote
+from broker.symbol_normalizer import (
+    search_instruments, get_expiries, get_lot_size,
+    enrich_option_chain_row, to_broker_symbol, from_broker_symbol,
+    lookup_by_trading_symbol, expiry_to_iso,
+)
 
 logger = logging.getLogger("smart_trader.api")
 router = APIRouter(prefix="/market", tags=["market"])
@@ -73,14 +78,28 @@ async def get_quote(
     symbol: str,
     exchange: str = Query("NSE", description="Exchange: NSE / BSE / NFO / MCX"),
 ):
-    """Get live quote for a single symbol."""
+    """Get live quote for a single symbol. Resolves via ScriptMaster when available."""
     fyers = get_fyers_client()
     sym_upper = symbol.upper()
 
     if fyers.is_live:
-        fyers_sym = f"{exchange}:{sym_upper}-EQ" if exchange in ("NSE", "BSE") else f"{exchange}:{sym_upper}"
+        # Try ScriptMaster lookup first for proper Fyers symbol
+        inst = lookup_by_trading_symbol(sym_upper)
+        if not inst:
+            inst = lookup_by_trading_symbol(f"{exchange}:{sym_upper}")
+        if inst and inst.fyers_symbol:
+            fyers_sym = inst.fyers_symbol
+        elif exchange in ("NSE", "BSE"):
+            fyers_sym = f"{exchange}:{sym_upper}-EQ"
+        else:
+            fyers_sym = f"{exchange}:{sym_upper}"
         q = fyers.get_quote(fyers_sym)
         if q:
+            # Enrich with canonical symbol info
+            if inst:
+                q.setdefault("trading_symbol", inst.trading_symbol)
+                q.setdefault("lot_size", inst.lot_size)
+                q.setdefault("instrument_type", inst.instrument_type)
             return q
 
     session = get_session()
@@ -235,59 +254,117 @@ async def get_option_chain(
     strikes: int = Query(10, ge=5, le=30),
     expiry: Optional[str] = Query(None),
 ):
-    """Return option chain. Fyers primary → Shoonya → demo."""
+    """Return option chain. Fyers primary → Shoonya → demo.
+
+    Response rows are enriched with trading_symbol and lot_size from ScriptMaster
+    so the frontend can directly place orders / build basket legs.
+    """
     sym   = symbol.upper()
     fyers = get_fyers_client()
+    oc = None
 
     if fyers.is_live:
         raw = fyers.get_option_chain(sym)
         if raw:
             oc = _convert_fyers_oc(raw, sym)
-            if oc:
-                return oc
 
-    session = get_session()
-    if not session.is_demo:
-        data = session.get_option_chain(exchange=exchange, symbol=sym, strike_count=strikes)
-        if data:
-            return data
+    if not oc:
+        session = get_session()
+        if not session.is_demo:
+            data = session.get_option_chain(exchange=exchange, symbol=sym, strike_count=strikes)
+            if data:
+                oc = data
 
-    from broker.shoonya_client import _make_demo_option_chain
-    return _make_demo_option_chain(sym, strikes)
+    if not oc:
+        from broker.shoonya_client import _make_demo_option_chain
+        oc = _make_demo_option_chain(sym, strikes)
+
+    # Enrich with ScriptMaster expiries if broker didn't provide them
+    if not oc.get("expiries"):
+        oc["expiries"] = get_expiries(sym, exchange="NFO", instrument_type="OPT")
+
+    # Enrich each row with trading_symbol + lot_size for basket ordering
+    oc_expiry = oc.get("expiry", "")
+    oc_exchange = "NFO" if exchange in ("NSE", "NFO") else exchange
+    for row in oc.get("rows", []):
+        enrich_option_chain_row(row, sym, oc_exchange, oc_expiry)
+
+    # Add lot_size at top level
+    oc["lot_size"] = get_lot_size(sym, oc_exchange)
+
+    return oc
+
+
+@router.get("/expiries/{symbol}")
+async def get_expiries_api(
+    symbol: str,
+    exchange: str = Query("NFO"),
+    instrument_type: str = Query("OPT", alias="type"),
+):
+    """Return available expiry dates (ISO format) for a symbol from ScriptMaster."""
+    return {
+        "symbol": symbol.upper(),
+        "exchange": exchange,
+        "expiries": get_expiries(symbol.upper(), exchange, instrument_type),
+    }
 
 
 # ── /market/search ─────────────────────────────────────────────────────────────
 
 @router.get("/search")
-async def search_instruments(
+async def search_instruments_api(
     q: str = Query(..., min_length=1, max_length=50),
-    exchange: str = Query("NSE"),
+    exchange: str = Query(""),
+    instrument_type: str = Query("", alias="type"),
 ):
-    """Search instruments by symbol prefix."""
-    session = get_session()
-    q_upper = q.upper()
+    """
+    Search instruments from ScriptMaster — broker-agnostic, always available.
 
+    Falls back to broker searchscrip only if ScriptMaster returns nothing.
+    """
+    q_upper = q.upper().strip()
     results = []
-    if not session.is_demo and hasattr(session, "_client") and session._client and hasattr(session._client, "searchscrip"):
-        try:
-            resp = session._client.searchscrip(exchange=exchange, searchtext=q_upper)
-            if resp and isinstance(resp, dict) and resp.get("values"):
-                for item in resp["values"][:20]:
-                    results.append({
-                        "symbol": item.get("tsym", ""),
-                        "name": item.get("cname", ""),
-                        "exchange": exchange,
-                        "token": item.get("token", ""),
-                        "type": item.get("instname", "EQ"),
-                    })
-        except Exception as e:
-            logger.debug("searchscrip error: %s", e)
 
+    # Primary: ScriptMaster search (120K+ instruments, no broker needed)
+    normalized = search_instruments(q_upper, exchange=exchange,
+                                     instrument_type=instrument_type, limit=30)
+    if normalized:
+        results = [inst.to_search_result() for inst in normalized]
+
+    # Fallback: live broker searchscrip (for symbols not in Fyers CSVs)
+    if not results:
+        session = get_session()
+        exch = exchange or "NSE"
+        if not session.is_demo and hasattr(session, "_client") and session._client and hasattr(session._client, "searchscrip"):
+            try:
+                resp = session._client.searchscrip(exchange=exch, searchtext=q_upper)
+                if resp and isinstance(resp, dict) and resp.get("values"):
+                    for item in resp["values"][:20]:
+                        tsym = item.get("tsym", "")
+                        results.append({
+                            "symbol": tsym,
+                            "trading_symbol": tsym,
+                            "tradingsymbol": tsym,
+                            "exchange": exch,
+                            "token": item.get("token", ""),
+                            "type": item.get("instname", "EQ"),
+                            "name": item.get("cname", tsym),
+                            "lot_size": 1,
+                            "expiry": "",
+                            "strike": 0,
+                            "option_type": "",
+                        })
+            except Exception as e:
+                logger.debug("searchscrip error: %s", e)
+
+    # Last-resort fallback
     if not results:
         all_symbols = INDICES + NIFTY50_SYMBOLS
         results = [
-            {"symbol": s, "name": s, "exchange": "NSE", "token": "",
-             "type": "INDEX" if s in INDICES else "EQ"}
+            {"symbol": s, "trading_symbol": s, "tradingsymbol": s,
+             "name": s, "exchange": "NSE", "token": "",
+             "type": "INDEX" if s in INDICES else "EQ",
+             "lot_size": 1, "expiry": "", "strike": 0, "option_type": ""}
             for s in all_symbols if q_upper in s
         ][:10]
 

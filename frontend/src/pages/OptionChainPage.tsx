@@ -430,12 +430,15 @@ function BasketOrder() {
 
   function addLeg() {
     if (!data || !newLeg.strike) return
-    const symbol = `${data.underlying}${data.expiry}${newLeg.strike}${newLeg.type}`
     const row = data.rows.find(r => String(r.strike) === newLeg.strike)
-    const ltp = newLeg.type === 'CE' ? row?.call.ltp : row?.put.ltp
+    const side = newLeg.type === 'CE' ? row?.call : row?.put
+    const ltp = side?.ltp
+    // Use trading_symbol from ScriptMaster-enriched option chain if available
+    const tsym = (side as any)?.trading_symbol || `${data.underlying}${data.expiry}${newLeg.strike}${newLeg.type}`
+    const lotSize = (side as any)?.lot_size || (data as any)?.lot_size || 50
     addToBasket({
-      id: uid(), symbol, tradingsymbol: symbol, exchange: 'NFO',
-      transactionType: newLeg.txn, quantity: newLeg.qty * 50, // lot size
+      id: uid(), symbol: tsym, tradingsymbol: tsym, exchange: 'NFO',
+      transactionType: newLeg.txn, quantity: newLeg.qty * lotSize,
       orderType: newLeg.orderType, price: ltp ?? newLeg.price, product: 'MIS', ltp,
     })
   }

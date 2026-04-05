@@ -36,10 +36,12 @@ export default function GlobalSearch() {
   if (!searchOpen) return null
 
   const handleSelect = (item: any) => {
-    saveRecent(item.symbol)
+    const displaySym = item.symbol
+    const tsym = item.trading_symbol || item.tradingsymbol || item.symbol
+    saveRecent(displaySym)
     setRecent(loadRecent())
     navigate('/watchlist')
-    addItem(activeId, { symbol: item.symbol, tradingsymbol: item.tradingsymbol, exchange: item.exchange, type: item.type })
+    addItem(activeId, { symbol: displaySym, tradingsymbol: tsym, exchange: item.exchange, type: item.type })
     setSearchOpen(false)
   }
 
@@ -122,8 +124,8 @@ export default function GlobalSearch() {
                     <TrendingUp className="w-3.5 h-3.5 text-brand" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-[13px] font-semibold text-text-bright">{r.symbol}</div>
-                    <div className="text-[10px] text-text-muted">{r.tradingsymbol} · {r.exchange} · {r.type}</div>
+                    <div className="text-[13px] font-semibold text-text-bright">{r.trading_symbol || r.tradingsymbol || r.symbol}</div>
+                    <div className="text-[10px] text-text-muted">{r.name || r.symbol} · {r.exchange} · {r.type}{r.lot_size > 1 ? ` · Lot: ${r.lot_size}` : ''}</div>
                   </div>
                   <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
                     <span className="badge badge-blue px-1.5 py-0.5">{r.exchange}</span>

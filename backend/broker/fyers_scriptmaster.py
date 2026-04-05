@@ -67,10 +67,17 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 META_FILE = DATA_DIR / "metadata.json"
 
 # ── Instrument type codes → human label ───────────────────────────────────────
+# Fyers CSV instrument_code field (column 2):
+#   FO segments: 11=index futures, 13=stock futures, 14=index options, 15=stock options
+#   CM segments: 0/10/50=equity, 2=bond/NCD, 5=govt-sec, 8=MF, 9=ETF
 _INSTR_CODE: Dict[str, str] = {
-    "10": "EQ",
-    "11": "FUT",
-    "12": "OPT",
+    "0":  "EQ",    # NSE/BSE equity shares
+    "10": "EQ",    # NSE/BSE equity
+    "11": "FUT",   # Index futures
+    "13": "FUT",   # Stock futures
+    "14": "OPT",   # Index options
+    "15": "OPT",   # Stock options
+    "50": "EQ",    # BSE equity
 }
 
 # ── Internal state ────────────────────────────────────────────────────────────
