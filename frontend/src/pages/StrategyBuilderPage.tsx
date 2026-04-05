@@ -57,8 +57,6 @@ export default function StrategyBuilderPage() {
         src={src}
         title="Strategy Builder"
         className="flex-1 w-full border-0"
-        allow="same-origin"
-        sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
       />
     </div>
   )

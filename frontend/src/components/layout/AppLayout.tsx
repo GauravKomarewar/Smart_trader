@@ -7,7 +7,7 @@ import { playOrderFill, playOrderReject } from '../../lib/sounds'
 import {
   LayoutDashboard, TrendingUp, Layers, BookOpen, Settings,
   Menu, X, Activity, ChevronDown, Search,
-  Keyboard, Plus, ChevronRight, GitBranch, ShieldCheck, Cpu,
+  Keyboard, Plus, ChevronRight, GitBranch, ShieldCheck,
   BarChart2,
 } from 'lucide-react'
 import { LogOut } from 'lucide-react'
@@ -24,8 +24,6 @@ const NAV: NavItem[] = [
   { to: '/app/option-chain', icon: Layers,          label: 'Option Chain'  },
   { to: '/app/watchlist',    icon: BookOpen,        label: 'Watchlist'     },
   { to: '/app/strategies',      icon: GitBranch,  label: 'Strategies'    },
-  { to: '/app/strategy-builder', icon: Cpu,        label: 'Strat Builder'  },
-
   { to: '/app/analytics',        icon: BarChart2,   label: 'Analytics'      },
   { to: '/app/broker-accounts',  icon: Activity,    label: 'Brokers'        },
   { to: '/app/settings',         icon: Settings,    label: 'Settings'       },
