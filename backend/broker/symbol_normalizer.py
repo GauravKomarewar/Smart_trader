@@ -610,3 +610,167 @@ def enrich_option_chain_row(
 
     row["lot_size"] = lot
     return row
+
+
+# ── ScriptMaster-based option chain builder ──────────────────────────────────
+
+_STRIKE_GAPS: Dict[str, int] = {
+    "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50,
+    "MIDCPNIFTY": 25, "SENSEX": 100, "BANKEX": 100,
+}
+
+
+def build_option_chain_from_scriptmaster(
+    symbol: str,
+    exchange: str = "NFO",
+    expiry: str = "",
+    strikes_per_side: int = 15,
+    spot_price: float = 0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Build a full option chain structure from ScriptMaster data.
+
+    When no live broker data is available (market closed, no broker connected),
+    this builds the chain structure with all strikes, trading_symbols, lot_sizes
+    and zero prices. The frontend can still display the chain and allow basket
+    creation.
+
+    Follows the same pattern as shoonya_platform's OptionChainData.load_from_scriptmaster().
+
+    Args:
+        symbol:           Underlying ("NIFTY", "BANKNIFTY")
+        exchange:         "NFO", "BFO"
+        expiry:           ISO date "YYYY-MM-DD" or "" for nearest
+        strikes_per_side: How many strikes on each side of ATM
+        spot_price:       Current spot (0 = try to derive from ScriptMaster/fallback)
+
+    Returns:
+        Option chain dict matching the frontend's expected format, or None.
+    """
+    try:
+        from scripts.scriptmaster import options_expiry, get_lot_size as sm_lot_size
+        from broker.fyers_scriptmaster import get_options, FYERS_SCRIPTMASTER
+    except ImportError:
+        return None
+
+    sym = symbol.upper()
+
+    # ── Resolve expiry ──
+    all_expiries_raw = options_expiry(sym, exchange)
+    if not isinstance(all_expiries_raw, list) or not all_expiries_raw:
+        return None
+
+    all_expiries_iso = sorted(set(expiry_to_iso(e) for e in all_expiries_raw if e))
+
+    if expiry:
+        # Ensure passed expiry is in the list; convert back to broker format
+        broker_expiry = iso_to_broker_expiry(expiry)
+    else:
+        # Use the nearest expiry
+        broker_expiry = all_expiries_raw[0] if all_expiries_raw else ""
+        expiry = expiry_to_iso(broker_expiry) if broker_expiry else ""
+
+    if not broker_expiry:
+        return None
+
+    # ── Fetch options for this expiry ──
+    options = get_options(
+        underlying=sym,
+        exchange=exchange,
+        expiry=broker_expiry,
+    )
+
+    if not options:
+        return None
+
+    # ── Build strike map: {strike: {"CE": rec, "PE": rec}} ──
+    by_strike: Dict[float, Dict[str, Dict]] = {}
+    for rec in options:
+        strike = rec.get("StrikePrice")
+        otype = rec.get("OptionType", "")
+        if not strike or otype not in ("CE", "PE"):
+            continue
+        by_strike.setdefault(float(strike), {})[otype] = rec
+
+    if not by_strike:
+        return None
+
+    # ── ATM calculation ──
+    all_strikes = sorted(by_strike.keys())
+    gap = _STRIKE_GAPS.get(sym, 50)
+    if spot_price > 0:
+        atm_strike = round(spot_price / gap) * gap
+    else:
+        # No spot — use median of available strikes as rough ATM
+        atm_strike = all_strikes[len(all_strikes) // 2]
+
+    # ── Select strikes around ATM ──
+    try:
+        atm_idx = min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - atm_strike))
+    except ValueError:
+        return None
+
+    start_idx = max(0, atm_idx - strikes_per_side)
+    end_idx = min(len(all_strikes), atm_idx + strikes_per_side + 1)
+    selected_strikes = all_strikes[start_idx:end_idx]
+
+    lot = sm_lot_size(sym, exchange)
+
+    # ── Build rows ──
+    rows = []
+    for strike in selected_strikes:
+        pair = by_strike.get(strike, {})
+        ce_rec = pair.get("CE")
+        pe_rec = pair.get("PE")
+        if not ce_rec or not pe_rec:
+            continue
+
+        ce_tsym = ce_rec.get("FyersSymbol", "").split(":", 1)[-1]
+        pe_tsym = pe_rec.get("FyersSymbol", "").split(":", 1)[-1]
+
+        row = {
+            "strike": int(strike) if strike == int(strike) else strike,
+            "isATM": abs(strike - atm_strike) < gap * 0.5,
+            "call": {
+                "ltp": 0, "iv": 0, "delta": 0, "gamma": 0, "theta": 0, "vega": 0,
+                "oi": 0, "oiChange": 0, "volume": 0, "bid": 0, "ask": 0,
+                "trading_symbol": ce_tsym,
+                "fyers_symbol": ce_rec.get("FyersSymbol", ""),
+                "lot_size": lot,
+                "exchange": exchange,
+                "option_type": "CE",
+                "underlying": sym,
+                "strike": int(strike) if strike == int(strike) else strike,
+            },
+            "put": {
+                "ltp": 0, "iv": 0, "delta": 0, "gamma": 0, "theta": 0, "vega": 0,
+                "oi": 0, "oiChange": 0, "volume": 0, "bid": 0, "ask": 0,
+                "trading_symbol": pe_tsym,
+                "fyers_symbol": pe_rec.get("FyersSymbol", ""),
+                "lot_size": lot,
+                "exchange": exchange,
+                "option_type": "PE",
+                "underlying": sym,
+                "strike": int(strike) if strike == int(strike) else strike,
+            },
+        }
+        rows.append(row)
+
+    if not rows:
+        return None
+
+    total_ce_oi = sum(r["call"]["oi"] for r in rows)
+    total_pe_oi = sum(r["put"]["oi"] for r in rows)
+    pcr = round(total_pe_oi / max(total_ce_oi, 1), 4)
+
+    return {
+        "underlying": sym,
+        "underlyingLtp": spot_price,
+        "expiry": expiry,
+        "expiries": all_expiries_iso,
+        "pcr": pcr,
+        "maxPainStrike": int(atm_strike),
+        "rows": rows,
+        "lot_size": lot,
+        "source": "scriptmaster",
+    }

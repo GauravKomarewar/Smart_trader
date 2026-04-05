@@ -277,22 +277,25 @@ export function useOptionChain() {
   const { selectedUnderlying, selectedExpiry, setData, setLoading } = useOptionChainStore()
 
   useEffect(() => {
+    let cancelled = false
     const load = async () => {
       setLoading(true)
       try {
-        // Always try live API first — Fyers provides option chain data for all users
         const data = await api.optionChain(selectedUnderlying, selectedExpiry || undefined) as any
-        if (data && data.rows && data.rows.length > 0) {
+        if (cancelled) return
+        if (data) {
+          // Always use backend response — it includes ScriptMaster expiries and
+          // chain structure even when market is closed (source="scriptmaster")
           setData(data)
           return
         }
       } catch { /* fall through */ }
-      // API returned nothing — show empty state (no fake data)
+      if (cancelled) return
       setData({ underlying: selectedUnderlying, underlyingLtp: 0, expiry: selectedExpiry || '', expiries: [], pcr: 0, maxPainStrike: 0, rows: [] } as any)
     }
     load()
-    const t = setInterval(load, 5000)
-    return () => clearInterval(t)
+    const t = setInterval(load, 10000)
+    return () => { cancelled = true; clearInterval(t) }
   }, [selectedUnderlying, selectedExpiry])
 }
 
@@ -308,7 +311,8 @@ export function useInstrumentSearch(query: string) {
     timer.current = setTimeout(async () => {
       setLoading(true)
       try {
-        const data = await api.search(query) as any[]
+        const resp = await api.search(query) as any
+        const data = Array.isArray(resp) ? resp : (resp?.data ?? [])
         setResults(data)
       } catch {
         setResults([])

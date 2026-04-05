@@ -57,13 +57,22 @@ export default function OptionChainPage() {
           </select>
 
           {/* Expiry selector */}
-          {data && (
+          {data && data.expiries && data.expiries.length > 0 && (
             <select
               value={selectedExpiry || data.expiry}
               onChange={e => setExpiry(e.target.value)}
-              className="select-base w-36 text-[12px] py-1.5"
+              className="select-base w-44 text-[12px] py-1.5"
             >
-              {data.expiries.map(e => <option key={e} value={e}>{e}</option>)}
+              {data.expiries.map(e => {
+                // Format ISO date "2026-04-07" → "07 Apr 2026"
+                try {
+                  const d = new Date(e + 'T00:00:00')
+                  const label = d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+                  return <option key={e} value={e}>{label}</option>
+                } catch {
+                  return <option key={e} value={e}>{e}</option>
+                }
+              })}
             </select>
           )}
 
@@ -73,6 +82,9 @@ export default function OptionChainPage() {
               <div className="text-[11px] text-text-muted">
                 Spot: <span className="font-mono text-text-bright font-bold">{fmtNum(data.underlyingLtp)}</span>
               </div>
+              {(data as any).source === 'scriptmaster' && (
+                <span className="text-[10px] px-2 py-0.5 rounded bg-warning/15 text-warning font-medium">Offline — ScriptMaster data</span>
+              )}
               <div className="text-[11px] text-text-muted">
                 PCR: <span className={cn('font-mono font-semibold',
                   data.pcr > 1.2 ? 'text-profit' : data.pcr < 0.7 ? 'text-loss' : 'text-warning')}>
@@ -297,7 +309,7 @@ function OptionChainTable() {
                   {/* Call LTP (always visible) */}
                   <td
                     className="px-2 py-1.5 text-right font-mono font-bold text-profit bg-profit/5 cursor-pointer hover:underline"
-                    onClick={() => openOrderModal(data.underlying + `${row.strike}CE`)}
+                    onClick={() => openOrderModal((row.call as any)?.trading_symbol || data.underlying + `${row.strike}CE`)}
                   >
                     {fmtNum(row.call.ltp)}
                   </td>
@@ -312,7 +324,7 @@ function OptionChainTable() {
                   {/* PUT LTP (always visible) */}
                   <td
                     className="px-2 py-1.5 text-left font-mono font-bold text-loss bg-loss/5 cursor-pointer hover:underline"
-                    onClick={() => openOrderModal(data.underlying + `${row.strike}PE`)}
+                    onClick={() => openOrderModal((row.put as any)?.trading_symbol || data.underlying + `${row.strike}PE`)}
                   >
                     {fmtNum(row.put.ltp)}
                   </td>

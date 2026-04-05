@@ -11,6 +11,7 @@ from broker.symbol_normalizer import (
     search_instruments, get_expiries, get_lot_size,
     enrich_option_chain_row, to_broker_symbol, from_broker_symbol,
     lookup_by_trading_symbol, expiry_to_iso,
+    build_option_chain_from_scriptmaster,
 )
 
 logger = logging.getLogger("smart_trader.api")
@@ -251,11 +252,12 @@ def _convert_fyers_oc(fyers_data: dict, underlying: str) -> Optional[dict]:
 async def get_option_chain(
     symbol: str,
     exchange: str = Query("NSE"),
-    strikes: int = Query(10, ge=5, le=30),
+    strikes: int = Query(15, ge=5, le=30),
     expiry: Optional[str] = Query(None),
 ):
-    """Return option chain. Fyers primary → Shoonya → demo.
+    """Return option chain.
 
+    Priority: Fyers live → Shoonya live → ScriptMaster (structure only) → empty.
     Response rows are enriched with trading_symbol and lot_size from ScriptMaster
     so the frontend can directly place orders / build basket legs.
     """
@@ -263,34 +265,52 @@ async def get_option_chain(
     fyers = get_fyers_client()
     oc = None
 
+    # 1) Fyers live data
     if fyers.is_live:
         raw = fyers.get_option_chain(sym)
         if raw:
             oc = _convert_fyers_oc(raw, sym)
 
+    # 2) Shoonya live data
     if not oc:
         session = get_session()
         if not session.is_demo:
             data = session.get_option_chain(exchange=exchange, symbol=sym, strike_count=strikes)
-            if data:
+            if data and data.get("rows"):
                 oc = data
 
+    # 3) ScriptMaster chain (structure with strikes, zero prices)
+    oc_exchange = "NFO" if exchange in ("NSE", "NFO") else exchange
+    if not oc or not oc.get("rows"):
+        sm_chain = build_option_chain_from_scriptmaster(
+            sym, exchange=oc_exchange, expiry=expiry or "",
+            strikes_per_side=strikes, spot_price=0,
+        )
+        if sm_chain and sm_chain.get("rows"):
+            oc = sm_chain
+
+    # 4) Empty fallback
     if not oc:
-        from broker.shoonya_client import _make_demo_option_chain
-        oc = _make_demo_option_chain(sym, strikes)
+        oc = {
+            "underlying": sym, "underlyingLtp": 0,
+            "expiry": "", "expiries": get_expiries(sym, exchange=oc_exchange, instrument_type="OPT"),
+            "pcr": 0, "maxPainStrike": 0, "rows": [],
+            "lot_size": get_lot_size(sym, oc_exchange), "source": "unavailable",
+        }
 
     # Enrich with ScriptMaster expiries if broker didn't provide them
     if not oc.get("expiries"):
-        oc["expiries"] = get_expiries(sym, exchange="NFO", instrument_type="OPT")
+        oc["expiries"] = get_expiries(sym, exchange=oc_exchange, instrument_type="OPT")
 
     # Enrich each row with trading_symbol + lot_size for basket ordering
-    oc_expiry = oc.get("expiry", "")
-    oc_exchange = "NFO" if exchange in ("NSE", "NFO") else exchange
-    for row in oc.get("rows", []):
-        enrich_option_chain_row(row, sym, oc_exchange, oc_expiry)
+    # (skip if source is scriptmaster — already enriched)
+    if oc.get("source") != "scriptmaster":
+        oc_expiry = oc.get("expiry", "")
+        for row in oc.get("rows", []):
+            enrich_option_chain_row(row, sym, oc_exchange, oc_expiry)
 
     # Add lot_size at top level
-    oc["lot_size"] = get_lot_size(sym, oc_exchange)
+    oc.setdefault("lot_size", get_lot_size(sym, oc_exchange))
 
     return oc
 
