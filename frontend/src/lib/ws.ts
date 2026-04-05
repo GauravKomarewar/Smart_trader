@@ -10,6 +10,7 @@ type WsEventType =
   | 'quote' | 'order_update' | 'position_update' | 'alert' | 'heartbeat'
   | 'dashboard' | 'broker_accounts' | 'broker_data'
   | 'broker_subscribed' | 'broker_unsubscribed' | 'pong'
+  | 'risk_alerts' | 'risk_snapshot'
 
 interface WsMessage {
   type: WsEventType

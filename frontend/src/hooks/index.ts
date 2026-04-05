@@ -75,9 +75,28 @@ export function useLiveData() {
       if (data) setBrokerData(data)
     }
 
+    // Risk alerts — show toasts for real-time risk notifications
+    const { toast } = useToastStore.getState()
+    const onRiskAlerts = (data: any) => {
+      if (!Array.isArray(data)) return
+      for (const alert of data) {
+        const level = (alert.level || 'INFO').toUpperCase()
+        const toastType = level === 'CRITICAL' ? 'error'
+          : level === 'WARNING' ? 'warning'
+          : 'info'
+        toast(
+          alert.message || 'Risk event detected',
+          toastType,
+          level === 'CRITICAL' ? '⚠️ Risk Breach' : '⚠️ Risk Alert',
+          level === 'CRITICAL' ? 15000 : 8000,
+        )
+      }
+    }
+
     ws.on('dashboard', onDashboard)
     ws.on('broker_accounts', onBrokerAccounts)
     ws.on('broker_data', onBrokerData)
+    ws.on('risk_alerts', onRiskAlerts)
     ws.connect(token)
     connectedRef.current = true
 
@@ -85,6 +104,7 @@ export function useLiveData() {
       ws.off('dashboard', onDashboard)
       ws.off('broker_accounts', onBrokerAccounts)
       ws.off('broker_data', onBrokerData)
+      ws.off('risk_alerts', onRiskAlerts)
       ws.disconnect()
       connectedRef.current = false
     }

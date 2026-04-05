@@ -36,9 +36,10 @@ import threading
 import logging
 import json
 import os
-from datetime import date, datetime, timezone
+import time
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, List
 from dataclasses import dataclass, field, asdict
 
 logger = logging.getLogger("smart_trader.account_risk")
@@ -145,6 +146,10 @@ class AccountRiskManager:
         # Callbacks
         self._force_exit_cb: Optional[Callable] = None
         self._warning_cb:    Optional[Callable] = None
+
+        # Heartbeat state
+        self._last_known_pnl: float = 0.0
+        self._force_exit_in_progress: bool = False
 
         # Setup logging with context
         self._log = logging.LoggerAdapter(
@@ -291,6 +296,207 @@ class AccountRiskManager:
                         )
                     except Exception as e:
                         self._log.error("Force-exit callback error: %s", e)
+
+    # ── Heartbeat — self-driven PnL + enforcement cycle ──────────────────────
+
+    def heartbeat(self, session) -> dict:
+        """
+        Self-driven monitoring cycle.  Called every 1-2s by PositionWatcher.
+
+        1. Fetches positions from broker via session.get_positions()
+        2. Computes intraday PnL (excludes CNC/delivery)
+        3. Feeds PnL to on_pnl_update()
+        4. POST-BREACH enforcement: if daily_loss_hit AND positions still
+           exist → force-exit again (catches human-placed trades on broker)
+        5. Returns a status dict for push to frontend
+
+        Args:
+            session: BrokerAccountSession (has get_positions, get_order_book,
+                     cancel_order, place_order)
+        """
+        result = {
+            "config_id": self.config_id,
+            "broker_id": self.broker_id,
+            "client_id": self.client_id,
+            "pnl": 0.0,
+            "positions_count": 0,
+            "breach": False,
+            "action": None,
+        }
+
+        try:
+            positions = session.get_positions() or []
+        except Exception as e:
+            self._log.warning("heartbeat: get_positions failed: %s", e)
+            return result
+
+        # ── Empty-position guard (BUG-12) ─────────────────────────────────
+        # If broker returns empty positions mid-session, preserve last known
+        # PnL to avoid falsely resetting to 0 and missing a breach.
+        if not positions and hasattr(self, "_last_known_pnl") and self._last_known_pnl != 0.0:
+            result["pnl"] = self._last_known_pnl
+            return result
+
+        # ── Compute intraday PnL (exclude CNC/delivery) ──────────────────
+        pnl = 0.0
+        open_qty_count = 0
+        for p in positions:
+            if isinstance(p, dict):
+                prd = (p.get("product", "") or p.get("prd", "")).upper()
+                # Skip delivery/CNC positions for intraday risk
+                if prd in ("CNC", "C", "DELIVERY"):
+                    continue
+                net_qty = int(p.get("net_qty") or p.get("netqty") or p.get("qty", 0) or 0)
+                rpnl = float(p.get("realised_pnl") or p.get("rpnl", 0) or 0)
+                urmtom = float(
+                    p.get("unrealised_pnl")
+                    or p.get("urmtom", 0)
+                    or p.get("pnl", 0)
+                    or 0
+                )
+                pnl += rpnl + urmtom
+                if net_qty != 0:
+                    open_qty_count += 1
+
+        self._last_known_pnl = pnl
+        result["pnl"] = round(pnl, 2)
+        result["positions_count"] = open_qty_count
+
+        # Feed PnL into the standard risk engine
+        self.on_pnl_update(pnl)
+
+        # ── Post-breach continuous enforcement ────────────────────────────
+        # If daily_loss_hit but positions still exist (e.g. human placed
+        # trades on broker terminal), kill them again.
+        with self._lock:
+            if self._daily_loss_hit and open_qty_count > 0:
+                self._log.critical(
+                    "POST-BREACH: %d open positions detected after breach "
+                    "(client=%s). Re-triggering force exit + order cancellation.",
+                    open_qty_count, self.client_id,
+                )
+                result["breach"] = True
+                result["action"] = "POST_BREACH_FLATTEN"
+
+                # Cancel all open broker orders first
+                try:
+                    self.cancel_all_broker_orders(session)
+                except Exception as e:
+                    self._log.error("Post-breach cancel_all_broker_orders failed: %s", e)
+
+                # Trigger force-exit callback to flatten positions
+                if self._force_exit_cb:
+                    try:
+                        self._force_exit_cb(
+                            self.user_id,
+                            self.config_id,
+                            "POST_BREACH_FLATTEN: Human-placed trades detected after risk breach",
+                        )
+                    except Exception as e:
+                        self._log.error("Post-breach force_exit_cb failed: %s", e)
+
+            elif self._daily_loss_hit and open_qty_count == 0:
+                # All flat after breach — good. Cancel lingering orders just in case.
+                try:
+                    self.cancel_all_broker_orders(session)
+                except Exception:
+                    pass
+
+        return result
+
+    # ── Broker order cancellation ─────────────────────────────────────────
+
+    def cancel_all_broker_orders(self, session) -> int:
+        """
+        Cancel all open/pending/trigger-pending orders on the broker.
+
+        Called on risk breach and during post-breach enforcement.
+        Returns the number of orders cancelled.
+        """
+        cancelled = 0
+        try:
+            orders = session.get_order_book() or []
+        except Exception as e:
+            self._log.error("cancel_all_broker_orders: get_order_book failed: %s", e)
+            return 0
+
+        _OPEN_STATUSES = {
+            "OPEN", "PENDING", "TRIGGER_PENDING", "TRIGGER PENDING",
+            "NEW", "AFTER MARKET ORDER REQ RECEIVED", "MODIFIED",
+            "WAITING", "PARTIALLY_FILLED", "PARTIALLY_EXECUTED",
+        }
+
+        for order in orders:
+            if isinstance(order, dict):
+                status = (
+                    order.get("status", "")
+                    or order.get("stat", "")
+                    or order.get("Status", "")
+                ).upper().strip()
+                order_id = (
+                    order.get("order_id")
+                    or order.get("norenordno")
+                    or order.get("orderid")
+                    or order.get("oms_order_id")
+                    or ""
+                )
+            else:
+                status = str(getattr(order, "status", "")).upper().strip()
+                order_id = str(
+                    getattr(order, "order_id", "")
+                    or getattr(order, "norenordno", "")
+                    or ""
+                )
+
+            if not order_id or status not in _OPEN_STATUSES:
+                continue
+
+            try:
+                resp = session.cancel_order(order_id)
+                cancelled += 1
+                self._log.info(
+                    "CANCELLED broker order %s (status=%s) on client=%s",
+                    order_id, status, self.client_id,
+                )
+            except Exception as e:
+                self._log.error(
+                    "Failed to cancel order %s on client=%s: %s",
+                    order_id, self.client_id, e,
+                )
+
+        if cancelled:
+            self._log.info(
+                "cancel_all_broker_orders: cancelled %d orders on client=%s",
+                cancelled, self.client_id,
+            )
+        return cancelled
+
+    # ── System entry cancellation ─────────────────────────────────────────
+
+    def cancel_system_entries(self, order_repo) -> int:
+        """
+        Mark all CREATED (not yet sent) system orders as FAILED in
+        the PostgreSQL order repository.
+
+        Prevents the OrderWatcher from picking up queued orders
+        after a risk breach.
+        """
+        cancelled = 0
+        try:
+            pending = order_repo.get_open_orders()
+            for record in pending:
+                if record.status == "CREATED":
+                    try:
+                        order_repo.update_status(record.command_id, "FAILED")
+                        cancelled += 1
+                    except Exception as e:
+                        self._log.error("cancel_system_entries: update failed for %s: %s",
+                                        record.command_id, e)
+        except Exception as e:
+            self._log.error("cancel_system_entries failed: %s", e)
+        if cancelled:
+            self._log.info("cancel_system_entries: cancelled %d pending orders", cancelled)
+        return cancelled
 
     # ── Status & control ──────────────────────────────────────────────────────
 

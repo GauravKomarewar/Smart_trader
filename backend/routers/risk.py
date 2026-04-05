@@ -44,3 +44,15 @@ def acknowledge_exit(
         rm = get_account_risk(user_id, s["account_id"])
         rm.acknowledge_exit_complete()
     return {"success": True, "acknowledged": len(statuses)}
+
+
+@risk_router.get("/watcher")
+def watcher_status(payload: dict = Depends(current_user)):
+    """Return PositionWatcher snapshot and pending alerts for this user."""
+    from trading.position_watcher import position_watcher as pw
+    user_id = payload["sub"]
+    return {
+        "running": pw.is_running,
+        "snapshot": pw.get_latest_snapshot(user_id),
+        "alerts": pw.peek_alerts(user_id),
+    }

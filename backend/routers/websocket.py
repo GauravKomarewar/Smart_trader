@@ -400,6 +400,27 @@ async def live_feed_websocket(websocket: WebSocket):
                 except Exception as e:
                     logger.debug("WS feed dashboard error: %s", e)
 
+                # Risk alerts — every cycle (1s), drain from PositionWatcher
+                try:
+                    from trading.position_watcher import position_watcher as pw
+                    alerts = pw.drain_alerts(user_id)
+                    if alerts:
+                        await websocket.send_text(json.dumps({
+                            "type": "risk_alerts",
+                            "data": alerts,
+                            "ts": ts,
+                        }))
+                    # Push risk snapshots alongside dashboard
+                    risk_snapshot = pw.get_latest_snapshot(user_id)
+                    if risk_snapshot:
+                        await websocket.send_text(json.dumps({
+                            "type": "risk_snapshot",
+                            "data": risk_snapshot,
+                            "ts": ts,
+                        }))
+                except Exception as e:
+                    logger.debug("WS feed risk_alerts error: %s", e)
+
                 # Broker accounts — every 2 cycles (2s)
                 if cycle % 2 == 0:
                     try:

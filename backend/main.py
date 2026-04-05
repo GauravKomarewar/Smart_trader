@@ -214,6 +214,14 @@ async def on_startup():
     except Exception as exc:
         logger.warning("Broker session restore failed (non-fatal): %s", exc)
 
+    # ── Start PositionWatcher (real-time risk monitoring) ────────────────────
+    try:
+        from trading.position_watcher import position_watcher
+        position_watcher.start()
+        logger.info("PositionWatcher started — real-time risk monitoring active")
+    except Exception as exc:
+        logger.warning("PositionWatcher start failed (non-fatal): %s", exc)
+
 
 def _restore_broker_sessions():
     """
@@ -314,6 +322,13 @@ def _restore_broker_sessions():
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    # Stop PositionWatcher first
+    try:
+        from trading.position_watcher import position_watcher
+        position_watcher.stop()
+    except Exception:
+        pass
+
     from broker.shoonya_client import get_session
     try:
         get_session().logout()
