@@ -156,43 +156,42 @@ export default function PlaceOrderModal() {
 
     setSubmitting(true)
     const accountIds = Array.from(selectedAccounts)
-    const results: { id: string; ok: boolean; msg: string }[] = []
+    
+    try {
+      // Single unified call — backend routes to all selected accounts
+      const result: any = await api.placeOrder({
+        accountIds,
+        symbol,
+        exchange,
+        transactionType: side === 'BUY' ? 'B' : 'S',
+        productType:     product,
+        orderType:       orderType === 'MARKET' ? 'MKT' : orderType === 'LIMIT' ? 'LMT' : orderType === 'SL' ? 'SL-LMT' : 'SL-MKT',
+        quantity:        qty,
+        price:           typeof price === 'number' ? price : 0,
+        triggerPrice:    typeof trigPrice === 'number' ? trigPrice : 0,
+        validity,
+        tag:             [execType, tag].filter(Boolean).join(':') || 'SmartTrader',
+        executionType:   execType,
+        strategyName:    'manual',
+      })
 
-    for (const accId of accountIds) {
-      try {
-        await api.placeOrder({
-          accountId:       accId,
-          symbol,
-          exchange,
-          transactionType: side === 'BUY' ? 'B' : 'S',
-          productType:     product,
-          orderType:       orderType === 'MARKET' ? 'MKT' : orderType === 'LIMIT' ? 'LMT' : orderType === 'SL' ? 'SL-LMT' : 'SL-MKT',
-          quantity:        qty,
-          price:           typeof price === 'number' ? price : 0,
-          triggerPrice:    typeof trigPrice === 'number' ? trigPrice : 0,
-          validity,
-          tag:             [execType, tag].filter(Boolean).join(':') || 'SmartTrader',
-        })
-        const acc = brokerAccounts.find(a => a.config_id === accId)
-        results.push({ id: accId, ok: true, msg: `${acc?.client_id ?? accId.slice(0, 8)}` })
-      } catch (err: any) {
-        const acc = brokerAccounts.find(a => a.config_id === accId)
-        results.push({ id: accId, ok: false, msg: `${acc?.client_id ?? accId.slice(0, 8)}: ${err?.message ?? 'Failed'}` })
+      if (result.success) {
+        const orderCount = result.order_count ?? result.orders?.length ?? 0
+        toast(
+          `${execType} ${side} ${qty}×${symbol} — ${orderCount} order(s) through ${accountIds.length} account(s)`,
+          'success'
+        )
+        closeOrderModal()
+      } else {
+        const errors = result.errors?.join('; ') ?? 'Order failed'
+        toast(`Failed: ${errors}`, 'error')
       }
-    }
-
-    const ok = results.filter(r => r.ok)
-    const fail = results.filter(r => !r.ok)
-    if (ok.length > 0) {
-      toast(`${execType} ${side} ${qty}×${symbol} placed on ${ok.map(r => r.msg).join(', ')}`, 'success')
-    }
-    if (fail.length > 0) {
-      toast(`Failed: ${fail.map(r => r.msg).join('; ')}`, 'error')
+    } catch (err: any) {
+      toast(`Order failed: ${err?.message ?? 'Unknown error'}`, 'error')
     }
 
     setSubmitting(false)
     setConfirm(false)
-    if (ok.length > 0) closeOrderModal()
   }
 
   if (!orderModalOpen) return null

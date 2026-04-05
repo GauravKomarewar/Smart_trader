@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 from sqlalchemy.orm import Session
 
 from broker.shoonya_client import get_best_session, register_user_session
@@ -59,6 +59,17 @@ class PlaceOrderRequest(BaseModel):
     validity: str = "DAY"
     # Multi-broker routing: which account to use (config_id from /broker/configs)
     accountId: Optional[str] = None   # None = use best available session
+    # Additional accounts for multi-account orders
+    accountIds: Optional[List[str]] = None
+    # Execution type for order tracking
+    executionType: str = "ENTRY"  # ENTRY | EXIT | ADJUSTMENT
+    # Strategy name for tracking
+    strategyName: str = "manual"
+    # Risk fields
+    stopLoss: Optional[float] = None
+    target: Optional[float] = None
+    trailingType: Optional[str] = None
+    trailingValue: Optional[float] = None
 
 
 @router.post("/place")
@@ -68,91 +79,100 @@ async def place_order(
     db: Session = Depends(get_db),
 ):
     """
-    Place a new order via the user's connected broker account.
+    Place a new order via the Unified Order Intent Pipeline.
+
+    ALL orders from the frontend go through the Trading Bot checkpoint:
+      Frontend → Order Intent → ExecutionGuard → Risk Manager → CommandService → Broker
+
+    Every order is persisted to PostgreSQL with full lifecycle tracking.
 
     Multi-broker routing:
-      • If `accountId` is provided → uses that specific broker account
-      • Otherwise → uses the first active live session (or demo fallback)
+      • If `accountIds` / `accountId` provided → routes to those specific accounts
+      • Otherwise → routes to all live accounts
 
-    Pre-trade risk check is enforced per-account before sending to broker.
+    Returns:
+      Order intent processing result with per-account status.
     """
+    from trading.order_intent import OrderIntentPayload, LegPayload, process_order_intent
+
     user_id = payload["sub"]
 
-    # ── Multi-broker routing ──────────────────────────────────────────────────
-    if req.accountId:
-        from broker.multi_broker import registry as mb_registry
-        mb_sess = mb_registry.get_session(user_id, req.accountId)
-        if mb_sess and not mb_sess.is_demo:
-            # ── Pre-trade risk check ──────────────────────────────────────────
-            order_dict = {
-                "transaction_type": req.transactionType,
-                "symbol":    req.symbol,
-                "exchange":  req.exchange,
-                "quantity":  req.quantity,
-                "price":     req.price,
-                "tag":       req.tag or "",
-            }
-            try:
-                from broker.account_risk import get_account_risk
-                rm = get_account_risk(
-                    user_id   = user_id,
-                    config_id = req.accountId,
-                    broker_id = mb_sess.broker_id,
-                    client_id = mb_sess.client_id,
-                )
-                allowed, reason = rm.validate_order(order_dict)
-                if not allowed:
-                    logger.warning(
-                        "Order blocked by risk guard [user=%s client=%s]: %s",
-                        user_id[:8], mb_sess.client_id, reason,
-                    )
-                    raise HTTPException(status_code=400, detail=reason)
-            except HTTPException:
-                raise
-            except Exception as risk_e:
-                logger.warning("Risk check error (non-fatal): %s", risk_e)
+    # Map frontend order type to canonical format
+    order_type_map = {
+        "MKT": "MARKET", "MARKET": "MARKET",
+        "LMT": "LIMIT", "LIMIT": "LIMIT",
+        "SL-LMT": "SL", "SL": "SL",
+        "SL-MKT": "SL-M", "SL-M": "SL-M",
+    }
+    canonical_order_type = order_type_map.get(req.orderType.upper(), "MARKET")
 
-            logger.info(
-                "PlaceOrder (multi-broker) [user=%s broker=%s client=%s]: "
-                "%s %s qty=%d price=%.2f via account=%s",
-                user_id[:8], mb_sess.broker_id, mb_sess.client_id,
-                req.transactionType, req.symbol, req.quantity, req.price, req.accountId[:8],
-            )
-            # Pass canonical format — multi_broker normalises, adapters convert
-            # to broker-specific format (Fyers: "EXCH:SYM", Shoonya: plain "SYM")
-            result = mb_sess.place_order({
-                "side":            req.transactionType,
-                "product":         req.productType,
-                "exchange":        req.exchange,
-                "symbol":          req.symbol,
-                "qty":             req.quantity,
-                "order_type":      req.orderType,
-                "price":           req.price,
-                "trigger_price":   req.triggerPrice or 0,
-                "retention":       req.validity,
-                "tag":             req.tag or "smart_trader",
-            })
-            if not result.get("success"):
-                raise HTTPException(status_code=400, detail=result.get("message", "Order failed"))
-            return result
+    # Map transactionType (B/S) to direction (BUY/SELL)
+    direction = "BUY" if req.transactionType.upper() in ("B", "BUY") else "SELL"
 
-    # ── Legacy single-session fallback ────────────────────────────────────────
-    session = _resolve_session(user_id, db)
-    if not session.is_logged_in:
-        raise HTTPException(status_code=401, detail="Not authenticated — connect your broker first")
+    # Resolve execution type from tag if present
+    exec_type = req.executionType.upper()
+    if req.tag and ":" in req.tag:
+        tag_exec = req.tag.split(":")[0].upper()
+        if tag_exec in ("ENTRY", "EXIT", "ADJUSTMENT"):
+            exec_type = tag_exec
 
-    logger.info(
-        "PlaceOrder: %s %s %s qty=%d price=%.2f type=%s",
-        req.transactionType, req.symbol, req.productType,
-        req.quantity, req.price, req.orderType,
+    # Resolve broker accounts
+    broker_accounts = []
+    if req.accountIds:
+        broker_accounts = req.accountIds
+    elif req.accountId:
+        broker_accounts = [req.accountId]
+    else:
+        # Auto-resolve all live accounts
+        from trading.trading_bot import _get_all_live_config_ids
+        broker_accounts = _get_all_live_config_ids(user_id)
+
+    if not broker_accounts:
+        raise HTTPException(
+            status_code=400,
+            detail="No live broker accounts connected — connect a broker first"
+        )
+
+    # Build unified order intent
+    intent = OrderIntentPayload(
+        execution_type=exec_type,
+        strategy_name=req.strategyName,
+        exchange=req.exchange,
+        broker_accounts=broker_accounts,
+        legs=[LegPayload(
+            tradingsymbol=req.symbol,
+            direction=direction,
+            qty=req.quantity,
+            order_type=canonical_order_type,
+            price=req.price,
+            trigger_price=req.triggerPrice or 0.0,
+            product_type=req.productType,
+            stop_loss=req.stopLoss,
+            target=req.target,
+            trailing_type=req.trailingType,
+            trailing_value=req.trailingValue,
+        )],
+        remarks=req.tag or "SmartTrader",
     )
-    result = session.place_order(req.model_dump())
-    if not result.get("success"):
-        logger.error("Order failed: %s", result)
-        raise HTTPException(status_code=400, detail=result.get("message", "Order failed"))
 
-    logger.info("Order placed: orderId=%s", result.get("orderId"))
-    return result
+    # Process through unified pipeline
+    result = process_order_intent(user_id=user_id, intent=intent, db_session=db)
+
+    response = result.to_dict()
+
+    # For backward compatibility, add 'success' and 'message' fields
+    if response["success"]:
+        # Return first successful order info for backward compat
+        first_order = response["orders"][0] if response["orders"] else {}
+        response["orderId"] = first_order.get("command_id", "")
+        response["message"] = (
+            f"Order intent processed through {len(broker_accounts)} account(s)"
+        )
+    else:
+        detail = "; ".join(response.get("errors", ["Order failed"]))
+        raise HTTPException(status_code=400, detail=detail)
+
+    return response
 
 
 @router.get("/book")

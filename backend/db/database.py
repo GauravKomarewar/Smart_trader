@@ -57,6 +57,7 @@ class User(Base):
     password_hash= Column(String(255), nullable=False)
     role         = Column(String(20), nullable=False, default="user")  # admin|user|viewer
     is_active    = Column(Boolean, default=True)
+    api_key      = Column(String(64), unique=True, nullable=True, index=True)  # webhook/alert auth key
     created_at   = Column(DateTime, default=utcnow)
     updated_at   = Column(DateTime, default=utcnow, onupdate=utcnow)
     last_login   = Column(DateTime, nullable=True)

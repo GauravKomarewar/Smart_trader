@@ -59,6 +59,9 @@ export const api = {
   changePassword: (current_password: string, new_password: string) =>
     api.post('/auth/change-password', { current_password, new_password }),
 
+  apiKey: () => api.get<{ api_key: string; user_id: string }>('/auth/api-key'),
+  regenerateApiKey: () => api.post<{ api_key: string; message: string }>('/auth/api-key/regenerate', {}),
+
   shoonyaConnect: () => api.post('/auth/shoonya-connect', {}),
   shoonyaDisconnect: () => api.post('/auth/shoonya-disconnect', {}),
   shoonyaStatus: () => api.get<{ loggedIn: boolean; mode: string; userId?: string; configured: boolean }>('/auth/status'),

@@ -4,20 +4,21 @@ Smart Trader — Order Management System (OMS)
 
 Responsibilities:
   - Order lifecycle management (PENDING → OPEN → COMPLETE/CANCELLED/REJECTED)
-  - Portfolio positions tracking
+  - Portfolio positions tracking (in-memory + PostgreSQL-backed)
   - P&L calculation (realised + unrealised)
-  - Order book persistence (SQLite via ORM)
   - Atomic order batching for multi-leg strategies
   - Integration with ExecutionGuard before submission
 
-Architecture:
-  OMS.place_order()
-    → ExecutionGuard.validate()
-    → BrokerAdapter.submit()
-    → track order state
-    → update position book
+IMPORTANT: For live order placement, ALL orders MUST flow through the
+unified OrderIntentProcessor → TradingBot → CommandService pipeline.
+The OMS tracks state and provides read endpoints. Direct broker calls
+from OMS are reserved for test mode only.
 
-  OMS is broker-agnostic. BrokerAdapter is injected per user session.
+Architecture:
+  Frontend / Webhook / Strategy
+    → OrderIntentProcessor (single checkpoint)
+      → TradingBot → CommandService → ExecutionGuard → Risk → Broker
+      → PostgreSQL persistence + OMS in-memory tracking
 """
 import uuid
 import threading
@@ -443,23 +444,61 @@ class CancelOrderBody(BaseModel):
 
 @oms_router.post("/orders")
 def oms_place_order(body: PlaceOrderBody, payload: dict = Depends(current_user)):
-    oms = get_oms(payload["sub"])
-    req = OrderRequest(
-        symbol=body.symbol,
+    """
+    Place order via unified pipeline (OMS endpoint).
+    Routes through OrderIntentProcessor → TradingBot → CommandService → Broker.
+    """
+    from trading.order_intent import OrderIntentPayload, LegPayload, process_order_intent
+    from trading.trading_bot import _get_all_live_config_ids
+
+    user_id = payload["sub"]
+
+    # Use OMS for test mode only — live orders go through unified pipeline
+    if body.test_mode:
+        oms = get_oms(user_id)
+        req = OrderRequest(
+            symbol=body.symbol,
+            exchange=body.exchange,
+            side=OrderSide(body.side),
+            order_type=OrderType(body.order_type),
+            product=ProductType(body.product),
+            quantity=body.quantity,
+            price=body.price,
+            trigger_price=body.trigger_price,
+            strategy_id=body.strategy_id,
+            tag=body.tag,
+            test_mode=True,
+            remarks=body.remarks,
+        )
+        order = oms.place_order(req)
+        return order.to_dict()
+
+    # Live mode: route through unified pipeline
+    broker_accounts = _get_all_live_config_ids(user_id)
+    if not broker_accounts:
+        raise HTTPException(status_code=400, detail="No live broker accounts connected")
+
+    intent = OrderIntentPayload(
+        execution_type=body.tag or "ENTRY",
+        strategy_name=body.strategy_id or "manual",
         exchange=body.exchange,
-        side=OrderSide(body.side),
-        order_type=OrderType(body.order_type),
-        product=ProductType(body.product),
-        quantity=body.quantity,
-        price=body.price,
-        trigger_price=body.trigger_price,
-        strategy_id=body.strategy_id,
-        tag=body.tag,
-        test_mode=body.test_mode,
+        broker_accounts=broker_accounts,
+        legs=[LegPayload(
+            tradingsymbol=body.symbol,
+            direction=body.side,
+            qty=body.quantity,
+            order_type=body.order_type,
+            price=body.price,
+            trigger_price=body.trigger_price,
+            product_type=body.product,
+        )],
         remarks=body.remarks,
     )
-    order = oms.place_order(req)
-    return order.to_dict()
+    result = process_order_intent(user_id=user_id, intent=intent)
+    response = result.to_dict()
+    if not response["success"]:
+        raise HTTPException(status_code=400, detail="; ".join(response.get("errors", ["Failed"])))
+    return response
 
 
 @oms_router.delete("/orders/{order_id}")

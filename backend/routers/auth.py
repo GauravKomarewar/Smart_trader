@@ -3,6 +3,7 @@ Auth router — email/password login, registration, JWT tokens.
 Manages platform users (not broker sessions — those are in broker_sessions router).
 """
 import logging
+import secrets
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -85,6 +86,7 @@ def register(body: RegisterRequest, request: Request, db: Session = Depends(get_
 
     is_first = db.query(User).count() == 0
     uid = generate_id()
+    api_key = f"st_{secrets.token_hex(24)}"
     user = User(
         id=uid,
         email=body.email.lower().strip(),
@@ -92,6 +94,7 @@ def register(body: RegisterRequest, request: Request, db: Session = Depends(get_
         phone=body.phone,
         password_hash=hash_password(body.password),
         role="admin" if is_first else "user",
+        api_key=api_key,
     )
     db.add(user)
     db.commit()
@@ -156,6 +159,29 @@ def change_password(
     user.password_hash = hash_password(body.new_password)
     db.commit()
     return {"success": True}
+
+
+@router.get("/api-key")
+def get_api_key(payload: dict = Depends(current_user), db: Session = Depends(get_db)):
+    """Return the user's API key for webhook/alert authentication."""
+    user = db.query(User).filter(User.id == payload["sub"]).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+    if not user.api_key:
+        user.api_key = f"st_{secrets.token_hex(24)}"
+        db.commit()
+    return {"api_key": user.api_key, "user_id": user.id}
+
+
+@router.post("/api-key/regenerate")
+def regenerate_api_key(payload: dict = Depends(current_user), db: Session = Depends(get_db)):
+    """Regenerate the user's API key. Old key becomes invalid immediately."""
+    user = db.query(User).filter(User.id == payload["sub"]).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+    user.api_key = f"st_{secrets.token_hex(24)}"
+    db.commit()
+    return {"api_key": user.api_key, "message": "API key regenerated"}
 
 
 # ── Shoonya OAuth status (backward-compat) ─────────────────────────────────
