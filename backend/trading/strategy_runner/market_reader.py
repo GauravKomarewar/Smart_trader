@@ -15,6 +15,7 @@ import glob
 import logging
 import re
 import sqlite3
+import time
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
@@ -277,11 +278,16 @@ class MarketReader:
         else:
             effective_max = self.max_stale_seconds
         if age > effective_max:
-            logger.warning(
-                "Option chain data stale: %.1fs > %.1fs "
-                "(continuing with stale data)",
-                age, effective_max,
-            )
+            # Throttle: warn at most once every 60 seconds
+            _last = getattr(self, '_last_stale_warn', 0.0)
+            _now = time.time()
+            if _now - _last >= 60:
+                logger.warning(
+                    "Option chain data stale: %.1fs > %.1fs "
+                    "(continuing with stale data)",
+                    age, effective_max,
+                )
+                self._last_stale_warn = _now
 
     # ----------------------------------------------------------------------
     # Public data retrieval methods (with optional expiry)
@@ -301,10 +307,52 @@ class MarketReader:
 
     def get_spot_price(self, expiry: Optional[str] = None) -> float:
         meta = self.get_meta(expiry)
+        spot = 0.0
         try:
-            return float(meta.get("spot_ltp", 0))
+            spot = float(meta.get("spot_ltp", 0))
         except (ValueError, TypeError):
-            return 0.0
+            pass
+
+        # Fallback: if no SQLite data, try broker API
+        if spot == 0.0:
+            spot = self._broker_fallback_spot()
+
+        return spot
+
+    def _broker_fallback_spot(self) -> float:
+        """Attempt to get spot price from broker API when SQLite data is unavailable."""
+        try:
+            from broker.multi_broker import registry
+            sessions = registry.get_all_sessions()
+            for sess in sessions:
+                if not (sess.is_live or sess.is_paper):
+                    continue
+                adapter = getattr(sess, '_adapter', None)
+                if adapter is None:
+                    continue
+                # Try Fyers-style quote
+                if hasattr(adapter, 'get_quotes'):
+                    # Fyers uses NSE:NIFTY50-INDEX etc.
+                    nse_sym = f"NSE:{self.symbol}50-INDEX" if self.symbol == "NIFTY" else f"NSE:{self.symbol}-INDEX"
+                    try:
+                        quotes = adapter.get_quotes([nse_sym])
+                        if quotes and isinstance(quotes, list):
+                            ltp = quotes[0].get("ltp") or quotes[0].get("last_price")
+                            if ltp:
+                                return float(ltp)
+                    except Exception:
+                        pass
+                # Try Shoonya-style quote
+                if hasattr(adapter, 'get_quote'):
+                    try:
+                        q = adapter.get_quote(self.symbol, "NSE")
+                        if q and q.get("ltp"):
+                            return float(q["ltp"])
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug("Broker fallback spot failed: %s", e)
+        return 0.0
 
     def get_atm_strike(self, expiry: Optional[str] = None) -> float:
         meta = self.get_meta(expiry)

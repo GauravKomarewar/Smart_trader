@@ -203,6 +203,12 @@ export const api = {
     api.post<{ ok: boolean; name: string; status: string }>(`/strategy/stop/${encodeURIComponent(name)}`, {}),
   strategyStatus: () =>
     api.get<any[]>('/strategy/status'),
+
+  // ── Strategy Live Monitor ────────────────────────────────────────────────
+  strategyMonitor: (name: string) =>
+    api.get<any>(`/strategy/monitor/${encodeURIComponent(name)}`),
+  strategyPositions: () =>
+    api.get<any[]>('/strategy/monitor'),
 }
 
 export { ApiError }

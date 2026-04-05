@@ -123,6 +123,12 @@ function StrategyCardItem({
             isError   ? 'text-loss' : 'text-text-muted')}>
             {statusLabel[s.status] || 'Stopped'}
           </span>
+          {isRunning && s.entered_today && (
+            <span className="text-[9px] px-1.5 py-0.5 bg-profit/15 text-profit rounded font-medium">ENTERED</span>
+          )}
+          {isRunning && !s.entered_today && s.active_legs != null && (
+            <span className="text-[9px] px-1.5 py-0.5 bg-yellow-500/15 text-yellow-500 rounded font-medium">WAITING</span>
+          )}
           <div className="flex-1" />
           <div className="flex items-center gap-1 flex-wrap">
             {s.underlying && (
@@ -140,11 +146,19 @@ function StrategyCardItem({
       </div>
 
       {/* Metrics grid */}
-      <div className="grid grid-cols-3 divide-x divide-border/50 border-b border-border/60">
-        <MetricCell label="Legs" value={String(s.legs ?? '—')} cls="text-text-bright" />
-        <MetricCell label="Lots" value={String(s.lots ?? 1)} cls="text-text-bright" />
-        <MetricCell label="Schema" value={s.schema_version || '—'} cls="text-brand" />
-      </div>
+      {isRunning && s.active_legs != null ? (
+        <div className="grid grid-cols-3 divide-x divide-border/50 border-b border-border/60">
+          <MetricCell label="Active Legs" value={String(s.active_legs)} cls="text-text-bright" />
+          <MetricCell label="PnL" value={s.combined_pnl != null ? `₹${Number(s.combined_pnl).toFixed(0)}` : '—'} cls={Number(s.combined_pnl) >= 0 ? 'text-profit' : 'text-loss'} />
+          <MetricCell label="Spot" value={s.spot_price ? Number(s.spot_price).toFixed(0) : '—'} cls="text-brand" />
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 divide-x divide-border/50 border-b border-border/60">
+          <MetricCell label="Legs" value={String(s.legs ?? '—')} cls="text-text-bright" />
+          <MetricCell label="Lots" value={String(s.lots ?? 1)} cls="text-text-bright" />
+          <MetricCell label="Schema" value={s.schema_version || '—'} cls="text-brand" />
+        </div>
+      )}
 
       {/* Timing info */}
       {(s.entry_time || s.exit_time) && (
@@ -648,6 +662,7 @@ function PositionGroupCard({ pos, flash }: { pos: MonitorPos; flash: boolean }) 
 
 function LiveMonitorPanel() {
   const [positions, setPositions]     = useState<LiveLeg[]>([])
+  const [stratSummary, setStratSummary] = useState<Record<string, any>>({})
   const [loading, setLoading]         = useState(true)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [flashing, setFlashing]       = useState<Set<string>>(new Set())
@@ -655,8 +670,21 @@ function LiveMonitorPanel() {
 
   const load = useCallback(async () => {
     try {
-      const res: any = await api.omsPositions()
-      const raw: any[] = Array.isArray(res) ? res : (res.data ?? [])
+      // Fetch from BOTH OMS positions and strategy executor positions
+      const [omsRes, stratRes] = await Promise.allSettled([
+        api.omsPositions(),
+        api.strategyPositions(),
+      ])
+
+      const omsRaw: any[] = omsRes.status === 'fulfilled'
+        ? (Array.isArray(omsRes.value) ? omsRes.value : (omsRes.value as any)?.data ?? [])
+        : []
+      const stratRaw: any[] = stratRes.status === 'fulfilled'
+        ? (Array.isArray(stratRes.value) ? stratRes.value : (stratRes.value as any)?.data ?? [])
+        : []
+
+      // Merge: strategy positions take priority, then OMS positions
+      const raw = [...stratRaw, ...omsRaw]
       if (raw.length === 0) throw new Error('no-data')
 
       const legs: LiveLeg[] = raw.map((p: any) => ({
@@ -684,6 +712,20 @@ function LiveMonitorPanel() {
       }
 
       setPositions(legs)
+
+      // Fetch running strategy status summaries
+      try {
+        const statuses: any[] = await api.strategyStatus()
+        const running = (statuses || []).filter((s: any) => s.status === 'running')
+        const summaryMap: Record<string, any> = {}
+        for (const s of running) {
+          try {
+            const mon = await api.strategyMonitor(s.name)
+            summaryMap[s.name] = mon
+          } catch { /* strategy may have just stopped */ }
+        }
+        setStratSummary(summaryMap)
+      } catch { /* ignore */ }
     } catch {
       setPositions([])
     } finally {
@@ -738,6 +780,36 @@ function LiveMonitorPanel() {
       ) : (
         <>
           <PortfolioBar positions={positions} />
+
+          {/* Strategy Execution Summary */}
+          {Object.keys(stratSummary).length > 0 && (
+            <div className="space-y-2">
+              {Object.entries(stratSummary).map(([name, mon]: [string, any]) => {
+                const s = mon?.summary ?? {}
+                const md = mon?.market_data ?? {}
+                return (
+                  <div key={name} className="bg-bg-card border border-brand/20 rounded-xl px-4 py-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="w-2 h-2 rounded-full bg-profit animate-pulse" />
+                      <span className="text-[12px] font-semibold text-text-bright">{name}</span>
+                      <span className="text-[10px] text-text-muted ml-auto">
+                        {s.entered_today ? `Entered • ${s.active_legs ?? 0} legs` : 'Waiting for entry'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-4 sm:grid-cols-6 gap-3 text-[11px]">
+                      <div><span className="text-text-muted block">Spot</span><span className="text-text-bright font-mono">{md.spot_price?.toFixed(2) ?? '—'}</span></div>
+                      <div><span className="text-text-muted block">ATM</span><span className="text-text-bright font-mono">{md.atm_strike?.toFixed(0) ?? '—'}</span></div>
+                      <div><span className="text-text-muted block">Net Δ</span><span className="text-text-bright font-mono">{s.net_delta?.toFixed(4) ?? '—'}</span></div>
+                      <div><span className="text-text-muted block">PnL</span><span className={cn('font-mono font-bold', (s.combined_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss')}>{fmtINR(s.combined_pnl ?? 0)}</span></div>
+                      <div className="hidden sm:block"><span className="text-text-muted block">PnL%</span><span className={cn('font-mono', (s.combined_pnl_pct ?? 0) >= 0 ? 'text-profit' : 'text-loss')}>{(s.combined_pnl_pct ?? 0).toFixed(1)}%</span></div>
+                      <div className="hidden sm:block"><span className="text-text-muted block">Adj</span><span className="text-text-bright font-mono">{s.adjustments_today ?? 0}</span></div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
           {groups.length === 0 ? (
             <div className="bg-bg-card border border-border rounded-xl p-10 text-center text-text-muted text-[12px]">
               <AlertCircle className="w-8 h-8 mx-auto mb-2 opacity-30" />

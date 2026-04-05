@@ -79,12 +79,23 @@ class StrategyExecutor:
             )
             return resolved
         except Exception as e:
-            logger.error(
-                "Failed to resolve cycle expiry with mode=%s: %s; using weekly_current",
+            logger.warning(
+                "Failed to resolve cycle expiry with mode=%s: %s; trying weekly_current",
                 schedule_mode,
                 e,
             )
-            return self.market.resolve_expiry_mode("weekly_current")
+            try:
+                return self.market.resolve_expiry_mode("weekly_current")
+            except Exception as e2:
+                # No option chain data available — use placeholder.
+                # The executor will still run but entry conditions won't trigger
+                # until market data becomes available.
+                logger.warning(
+                    "No option chain data available: %s. "
+                    "Executor will run idle until data is populated.",
+                    e2,
+                )
+                return "NO_EXPIRY"
 
     def _load_or_create_state(self) -> StrategyState:
         state = StatePersistence.load(self.state_path)
