@@ -283,12 +283,12 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
       {/* Hover actions */}
       <div className={cn('flex items-center gap-0.5 ml-2 transition-opacity', hover ? 'opacity-100' : 'opacity-0')}>
         <button
-          onClick={e => { e.stopPropagation(); openOrderModal(item.symbol) }}
+          onClick={e => { e.stopPropagation(); openOrderModal(item.symbol, item.exchange) }}
           className="btn-buy btn-xs !px-1.5 !py-0.5"
           title="Buy"
         >B</button>
         <button
-          onClick={e => { e.stopPropagation(); openOrderModal(item.symbol) }}
+          onClick={e => { e.stopPropagation(); openOrderModal(item.symbol, item.exchange) }}
           className="btn-sell btn-xs !px-1.5 !py-0.5"
           title="Sell"
         >S</button>

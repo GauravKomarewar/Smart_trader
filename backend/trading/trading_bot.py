@@ -47,7 +47,7 @@ from core.deps import current_user
 from db.database import get_db
 from trading.oms import OrderManagementSystem, OrderRequest, OrderSide, OrderType, ProductType, get_oms
 from trading.execution_guard import ExecutionGuard
-from trading.supreme_risk import SupremeRiskManager, get_risk
+from broker.account_risk import list_all_risk_statuses
 
 logger = logging.getLogger("smart_trader.trading_bot")
 
@@ -177,25 +177,26 @@ def _process_alert(user_id: str, alert: AlertPayload, db) -> dict:
 
     oms   = get_oms(user_id)
     guard = get_guard(user_id)
-    risk  = get_risk(user_id)
 
     # Attach guard to OMS
     oms.guard = guard
 
-    # Risk check (skip for status queries)
+    # Risk check — block if ANY account for this user has daily loss hit
     if action not in ("status",):
-        allowed, reason = risk.is_trading_allowed()
-        if not allowed:
-            result = {
-                "success": False,
-                "strategy": alert.strategy,
-                "action": action,
-                "message": f"RISK BLOCK: {reason}",
-                "test_mode": alert.test_mode,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            _record_history(user_id, result)
-            return result
+        all_risk = list_all_risk_statuses(user_id)
+        for rs in all_risk:
+            if not rs.get("trading_allowed", True):
+                reason = rs.get("halt_reason", "Daily loss limit")
+                result = {
+                    "success": False,
+                    "strategy": alert.strategy,
+                    "action": action,
+                    "message": f"RISK BLOCK ({rs.get('client_id','?')}): {reason}",
+                    "test_mode": alert.test_mode,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                _record_history(user_id, result)
+                return result
 
     if action == "status":
         return {

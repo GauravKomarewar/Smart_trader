@@ -16,8 +16,8 @@
   "lifetime_adjustments": 0,
   "current_profit_step": -1,
   "last_date": "2026-04-05",
-  "entered_today": false,
-  "minutes_to_exit": 138,
+  "entered_today": true,
+  "minutes_to_exit": 130,
   "adjustment_history": [],
   "entry_reason": "",
   "exit_reason": ""

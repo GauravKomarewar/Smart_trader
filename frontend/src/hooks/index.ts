@@ -273,6 +273,14 @@ export function useGlobalMarkets() {
 // ── Option chain loading ────────────────────────
 
 
+// Underlying → equity exchange mapping (backend maps to F&O exchange)
+const _UL_EXCHANGE: Record<string, string> = {
+  NIFTY: 'NSE', BANKNIFTY: 'NSE', FINNIFTY: 'NSE', MIDCPNIFTY: 'NSE',
+  SENSEX: 'BSE', BANKEX: 'BSE',
+  CRUDEOIL: 'MCX', GOLD: 'MCX', SILVER: 'MCX', NATURALGAS: 'MCX', COPPER: 'MCX',
+  USDINR: 'CDS',
+}
+
 export function useOptionChain() {
   const { selectedUnderlying, selectedExpiry, setData, setLoading } = useOptionChainStore()
 
@@ -280,8 +288,9 @@ export function useOptionChain() {
     let cancelled = false
     const load = async () => {
       setLoading(true)
+      const exchange = _UL_EXCHANGE[selectedUnderlying] || 'NSE'
       try {
-        const data = await api.optionChain(selectedUnderlying, selectedExpiry || undefined) as any
+        const data = await api.optionChain(selectedUnderlying, selectedExpiry || undefined, exchange) as any
         if (cancelled) return
         if (data) {
           // Always use backend response — it includes ScriptMaster expiries and

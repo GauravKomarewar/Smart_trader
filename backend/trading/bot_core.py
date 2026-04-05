@@ -9,7 +9,7 @@ Services wired in:
   - OrderRepository (PostgreSQL)
   - CommandService (single gate for all orders)
   - OrderWatcherEngine (SL/target/trailing daemon)
-  - SupremeRiskManager (PnL + max-loss heartbeat)
+  - AccountRiskManager (per-account PnL + max-loss)
   - TelegramNotifier (optional)
   - HistoricalAnalyticsService
   - OptionChainSupervisor
@@ -27,7 +27,7 @@ from trading.persistence.repository import OrderRepository
 from trading.execution.command_service import CommandService
 from trading.execution.order_watcher import OrderWatcherEngine
 from trading.execution.intent import UniversalOrderCommand
-from trading.supreme_risk import SupremeRiskManager
+from broker.account_risk import get_account_risk
 from trading.analytics.historical_service import HistoricalAnalyticsService
 from trading.market_data.option_chain.supervisor import OptionChainSupervisor
 from trading.market_data.option_chain.store import OptionChainStore
@@ -73,6 +73,8 @@ class TradingBot:
         execution_guard=None,
         telegram_token: str = "",
         telegram_chat_id: str = "",
+        config_id: str = "",
+        broker_id: str = "",
     ):
         self.user_id        = user_id
         self.client_id      = client_id
@@ -83,7 +85,12 @@ class TradingBot:
         self.order_repo = OrderRepository(user_id, client_id)
         self.command_svc = CommandService(self)
         self.order_watcher = OrderWatcherEngine(self)
-        self.risk = SupremeRiskManager(self)
+        self.risk = get_account_risk(
+            user_id=str(user_id),
+            config_id=config_id or client_id,
+            broker_id=broker_id or "unknown",
+            client_id=client_id,
+        )
         self.analytics = HistoricalAnalyticsService(user_id, client_id)
 
         # Option chain
@@ -117,7 +124,6 @@ class TradingBot:
             except Exception:
                 logger.exception("Recovery failed — continuing anyway")
 
-        self.risk.start_heartbeat(interval=2.0)
         self.order_watcher.start()
         self.scheduler.start()
 
@@ -128,7 +134,6 @@ class TradingBot:
 
     def stop(self):
         """Stop all background services gracefully."""
-        self.risk.stop_heartbeat()
         self.order_watcher.stop()
         self.scheduler.stop()
         self.oc_supervisor.stop()
@@ -149,19 +154,19 @@ class TradingBot:
         from trading.persistence.repository import OrderRepository
         repo = self.order_repo
 
-        # Map UniversalOrderCommand → broker-specific place_order args
+        # Map UniversalOrderCommand → broker-specific place_order dict
         try:
-            resp = self.api.place_order(
-                symbol      = command.symbol,
-                exchange    = command.exchange,
-                side        = command.side,
-                order_type  = command.order_type or "MARKET",
-                product     = command.product,
-                quantity    = command.quantity,
-                price       = command.price or 0.0,
-                trigger_price = getattr(command, "trigger_price", 0.0) or 0.0,
-                remarks     = getattr(command, "comment", "") or "",
-            )
+            resp = self.api.place_order({
+                "symbol":        command.symbol,
+                "exchange":      command.exchange,
+                "side":          command.side,
+                "order_type":    command.order_type or "MARKET",
+                "product":       command.product,
+                "qty":           command.quantity,
+                "price":         command.price or 0.0,
+                "trigger_price": getattr(command, "trigger_price", 0.0) or 0.0,
+                "remarks":       getattr(command, "comment", "") or "",
+            })
             broker_order_id = (
                 (resp or {}).get("norenordno") or (resp or {}).get("orderid") or ""
             )

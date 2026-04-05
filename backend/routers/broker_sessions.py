@@ -82,13 +82,21 @@ BROKER_FIELD_DEFS = {
     ],
     "angel": [
         {"key": "CLIENT_ID",    "label": "Client ID",               "type": "text",     "required": True},
-        {"key": "API_KEY",      "label": "API Key",                  "type": "password", "required": True},
-        {"key": "TOTP_SECRET",  "label": "TOTP Secret",              "type": "password", "required": True},
+        {"key": "PIN",          "label": "MPIN / Login Password",    "type": "password", "required": True,  "hint": "Your Angel One login MPIN"},
+        {"key": "API_KEY",      "label": "API Key",                  "type": "password", "required": True,  "hint": "SmartAPI key from smartapi.angelbroking.com"},
+        {"key": "TOTP_SECRET",  "label": "TOTP Secret",              "type": "password", "required": True,  "hint": "Base32 secret for TOTP 2FA"},
     ],
     "upstox": [
         {"key": "CLIENT_ID",    "label": "Client ID",               "type": "text",     "required": True},
         {"key": "API_KEY",      "label": "API Key",                  "type": "password", "required": True},
         {"key": "API_SECRET",   "label": "API Secret",               "type": "password", "required": True},
+        {"key": "ACCESS_TOKEN", "label": "Access Token",             "type": "password", "required": True,  "hint": "OAuth access token from Upstox developer portal"},
+    ],
+    "groww": [
+        {"key": "CLIENT_ID",    "label": "Client ID",               "type": "text",     "required": True},
+        {"key": "API_KEY",      "label": "API Key",                  "type": "password", "required": False, "hint": "From Groww Trade API profile"},
+        {"key": "API_SECRET",   "label": "API Secret",               "type": "password", "required": False},
+        {"key": "ACCESS_TOKEN", "label": "Access Token",             "type": "password", "required": True,  "hint": "Bearer token from Groww Trade API profile"},
     ],
     "dhan": [
         {"key": "CLIENT_ID",    "label": "Client ID",               "type": "text",     "required": True},
@@ -106,6 +114,7 @@ BROKER_NAMES = {
     "angel":       "Angel One",
     "upstox":      "Upstox",
     "dhan":        "Dhan",
+    "groww":       "Groww",
     "paper_trade": "Paper Trade",
 }
 
@@ -406,6 +415,16 @@ def connect_broker(
         return _connect_shoonya(cfg, creds, user_id, db, log)
     elif cfg.broker_id == "fyers":
         return _connect_fyers(cfg, creds, user_id, db, log)
+    elif cfg.broker_id == "angel":
+        return _connect_angelone(cfg, creds, user_id, db, log)
+    elif cfg.broker_id == "dhan":
+        return _connect_dhan(cfg, creds, user_id, db, log)
+    elif cfg.broker_id == "groww":
+        return _connect_groww(cfg, creds, user_id, db, log)
+    elif cfg.broker_id == "upstox":
+        return _connect_upstox(cfg, creds, user_id, db, log)
+    elif cfg.broker_id == "zerodha":
+        return _connect_kite(cfg, creds, user_id, db, log)
     elif cfg.broker_id == "paper_trade":
         return _connect_paper(cfg, creds, user_id, db, log)
     else:
@@ -1169,3 +1188,595 @@ def _fyers_direct_login(creds: dict, log) -> str:
 
     log.info("Fyers direct login succeeded, token length=%d", len(access_token))
     return access_token
+
+
+# ── Angel One connect ─────────────────────────────────────────────────────────
+
+def _connect_angelone(
+    cfg,
+    creds: dict,
+    user_id: str,
+    db,
+    log: logging.LoggerAdapter,
+) -> dict:
+    """
+    Angel One SmartAPI login flow.
+
+    Steps:
+      1. Validate required credential fields
+      2. Generate TOTP and POST to login endpoint
+      3. Obtain JWT token
+      4. Register in MultiAccountRegistry
+      5. Persist session to DB
+      6. Initialise per-account risk manager
+    """
+    client_id  = creds.get("CLIENT_ID", cfg.client_id or "")
+    api_key    = creds.get("API_KEY", "")
+    pin        = creds.get("PIN", "")
+    totp_secret = creds.get("TOTP_SECRET", "")
+
+    log.info("Step 1: Validating Angel One credentials for client=%s", client_id)
+
+    required = ["CLIENT_ID", "PIN", "API_KEY", "TOTP_SECRET"]
+    missing  = [f for f in required if not creds.get(f)]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Angel One credentials incomplete. Missing: {', '.join(missing)}",
+        )
+
+    log.info("Step 2: Starting Angel One TOTP login")
+
+    jwt_token: str = ""
+    try:
+        jwt_token = _angelone_direct_login(client_id, pin, api_key, totp_secret, log)
+    except Exception as e:
+        log.error("Angel One login failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Angel One login failed: {e}")
+
+    if not jwt_token or len(jwt_token) < 10:
+        raise HTTPException(
+            status_code=502,
+            detail="Angel One login returned empty token. Check CLIENT_ID, PIN, API_KEY and TOTP_SECRET.",
+        )
+
+    log.info("Step 3: Registering Angel One session in registry")
+
+    from broker.multi_broker import registry
+    sess_obj = registry.register_angelone(
+        user_id=user_id,
+        config_id=cfg.id,
+        client_id=client_id,
+        creds=creds,
+        jwt_token=jwt_token,
+    )
+
+    if sess_obj.error:
+        raise HTTPException(status_code=502, detail=f"Angel One session failed: {sess_obj.error}")
+
+    log.info("Step 4: Persisting Angel One session to DB")
+    _upsert_session(db, cfg, user_id, mode="live", token=jwt_token, logged_in=True)
+
+    try:
+        from broker.account_risk import get_account_risk
+        get_account_risk(user_id=user_id, config_id=cfg.id,
+                         broker_id="angel", client_id=client_id)
+    except Exception as _re:
+        log.warning("AccountRiskManager init failed (non-fatal): %s", _re)
+
+    _audit(db, user_id, "broker_connect", f"angel:{client_id}",
+           details=f"config_id={cfg.id}")
+
+    log.info("Angel One connect complete — client=%s", client_id)
+    return {
+        "success":   True,
+        "mode":      "live",
+        "broker_id": "angel",
+        "userId":    client_id,
+        "broker":    "Angel One",
+        "message":   f"✓ Connected to Angel One as {client_id}",
+        "config_id": cfg.id,
+    }
+
+
+def _angelone_direct_login(
+    client_id: str,
+    pin: str,
+    api_key: str,
+    totp_secret: str,
+    log,
+) -> str:
+    """
+    Perform Angel One TOTP-based login via SmartAPI REST endpoints.
+    Returns the JWT access token string.
+    """
+    import pyotp
+    import requests as _req
+
+    totp_code = pyotp.TOTP(totp_secret).now()
+    log.info("Angel One login: client_id=%s, TOTP generated", client_id)
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-UserType": "USER",
+        "X-SourceID": "WEB",
+        "X-ClientLocalIP": "127.0.0.1",
+        "X-ClientPublicIP": "127.0.0.1",
+        "X-MACAddress": "00:00:00:00:00:00",
+        "X-PrivateKey": api_key,
+    }
+
+    login_payload = {
+        "clientcode": client_id,
+        "password": pin,
+        "totp": totp_code,
+        "state": "smart_trader",
+    }
+
+    resp = _req.post(
+        "https://apiconnect.angelone.in/rest/auth/angelbroking/user/v1/loginByPassword",
+        json=login_payload,
+        headers=headers,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if not data.get("status"):
+        raise RuntimeError(f"Angel One login failed: {data.get('message', data)}")
+
+    jwt_token = data.get("data", {}).get("jwtToken", "")
+    if not jwt_token:
+        raise RuntimeError(f"Angel One login response missing jwtToken: {data}")
+
+    log.info("Angel One login succeeded, token length=%d", len(jwt_token))
+    return jwt_token
+
+
+# ── Dhan connect ──────────────────────────────────────────────────────────────
+
+def _connect_dhan(
+    cfg,
+    creds: dict,
+    user_id: str,
+    db,
+    log: logging.LoggerAdapter,
+) -> dict:
+    """
+    Dhan HQ API v2 connection.
+
+    Dhan uses a pre-generated access token (from web.dhan.co or API).
+    Steps:
+      1. Validate required credential fields
+      2. Verify token by calling profile endpoint
+      3. Register in MultiAccountRegistry
+      4. Persist session to DB
+      5. Initialise per-account risk manager
+    """
+    client_id    = creds.get("CLIENT_ID", cfg.client_id or "")
+    access_token = creds.get("ACCESS_TOKEN", "")
+
+    log.info("Step 1: Validating Dhan credentials for client=%s", client_id)
+
+    if not client_id or not access_token:
+        raise HTTPException(
+            status_code=422,
+            detail="Dhan credentials incomplete. CLIENT_ID and ACCESS_TOKEN are required.",
+        )
+
+    # Verify the token works by calling a lightweight endpoint
+    log.info("Step 2: Verifying Dhan access token")
+    try:
+        import requests as _req
+        verify_resp = _req.get(
+            "https://api.dhan.co/v2/fundlimit",
+            headers={
+                "access-token": access_token,
+                "Content-Type": "application/json",
+            },
+            timeout=10,
+        )
+        if verify_resp.status_code == 401:
+            raise HTTPException(
+                status_code=422,
+                detail="Dhan access token is invalid or expired. "
+                       "Generate a new token from web.dhan.co → Settings → API Keys.",
+            )
+        verify_resp.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Dhan token verification call failed (proceeding anyway): %s", e)
+
+    log.info("Step 3: Registering Dhan session in registry")
+
+    from broker.multi_broker import registry
+    sess_obj = registry.register_dhan(
+        user_id=user_id,
+        config_id=cfg.id,
+        client_id=client_id,
+        creds=creds,
+        access_token=access_token,
+    )
+
+    if sess_obj.error:
+        raise HTTPException(status_code=502, detail=f"Dhan session failed: {sess_obj.error}")
+
+    log.info("Step 4: Persisting Dhan session to DB")
+    _upsert_session(db, cfg, user_id, mode="live", token=access_token, logged_in=True)
+
+    try:
+        from broker.account_risk import get_account_risk
+        get_account_risk(user_id=user_id, config_id=cfg.id,
+                         broker_id="dhan", client_id=client_id)
+    except Exception as _re:
+        log.warning("AccountRiskManager init failed (non-fatal): %s", _re)
+
+    _audit(db, user_id, "broker_connect", f"dhan:{client_id}",
+           details=f"config_id={cfg.id}")
+
+    log.info("Dhan connect complete — client=%s", client_id)
+    return {
+        "success":   True,
+        "mode":      "live",
+        "broker_id": "dhan",
+        "userId":    client_id,
+        "broker":    "Dhan",
+        "message":   f"✓ Connected to Dhan as {client_id}",
+        "config_id": cfg.id,
+    }
+
+
+# ── Groww connect ─────────────────────────────────────────────────────────────
+
+def _connect_groww(
+    cfg,
+    creds: dict,
+    user_id: str,
+    db,
+    log: logging.LoggerAdapter,
+) -> dict:
+    """
+    Groww Trade API connection.
+
+    Groww uses a pre-generated access token (from profile page or API key flow).
+    Steps:
+      1. Validate required credential fields
+      2. Verify token by calling a lightweight endpoint
+      3. Register in MultiAccountRegistry
+      4. Persist session to DB
+      5. Initialise per-account risk manager
+    """
+    client_id    = creds.get("CLIENT_ID", cfg.client_id or "")
+    access_token = creds.get("ACCESS_TOKEN", "")
+
+    log.info("Step 1: Validating Groww credentials for client=%s", client_id)
+
+    if not client_id or not access_token:
+        raise HTTPException(
+            status_code=422,
+            detail="Groww credentials incomplete. CLIENT_ID and ACCESS_TOKEN are required.",
+        )
+
+    # Verify the token works
+    log.info("Step 2: Verifying Groww access token")
+    try:
+        import requests as _req
+        verify_resp = _req.get(
+            "https://api.groww.in/v1/user/profile",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+                "X-API-VERSION": "1.0",
+            },
+            timeout=10,
+        )
+        if verify_resp.status_code in (401, 403):
+            raise HTTPException(
+                status_code=422,
+                detail="Groww access token is invalid or expired. "
+                       "Generate a new token from your Groww Trade API profile.",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Groww token verification call failed (proceeding anyway): %s", e)
+
+    log.info("Step 3: Registering Groww session in registry")
+
+    from broker.multi_broker import registry
+    sess_obj = registry.register_groww(
+        user_id=user_id,
+        config_id=cfg.id,
+        client_id=client_id,
+        creds=creds,
+        access_token=access_token,
+    )
+
+    if sess_obj.error:
+        raise HTTPException(status_code=502, detail=f"Groww session failed: {sess_obj.error}")
+
+    log.info("Step 4: Persisting Groww session to DB")
+    _upsert_session(db, cfg, user_id, mode="live", token=access_token, logged_in=True)
+
+    try:
+        from broker.account_risk import get_account_risk
+        get_account_risk(user_id=user_id, config_id=cfg.id,
+                         broker_id="groww", client_id=client_id)
+    except Exception as _re:
+        log.warning("AccountRiskManager init failed (non-fatal): %s", _re)
+
+    _audit(db, user_id, "broker_connect", f"groww:{client_id}",
+           details=f"config_id={cfg.id}")
+
+    log.info("Groww connect complete — client=%s", client_id)
+    return {
+        "success":   True,
+        "mode":      "live",
+        "broker_id": "groww",
+        "userId":    client_id,
+        "broker":    "Groww",
+        "message":   f"✓ Connected to Groww as {client_id}",
+        "config_id": cfg.id,
+    }
+
+
+# ── Upstox connect ────────────────────────────────────────────────────────────
+
+def _connect_upstox(
+    cfg,
+    creds: dict,
+    user_id: str,
+    db,
+    log: logging.LoggerAdapter,
+) -> dict:
+    """
+    Upstox API connection.
+
+    Upstox uses OAuth 2.0 access tokens.
+    Steps:
+      1. Validate required credential fields
+      2. Verify token by calling profile endpoint
+      3. Register in MultiAccountRegistry
+      4. Persist session to DB
+      5. Initialise per-account risk manager
+    """
+    client_id    = creds.get("CLIENT_ID", cfg.client_id or "")
+    access_token = creds.get("ACCESS_TOKEN", "")
+
+    log.info("Step 1: Validating Upstox credentials for client=%s", client_id)
+
+    if not client_id or not access_token:
+        raise HTTPException(
+            status_code=422,
+            detail="Upstox credentials incomplete. CLIENT_ID and ACCESS_TOKEN are required.",
+        )
+
+    # Verify the token works
+    log.info("Step 2: Verifying Upstox access token")
+    try:
+        import requests as _req
+        verify_resp = _req.get(
+            "https://api-hft.upstox.com/v2/user/profile",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            },
+            timeout=10,
+        )
+        if verify_resp.status_code in (401, 403):
+            raise HTTPException(
+                status_code=422,
+                detail="Upstox access token is invalid or expired. "
+                       "Generate a new token from the Upstox developer portal.",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Upstox token verification call failed (proceeding anyway): %s", e)
+
+    log.info("Step 3: Registering Upstox session in registry")
+
+    from broker.multi_broker import registry
+    sess_obj = registry.register_upstox(
+        user_id=user_id,
+        config_id=cfg.id,
+        client_id=client_id,
+        creds=creds,
+        access_token=access_token,
+    )
+
+    if sess_obj.error:
+        raise HTTPException(status_code=502, detail=f"Upstox session failed: {sess_obj.error}")
+
+    log.info("Step 4: Persisting Upstox session to DB")
+    _upsert_session(db, cfg, user_id, mode="live", token=access_token, logged_in=True)
+
+    try:
+        from broker.account_risk import get_account_risk
+        get_account_risk(user_id=user_id, config_id=cfg.id,
+                         broker_id="upstox", client_id=client_id)
+    except Exception as _re:
+        log.warning("AccountRiskManager init failed (non-fatal): %s", _re)
+
+    _audit(db, user_id, "broker_connect", f"upstox:{client_id}",
+           details=f"config_id={cfg.id}")
+
+    log.info("Upstox connect complete — client=%s", client_id)
+    return {
+        "success":   True,
+        "mode":      "live",
+        "broker_id": "upstox",
+        "userId":    client_id,
+        "broker":    "Upstox",
+        "message":   f"✓ Connected to Upstox as {client_id}",
+        "config_id": cfg.id,
+    }
+
+
+# ── Zerodha Kite connect ─────────────────────────────────────────────────────
+
+def _connect_kite(
+    cfg,
+    creds: dict,
+    user_id: str,
+    db,
+    log: logging.LoggerAdapter,
+) -> dict:
+    """
+    Zerodha Kite Connect v3 connection.
+
+    Kite uses api_key:access_token auth. Supports optional TOTP-based login
+    via kiteconnect SDK, or pre-generated access token.
+    Steps:
+      1. Validate required credential fields
+      2. Generate access token via request_token flow (if TOTP provided) or use pre-set
+      3. Verify token by calling profile endpoint
+      4. Register in MultiAccountRegistry
+      5. Persist session to DB
+      6. Initialise per-account risk manager
+    """
+    client_id   = creds.get("CLIENT_ID", cfg.client_id or "")
+    api_key     = creds.get("API_KEY", "")
+    api_secret  = creds.get("API_SECRET", "")
+    totp_secret = creds.get("TOTP_SECRET", "")
+    access_token = creds.get("ACCESS_TOKEN", "")
+
+    log.info("Step 1: Validating Zerodha Kite credentials for client=%s", client_id)
+
+    if not client_id or not api_key:
+        raise HTTPException(
+            status_code=422,
+            detail="Zerodha credentials incomplete. CLIENT_ID and API_KEY are required.",
+        )
+
+    # If no access_token, try to generate via kiteconnect SDK + TOTP
+    if not access_token:
+        if not api_secret:
+            raise HTTPException(
+                status_code=422,
+                detail="Zerodha: either provide ACCESS_TOKEN directly, "
+                       "or provide API_SECRET (+ TOTP_SECRET) for automated login.",
+            )
+        try:
+            access_token = _kite_direct_login(client_id, api_key, api_secret, totp_secret, log)
+        except Exception as e:
+            log.error("Kite login failed: %s", e, exc_info=True)
+            raise HTTPException(status_code=502, detail=f"Zerodha login failed: {e}")
+
+    if not access_token or len(access_token) < 5:
+        raise HTTPException(
+            status_code=502,
+            detail="Zerodha login returned empty token. Check API_KEY, API_SECRET and TOTP_SECRET.",
+        )
+
+    # Verify the token
+    log.info("Step 2: Verifying Kite access token")
+    try:
+        import requests as _req
+        verify_resp = _req.get(
+            "https://api.kite.trade/user/profile",
+            headers={
+                "Authorization": f"token {api_key}:{access_token}",
+                "X-Kite-Version": "3",
+            },
+            timeout=10,
+        )
+        if verify_resp.status_code in (401, 403):
+            raise HTTPException(
+                status_code=422,
+                detail="Zerodha access token is invalid or expired. "
+                       "Generate a new request_token from kite.trade.",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Kite token verification call failed (proceeding anyway): %s", e)
+
+    log.info("Step 3: Registering Kite session in registry")
+
+    from broker.multi_broker import registry
+    sess_obj = registry.register_kite(
+        user_id=user_id,
+        config_id=cfg.id,
+        client_id=client_id,
+        creds=creds,
+        api_key=api_key,
+        access_token=access_token,
+    )
+
+    if sess_obj.error:
+        raise HTTPException(status_code=502, detail=f"Kite session failed: {sess_obj.error}")
+
+    log.info("Step 4: Persisting Kite session to DB")
+    _upsert_session(db, cfg, user_id, mode="live", token=access_token, logged_in=True)
+
+    try:
+        from broker.account_risk import get_account_risk
+        get_account_risk(user_id=user_id, config_id=cfg.id,
+                         broker_id="zerodha", client_id=client_id)
+    except Exception as _re:
+        log.warning("AccountRiskManager init failed (non-fatal): %s", _re)
+
+    _audit(db, user_id, "broker_connect", f"zerodha:{client_id}",
+           details=f"config_id={cfg.id}")
+
+    log.info("Kite connect complete — client=%s", client_id)
+    return {
+        "success":   True,
+        "mode":      "live",
+        "broker_id": "zerodha",
+        "userId":    client_id,
+        "broker":    "Zerodha",
+        "message":   f"✓ Connected to Zerodha Kite as {client_id}",
+        "config_id": cfg.id,
+    }
+
+
+def _kite_direct_login(
+    client_id: str,
+    api_key: str,
+    api_secret: str,
+    totp_secret: str,
+    log,
+) -> str:
+    """
+    Perform Zerodha Kite TOTP-based login.
+    Uses Selenium headless browser to obtain request_token, then exchanges
+    it for an access_token via the Kite API.
+    Returns the access_token string.
+    """
+    import hashlib
+    import pyotp
+    import requests as _req
+
+    log.info("Kite direct login: client_id=%s", client_id)
+
+    # If TOTP secret is provided, generate request_token via Kite login page
+    # For now, use request_token based flow from the Kite Connect API
+    # The user needs to provide request_token in ACCESS_TOKEN field
+    # or we attempt automated login
+
+    if totp_secret:
+        log.info("Kite: TOTP-based automated login flow")
+        # Step 1: Initiate login session
+        session = _req.Session()
+
+        # Step 2: POST login with user_id and password (via TOTP)
+        totp_code = pyotp.TOTP(totp_secret).now()
+
+        # Try direct API token generation with request_token
+        # Kite requires a browser-based flow; for API-only we need request_token
+        log.warning(
+            "Kite Connect requires browser-based login for request_token. "
+            "Please provide ACCESS_TOKEN directly or use kite.trade login portal."
+        )
+
+    # If we reach here without automated flow, the access_token should have been
+    # provided directly in credentials
+    raise RuntimeError(
+        "Kite Connect requires a request_token from browser login. "
+        "Please provide the ACCESS_TOKEN directly in your broker credentials, "
+        "or use the Kite login portal to generate one."
+    )

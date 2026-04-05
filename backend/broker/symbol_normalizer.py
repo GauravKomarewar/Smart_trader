@@ -77,6 +77,8 @@ class NormalizedInstrument:
             "expiry":          self.expiry,
             "strike":          self.strike,
             "option_type":     self.option_type,
+            "fyers_symbol":    self.fyers_symbol,
+            "shoonya_symbol":  self.trading_symbol,   # plain symbol = Shoonya format
         }
 
 
@@ -203,7 +205,13 @@ def from_broker_symbol(
 def _get_scriptmaster():
     """Lazy-import ScriptMaster data. Returns (FYERS_SCRIPTMASTER dict, refresh fn)."""
     try:
-        from broker.fyers_scriptmaster import FYERS_SCRIPTMASTER, refresh as sm_refresh
+        # Ensure unified scriptmaster is loaded (loads both Fyers + Shoonya)
+        from scripts.unified_scriptmaster import _ensure_loaded
+        _ensure_loaded()
+    except Exception:
+        pass
+    try:
+        from scripts.fyers_scriptmaster import FYERS_SCRIPTMASTER, refresh as sm_refresh
         if not FYERS_SCRIPTMASTER:
             sm_refresh()
         return FYERS_SCRIPTMASTER
@@ -400,7 +408,7 @@ def lookup_instrument(
         NormalizedInstrument or None
     """
     try:
-        from scripts.scriptmaster import get_future, get_option
+        from scripts.unified_scriptmaster import get_future, get_option
     except ImportError:
         return None
 
@@ -480,7 +488,7 @@ def get_expiries(
     Returns sorted list of ISO date strings.
     """
     try:
-        from scripts.scriptmaster import options_expiry, fut_expiry
+        from scripts.unified_scriptmaster import options_expiry, fut_expiry
         if instrument_type == "FUT":
             raw = fut_expiry(symbol, exchange)
         else:
@@ -493,14 +501,12 @@ def get_expiries(
 
 
 def get_lot_size(symbol: str, exchange: str = "NFO") -> int:
-    """Get lot size for a symbol from ScriptMaster."""
+    """Get lot size for a symbol — delegates to unified scriptmaster."""
     try:
-        from scripts.scriptmaster import get_lot_size as sm_lot
-        return sm_lot(symbol, exchange)
+        from scripts.unified_scriptmaster import get_lot_size as _ugl
+        return _ugl(symbol, exchange)
     except Exception:
-        _DEFAULTS = {"NIFTY": 75, "BANKNIFTY": 30, "FINNIFTY": 40,
-                      "MIDCPNIFTY": 75, "SENSEX": 10}
-        return _DEFAULTS.get(symbol.upper(), 1)
+        return 1
 
 
 # ── Order / Position Symbol Normalization ────────────────────────────────────
@@ -617,6 +623,8 @@ def enrich_option_chain_row(
 _STRIKE_GAPS: Dict[str, int] = {
     "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50,
     "MIDCPNIFTY": 25, "SENSEX": 100, "BANKEX": 100,
+    "CRUDEOIL": 50, "GOLD": 100, "SILVER": 1000,
+    "NATURALGAS": 5, "COPPER": 5, "USDINR": 0.25,
 }
 
 
@@ -648,8 +656,8 @@ def build_option_chain_from_scriptmaster(
         Option chain dict matching the frontend's expected format, or None.
     """
     try:
-        from scripts.scriptmaster import options_expiry, get_lot_size as sm_lot_size
-        from broker.fyers_scriptmaster import get_options, FYERS_SCRIPTMASTER
+        from scripts.unified_scriptmaster import options_expiry, get_lot_size as sm_lot_size
+        from scripts.fyers_scriptmaster import get_options, FYERS_SCRIPTMASTER
     except ImportError:
         return None
 

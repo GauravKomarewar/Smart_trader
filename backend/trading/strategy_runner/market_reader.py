@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .models import StrikeConfig, OptionType, StrikeMode
-from scripts.scriptmaster import get_future, universal_symbol_search
+from scripts.unified_scriptmaster import get_future, universal_symbol_search
 
 logger = logging.getLogger(__name__)
 
@@ -59,22 +59,6 @@ def _adaptive_tolerance(param: str, target_value: float) -> float:
         return _FIXED[param]
     # Proportional for ltp, oi, volume, strike, moneyness
     return max(50.0, abs(target_value) * 0.25)
-
-# Fallback lot sizes when DB and ScriptMaster lookups fail.
-# This dict should be extended as needed; final fallback is 1.
-DEFAULT_LOT_SIZES = {
-    "NIFTY": 50,
-    "BANKNIFTY": 25,
-    "FINNIFTY": 40,
-    "MIDCPNIFTY": 75,
-    "SENSEX": 10,
-    "CRUDEOIL": 100,
-    "CRUDEOILM": 100,
-    "GOLD": 1,
-    "GOLDM": 1,
-    "SILVER": 1,
-    "SILVERM": 1,
-}
 
 
 class MarketReader:
@@ -332,10 +316,17 @@ class MarketReader:
                     continue
                 # Try Fyers-style quote
                 if hasattr(adapter, 'get_quotes'):
-                    # Fyers uses NSE:NIFTY50-INDEX etc.
-                    nse_sym = f"NSE:{self.symbol}50-INDEX" if self.symbol == "NIFTY" else f"NSE:{self.symbol}-INDEX"
+                    # Resolve index symbol from unified scriptmaster
                     try:
-                        quotes = adapter.get_quotes([nse_sym])
+                        from scripts.unified_scriptmaster import get_spot_symbol
+                        idx_sym = get_spot_symbol(self.symbol)
+                    except Exception:
+                        idx_sym = None
+                    if not idx_sym:
+                        # Fallback heuristic for common indices
+                        idx_sym = f"NSE:{self.symbol}50-INDEX" if self.symbol == "NIFTY" else f"NSE:{self.symbol}-INDEX"
+                    try:
+                        quotes = adapter.get_quotes([idx_sym])
                         if quotes and isinstance(quotes, list):
                             ltp = quotes[0].get("ltp") or quotes[0].get("last_price")
                             if ltp:
@@ -345,7 +336,8 @@ class MarketReader:
                 # Try Shoonya-style quote
                 if hasattr(adapter, 'get_quote'):
                     try:
-                        q = adapter.get_quote(self.symbol, "NSE")
+                        exch = getattr(self, 'exchange', 'NSE')
+                        q = adapter.get_quote(self.symbol, exch)
                         if q and q.get("ltp"):
                             return float(q["ltp"])
                     except Exception:
@@ -417,8 +409,12 @@ class MarketReader:
         except Exception:
             pass
 
-        # Final static fallback.
-        return DEFAULT_LOT_SIZES.get(self.symbol, 1)
+        # Final fallback: unified scriptmaster
+        try:
+            from scripts.unified_scriptmaster import get_lot_size as _ugl
+            return _ugl(self.symbol, self.exchange)
+        except Exception:
+            return 1
 
     def get_full_chain(self, expiry: Optional[str] = None) -> List[Dict[str, Any]]:
         self._check_freshness(expiry)   # optional safety

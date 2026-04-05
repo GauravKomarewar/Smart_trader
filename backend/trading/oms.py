@@ -223,17 +223,17 @@ class OrderManagementSystem:
 
             # Live broker
             try:
-                broker_resp = self.broker.place_order(
-                    symbol=req.symbol,
-                    exchange=req.exchange,
-                    side=order.side,
-                    order_type=order.order_type,
-                    product=order.product,
-                    quantity=req.quantity,
-                    price=req.price,
-                    trigger_price=req.trigger_price,
-                    remarks=req.remarks,
-                )
+                broker_resp = self.broker.place_order({
+                    "symbol":        req.symbol,
+                    "exchange":      req.exchange,
+                    "side":          order.side,
+                    "order_type":    order.order_type,
+                    "product":       order.product,
+                    "qty":           req.quantity,
+                    "price":         req.price,
+                    "trigger_price": req.trigger_price,
+                    "remarks":       req.remarks,
+                })
                 order.broker_order_id = broker_resp.get("order_id") or broker_resp.get("norenordno")
                 order.status = OrderStatus.OPEN
                 logger.info("OMS placed: %s %s %d | broker_id=%s",

@@ -118,19 +118,19 @@ async def place_order(
                 user_id[:8], mb_sess.broker_id, mb_sess.client_id,
                 req.transactionType, req.symbol, req.quantity, req.price, req.accountId[:8],
             )
-            # Convert canonical symbol to broker-specific format
-            broker_symbol = to_broker_symbol(req.symbol, req.exchange, mb_sess.broker_id)
+            # Pass canonical format — multi_broker normalises, adapters convert
+            # to broker-specific format (Fyers: "EXCH:SYM", Shoonya: plain "SYM")
             result = mb_sess.place_order({
-                "transaction_type": req.transactionType,
-                "product_type":     req.productType,
-                "exchange":         req.exchange,
-                "symbol":           broker_symbol,
-                "quantity":         req.quantity,
-                "price_type":       req.orderType,
-                "price":            req.price,
-                "trigger_price":    req.triggerPrice or 0,
-                "retention":        req.validity,
-                "tag":              req.tag or "smart_trader",
+                "side":            req.transactionType,
+                "product":         req.productType,
+                "exchange":        req.exchange,
+                "symbol":          req.symbol,
+                "qty":             req.quantity,
+                "order_type":      req.orderType,
+                "price":           req.price,
+                "trigger_price":   req.triggerPrice or 0,
+                "retention":       req.validity,
+                "tag":             req.tag or "smart_trader",
             })
             if not result.get("success"):
                 raise HTTPException(status_code=400, detail=result.get("message", "Order failed"))

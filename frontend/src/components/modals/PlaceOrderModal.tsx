@@ -40,7 +40,7 @@ const EXEC_COLOR: Record<ExecutionType, string> = {
 }
 
 export default function PlaceOrderModal() {
-  const { orderModalOpen, orderModalSymbol, closeOrderModal } = useUIStore()
+  const { orderModalOpen, orderModalSymbol, orderModalExchange, closeOrderModal } = useUIStore()
   const { accounts, activeAccountId } = useAuthStore()
   const { data: dashData } = useDashboardStore()
   const toast = useToastStore(s => s.toast)
@@ -93,7 +93,7 @@ export default function PlaceOrderModal() {
   useEffect(() => {
     if (orderModalOpen) {
       setSymbol(orderModalSymbol ?? '')
-      setExchange('NSE')
+      setExchange((orderModalExchange as Exchange) || 'NSE')
       setSearchQ('')
       setShowSearch(!orderModalSymbol)
       setConfirm(false)

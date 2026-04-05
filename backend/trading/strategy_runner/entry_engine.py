@@ -138,7 +138,7 @@ class EntryEngine:
             # actual contract symbol (e.g. "NIFTY26MARFUT") instead of just "NIFTY".
             fut_tsym = ""
             try:
-                from scripts.scriptmaster import get_future
+                from scripts.unified_scriptmaster import get_future
                 # BUG-M5 FIX: Use the strategy's configured exchange instead of hardcoded "NFO".
                 _exchange = getattr(self.market, 'exchange', 'NFO')
                 fut_info = get_future(symbol, _exchange, result=0)

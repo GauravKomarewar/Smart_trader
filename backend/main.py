@@ -160,13 +160,14 @@ async def on_startup():
         import logging
         logging.getLogger("smart_trader").warning("trading_db init failed: %s", exc)
 
-    # Load instrument master (fyers scriptmaster — downloads once/day)
+    # Load instrument master (unified: Fyers + Shoonya scriptmasters)
     try:
-        from scripts.scriptmaster import refresh as sm_refresh
-        count = sm_refresh()
-        logger.info("ScriptMaster loaded: %d instruments", count)
+        from scripts.unified_scriptmaster import refresh_all
+        counts = refresh_all()
+        logger.info("Unified ScriptMaster loaded: Fyers=%d, Shoonya=%d",
+                     counts.get("fyers", 0), counts.get("shoonya", 0))
     except Exception as exc:
-        logger.warning("ScriptMaster load failed (will retry lazily): %s", exc)
+        logger.warning("Unified ScriptMaster load failed (will retry lazily): %s", exc)
 
     # Seed admin + demo users
     from db.database import SessionLocal, User

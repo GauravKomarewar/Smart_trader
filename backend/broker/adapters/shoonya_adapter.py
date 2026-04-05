@@ -235,8 +235,66 @@ class ShoonyaAdapter(BrokerAdapter):
 
     # ── Order management ───────────────────────────────────────────────────────
 
+    # Canonical side → Shoonya buy_or_sell
+    _SIDE_MAP = {"BUY": "B", "SELL": "S", "B": "B", "S": "S"}
+    # Canonical product → Shoonya product_type
+    _PRD_TO_SHOONYA = {"MIS": "I", "CNC": "C", "NRML": "M", "I": "I", "C": "C", "M": "M"}
+    # Canonical order_type → Shoonya price_type
+    _OTYPE_TO_SHOONYA = {
+        "MARKET": "MKT", "LIMIT": "LMT", "SL": "SL-LMT", "SL-M": "SL-MKT",
+        "MKT": "MKT", "LMT": "LMT", "SL-LMT": "SL-LMT", "SL-MKT": "SL-MKT",
+    }
+
     def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
-        return self._session.place_order(order)
+        """Translate canonical order dict to Shoonya format, then place via session."""
+        client = getattr(self._session, "_client", None)
+        if client is None:
+            return {"success": False, "message": "Shoonya not connected"}
+
+        side_raw = str(order.get("side") or order.get("transaction_type") or "BUY").upper()
+        prd_raw = str(order.get("product") or order.get("product_type") or "MIS").upper()
+        otype_raw = str(order.get("order_type") or order.get("price_type") or "MARKET").upper()
+
+        # Symbol: strip exchange prefix if present (Shoonya expects plain symbol)
+        sym = order.get("symbol") or order.get("tradingsymbol") or ""
+        if ":" in sym:
+            sym = sym.split(":", 1)[1]
+
+        shoonya_params = {
+            "buy_or_sell":   self._SIDE_MAP.get(side_raw, "B"),
+            "product_type":  self._PRD_TO_SHOONYA.get(prd_raw, "I"),
+            "exchange":      order.get("exchange", "NSE"),
+            "tradingsymbol": sym,
+            "quantity":      int(order.get("qty") or order.get("quantity") or 0),
+            "discloseqty":   0,
+            "price_type":    self._OTYPE_TO_SHOONYA.get(otype_raw, "MKT"),
+            "price":         float(order.get("price", 0) or 0),
+            "trigger_price": float(order.get("trigger_price", 0) or 0),
+            "retention":     order.get("retention") or "DAY",
+            "remarks":       order.get("tag") or order.get("remarks") or "smart_trader",
+        }
+
+        logger.info("Shoonya order: %s %s %s qty=%d px=%.2f type=%s",
+                     shoonya_params["buy_or_sell"], shoonya_params["tradingsymbol"],
+                     shoonya_params["exchange"], shoonya_params["quantity"],
+                     shoonya_params["price"], shoonya_params["price_type"])
+        try:
+            result = client.place_order(**shoonya_params)
+            if result is None:
+                return {"success": False, "message": "Broker returned no response — market may be closed or session expired"}
+            if isinstance(result, dict):
+                oid = result.get("norenordno") or result.get("order_id") or ""
+                ok = bool(oid) or result.get("stat") == "Ok"
+                return {
+                    "success": ok,
+                    "order_id": oid,
+                    "message": "Order placed" if ok else (result.get("emsg") or "Order failed"),
+                    "raw": result,
+                }
+            return {"success": False, "message": str(result)}
+        except Exception as e:
+            logger.exception("Shoonya place_order error: %s", e)
+            return {"success": False, "message": str(e)}
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         client = getattr(self._session, "_client", None)

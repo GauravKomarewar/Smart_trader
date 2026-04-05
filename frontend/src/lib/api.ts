@@ -149,8 +149,13 @@ export const api = {
   globalMarkets:  ()                 => api.get('/market/global'),
   fyersStatus:    ()                 => api.get('/market/fyers-status'),
   fyersReload:    ()                 => api.post('/market/fyers-reload', {}),
-  optionChain:(symbol: string, expiry?: string) =>
-    api.get(`/market/option-chain/${symbol}${expiry ? `?expiry=${expiry}` : ''}`),
+  optionChain:(symbol: string, expiry?: string, exchange?: string) => {
+    const params = new URLSearchParams()
+    if (expiry) params.set('expiry', expiry)
+    if (exchange) params.set('exchange', exchange)
+    const qs = params.toString()
+    return api.get(`/market/option-chain/${symbol}${qs ? `?${qs}` : ''}`)
+  },
   history:    (token: string, interval: string, from: string, to: string) =>
     api.get(`/market/history?token=${token}&interval=${interval}&from=${from}&to=${to}`),
   screener:   (params: Record<string, string>) => {

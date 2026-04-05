@@ -5,7 +5,7 @@
   "description": "Directional premium selling strategy with a BULL bias. Sells 2 lots of PE (expecting market to hold/rise) and 1 lot of CE. The extra PE lot gives more premium on the bullish side. If market confirms the bullish view, CE decays fast and PE premium is collected. Three adjustment modes: view confirmed (convert to 1-sided), view wrong (emergency rebalance), and flat (convert to symmetric DNSS). Use when you have a mild bullish view but want to still collect premium if flat.",
   "type": "spread",
   "enabled": true,
-  "status": "IDLE",
+  "status": "RUNNING",
   "identity": {
     "exchange": "NFO",
     "underlying": "NIFTY",
@@ -49,7 +49,7 @@
     "legs": [
       {
         "tag": "LEG@1_CE",
-        "label": "Short CE (1 lot — bias side)",
+        "label": "Short CE (1 lot \u2014 bias side)",
         "group": "Short",
         "instrument": "OPT",
         "side": "SELL",
@@ -67,7 +67,7 @@
       },
       {
         "tag": "LEG@2_PE",
-        "label": "Short PE (2 lots — conviction side)",
+        "label": "Short PE (2 lots \u2014 conviction side)",
         "group": "Short",
         "instrument": "OPT",
         "side": "SELL",
@@ -89,7 +89,7 @@
     "enabled": true,
     "rules": [
       {
-        "name": "PANIC — PE deep ITM, bull view collapsed",
+        "name": "PANIC \u2014 PE deep ITM, bull view collapsed",
         "priority": 1,
         "max_per_day": 3,
         "max_total": null,
@@ -125,7 +125,7 @@
         "else_action": null
       },
       {
-        "name": "Bull view confirmed — close CE, ride PE decay",
+        "name": "Bull view confirmed \u2014 close CE, ride PE decay",
         "priority": 2,
         "max_per_day": 1,
         "max_total": null,
@@ -154,7 +154,7 @@
         "else_action": null
       },
       {
-        "name": "Bear confirmed — rebalance to symmetric",
+        "name": "Bear confirmed \u2014 rebalance to symmetric",
         "priority": 3,
         "max_per_day": 1,
         "max_total": null,
@@ -202,7 +202,7 @@
         "else_action": null
       },
       {
-        "name": "Flat market — delta skew persists, neutralize",
+        "name": "Flat market \u2014 delta skew persists, neutralize",
         "priority": 4,
         "max_per_day": 5,
         "max_total": null,
@@ -302,7 +302,13 @@
   },
   "schedule": {
     "frequency": "daily",
-    "active_days": ["mon", "tue", "wed", "thu", "fri"],
+    "active_days": [
+      "mon",
+      "tue",
+      "wed",
+      "thu",
+      "fri"
+    ],
     "entry_time": "09:20",
     "entry_window_end": "13:00",
     "exit_time": "15:20",
@@ -316,7 +322,7 @@
   "meta": {
     "schema_version": "4.0",
     "created_at": "2026-03-19T00:00:00.000Z",
-    "notes": "SKEWED STRADDLE — BULL BIAS. Structure: 1 lot CE sell + 2 lot PE sell. WHY: On a mildly bullish day, PE decays much faster as market drifts up. The extra PE lot amplifies this theta advantage. Net credit is higher than a symmetric strangle. RISK: If market falls hard, 2x PE lots means 2x losses on that side — worse than DNSS. That is why the PANIC rule fires at 0.60 delta to roll before losses compound. ADJUSTMENT LADDER: (1) Panic at delta 0.60 → roll PE 2 lots to fresh 0.25 delta. (2) View confirmed (spot up 0.6% + CE profit 40%) → close CE leg, ride PE decay alone. (3) View wrong (spot down 0.7% + delta skew) → reduce PE from 2 to 1 lot (symmetric). (4) Flat day + small delta → rebalance. ENTRY GATE: PCR > 1.0 (market leans bullish) + spot not already down. TO CREATE BEAR VERSION: swap CE and PE everywhere — sell 2 CE + 1 PE, PCR condition < 1.0, spot_change_pct condition reversed."
+    "notes": "SKEWED STRADDLE \u2014 BULL BIAS. Structure: 1 lot CE sell + 2 lot PE sell. WHY: On a mildly bullish day, PE decays much faster as market drifts up. The extra PE lot amplifies this theta advantage. Net credit is higher than a symmetric strangle. RISK: If market falls hard, 2x PE lots means 2x losses on that side \u2014 worse than DNSS. That is why the PANIC rule fires at 0.60 delta to roll before losses compound. ADJUSTMENT LADDER: (1) Panic at delta 0.60 \u2192 roll PE 2 lots to fresh 0.25 delta. (2) View confirmed (spot up 0.6% + CE profit 40%) \u2192 close CE leg, ride PE decay alone. (3) View wrong (spot down 0.7% + delta skew) \u2192 reduce PE from 2 to 1 lot (symmetric). (4) Flat day + small delta \u2192 rebalance. ENTRY GATE: PCR > 1.0 (market leans bullish) + spot not already down. TO CREATE BEAR VERSION: swap CE and PE everywhere \u2014 sell 2 CE + 1 PE, PCR condition < 1.0, spot_change_pct condition reversed."
   },
   "paper_mode": true,
   "test_mode": true

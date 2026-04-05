@@ -27,7 +27,7 @@ from .adjustment_engine import AdjustmentEngine
 from .exit_engine import ExitEngine
 from .reconciliation import BrokerReconciliation
 from .persistence import StatePersistence
-from scripts.scriptmaster import requires_limit_order
+from scripts.unified_scriptmaster import requires_limit_order
 
 logger = logging.getLogger("STRATEGY_EXECUTOR_SERVICE")
 
@@ -433,7 +433,7 @@ class StrategyExecutorService:
         if not expiry:
             # If no DB exists yet, fall back to ScriptMaster expiry lookup
             try:
-                from scripts.scriptmaster import options_expiry as sm_options_expiry
+                from scripts.unified_scriptmaster import options_expiry as sm_options_expiry
                 expiries = sm_options_expiry(symbol, exchange) or []
                 if expiries:
                     expiry = expiries[0]  # nearest expiry
@@ -2925,7 +2925,7 @@ class PerStrategyExecutor:
         # broker order is placed with the bare underlying name and gets rejected.
         if tradingsymbol == leg.symbol and leg.instrument == InstrumentType.FUT:
             try:
-                from scripts.scriptmaster import get_future
+                from scripts.unified_scriptmaster import get_future
                 fut_info = get_future(leg.symbol, exchange, result=0)
                 if isinstance(fut_info, dict):
                     resolved = str(fut_info.get("TradingSymbol") or fut_info.get("tsym") or "")

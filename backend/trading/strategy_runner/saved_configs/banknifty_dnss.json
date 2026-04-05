@@ -4,8 +4,8 @@
   "id": "BANKNIFTY_DNSS",
   "description": "",
   "type": "neutral",
-  "enabled": false,
-  "status": "STOPPED",
+  "enabled": true,
+  "status": "RUNNING",
   "identity": {
     "exchange": "NFO",
     "underlying": "BANKNIFTY",

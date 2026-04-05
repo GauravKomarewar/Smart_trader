@@ -72,13 +72,14 @@ interface UIStore {
   sidebarOpen: boolean
   orderModalOpen: boolean
   orderModalSymbol: string | undefined
+  orderModalExchange: string | undefined
   chartModalOpen: boolean
   chartModalToken: string | undefined
   searchOpen: boolean
   shortcutsOpen: boolean
   setSidebarOpen: (v: boolean) => void
   toggleSidebar: () => void
-  openOrderModal: (symbol?: string) => void
+  openOrderModal: (symbol?: string, exchange?: string) => void
   closeOrderModal: () => void
   openChartModal: (token: string) => void
   closeChartModal: () => void
@@ -90,14 +91,15 @@ export const useUIStore = create<UIStore>((set) => ({
   sidebarOpen: typeof window !== 'undefined' && window.innerWidth >= 1024,
   orderModalOpen: false,
   orderModalSymbol: undefined,
+  orderModalExchange: undefined,
   chartModalOpen: false,
   chartModalToken: undefined,
   searchOpen: false,
   shortcutsOpen: false,
   setSidebarOpen: (v) => set({ sidebarOpen: v }),
   toggleSidebar: () => set(s => ({ sidebarOpen: !s.sidebarOpen })),
-  openOrderModal: (symbol?: string) => set({ orderModalOpen: true, orderModalSymbol: symbol }),
-  closeOrderModal: () => set({ orderModalOpen: false, orderModalSymbol: undefined }),
+  openOrderModal: (symbol?: string, exchange?: string) => set({ orderModalOpen: true, orderModalSymbol: symbol, orderModalExchange: exchange }),
+  closeOrderModal: () => set({ orderModalOpen: false, orderModalSymbol: undefined, orderModalExchange: undefined }),
   openChartModal: (token) => set({ chartModalOpen: true, chartModalToken: token }),
   closeChartModal: () => set({ chartModalOpen: false, chartModalToken: undefined }),
   setSearchOpen: (v) => set({ searchOpen: v }),

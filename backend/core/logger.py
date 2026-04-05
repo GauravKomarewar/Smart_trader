@@ -43,7 +43,6 @@ _COMPONENTS = {
     "broker.session": ("smart_trader.broker.session","broker.log"),
     "broker.registry":("smart_trader.broker.registry","broker.log"),
     "account_risk":   ("smart_trader.account_risk",  "risk.log"),
-    "supreme_risk":   ("smart_trader.supreme_risk",  "risk.log"),
     "orders":         ("smart_trader.orders",        "orders.log"),
     "oms":            ("smart_trader.oms",           "orders.log"),
     "websocket":      ("smart_trader.websocket",     "websocket.log"),

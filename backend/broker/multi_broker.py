@@ -192,6 +192,131 @@ class BrokerAccountSession:
             self._log.error("inject_fyers_token failed: %s", e, exc_info=True)
             return False
 
+    def inject_angelone_token(self, creds: dict, jwt_token: str) -> bool:
+        """
+        Register a live Angel One session using a pre-acquired JWT token.
+        Creates an AngelOneAdapter that wraps the Angel One SmartAPI.
+        """
+        try:
+            from broker.adapters.angelone_adapter import AngelOneAdapter
+            adapter = AngelOneAdapter(creds, jwt_token, self.config_id, self.client_id)
+            if not adapter.is_connected():
+                self.error = "Angel One token injection failed — missing API key or token"
+                self._log.error("inject_angelone_token: AngelOneAdapter not connected")
+                return False
+            with self._lock:
+                self._adapter         = adapter
+                self.mode             = "live"
+                self.connected_at     = datetime.now(timezone.utc)
+                self.last_heartbeat   = self.connected_at
+                self.error            = None
+            self._log.info("Angel One session injected — mode=live")
+            return True
+        except Exception as e:
+            self.error = str(e)
+            self._log.error("inject_angelone_token failed: %s", e, exc_info=True)
+            return False
+
+    def inject_dhan_token(self, creds: dict, access_token: str) -> bool:
+        """
+        Register a live Dhan session using a pre-acquired access token.
+        Creates a DhanAdapter that wraps the Dhan HQ API v2.
+        """
+        try:
+            from broker.adapters.dhan_adapter import DhanAdapter
+            adapter = DhanAdapter(creds, access_token, self.config_id, self.client_id)
+            if not adapter.is_connected():
+                self.error = "Dhan token injection failed — missing access token"
+                self._log.error("inject_dhan_token: DhanAdapter not connected")
+                return False
+            with self._lock:
+                self._adapter         = adapter
+                self.mode             = "live"
+                self.connected_at     = datetime.now(timezone.utc)
+                self.last_heartbeat   = self.connected_at
+                self.error            = None
+            self._log.info("Dhan session injected — mode=live")
+            return True
+        except Exception as e:
+            self.error = str(e)
+            self._log.error("inject_dhan_token failed: %s", e, exc_info=True)
+            return False
+
+    def inject_groww_token(self, creds: dict, access_token: str) -> bool:
+        """
+        Register a live Groww session using a pre-acquired access token.
+        Creates a GrowwAdapter that wraps the Groww Trade API.
+        """
+        try:
+            from broker.adapters.groww_adapter import GrowwAdapter
+            adapter = GrowwAdapter(creds, access_token, self.config_id, self.client_id)
+            if not adapter.is_connected():
+                self.error = "Groww token injection failed — missing access token"
+                self._log.error("inject_groww_token: GrowwAdapter not connected")
+                return False
+            with self._lock:
+                self._adapter         = adapter
+                self.mode             = "live"
+                self.connected_at     = datetime.now(timezone.utc)
+                self.last_heartbeat   = self.connected_at
+                self.error            = None
+            self._log.info("Groww session injected — mode=live")
+            return True
+        except Exception as e:
+            self.error = str(e)
+            self._log.error("inject_groww_token failed: %s", e, exc_info=True)
+            return False
+
+    def inject_upstox_token(self, creds: dict, access_token: str) -> bool:
+        """
+        Register a live Upstox session using a pre-acquired OAuth access token.
+        Creates an UpstoxAdapter that wraps the Upstox API v3.
+        """
+        try:
+            from broker.adapters.upstox_adapter import UpstoxAdapter
+            adapter = UpstoxAdapter(creds, access_token, self.config_id, self.client_id)
+            if not adapter.is_connected():
+                self.error = "Upstox token injection failed — missing access token"
+                self._log.error("inject_upstox_token: UpstoxAdapter not connected")
+                return False
+            with self._lock:
+                self._adapter         = adapter
+                self.mode             = "live"
+                self.connected_at     = datetime.now(timezone.utc)
+                self.last_heartbeat   = self.connected_at
+                self.error            = None
+            self._log.info("Upstox session injected — mode=live")
+            return True
+        except Exception as e:
+            self.error = str(e)
+            self._log.error("inject_upstox_token failed: %s", e, exc_info=True)
+            return False
+
+    def inject_kite_token(self, creds: dict, api_key: str, access_token: str) -> bool:
+        """
+        Register a live Zerodha Kite session using api_key and access_token.
+        Creates a KiteAdapter that wraps the Kite Connect v3 API.
+        """
+        try:
+            from broker.adapters.kite_adapter import KiteAdapter
+            adapter = KiteAdapter(creds, api_key, access_token, self.config_id, self.client_id)
+            if not adapter.is_connected():
+                self.error = "Kite token injection failed — missing API key or access token"
+                self._log.error("inject_kite_token: KiteAdapter not connected")
+                return False
+            with self._lock:
+                self._adapter         = adapter
+                self.mode             = "live"
+                self.connected_at     = datetime.now(timezone.utc)
+                self.last_heartbeat   = self.connected_at
+                self.error            = None
+            self._log.info("Kite session injected — mode=live")
+            return True
+        except Exception as e:
+            self.error = str(e)
+            self._log.error("inject_kite_token failed: %s", e, exc_info=True)
+            return False
+
     def disconnect(self) -> None:
         with self._lock:
             self._client  = None
@@ -346,16 +471,29 @@ class BrokerAccountSession:
         Also accepts legacy Shoonya-format keys for backward compat.
         """
         if self._adapter is not None:
-            # Normalise legacy Shoonya-format order keys
+            # ── Normalise to canonical keys ───────────────────────────────────
+            _SIDE = {"B": "BUY", "S": "SELL", "BUY": "BUY", "SELL": "SELL"}
+            _PRD  = {"I": "MIS", "C": "CNC", "M": "NRML",
+                     "MIS": "MIS", "CNC": "CNC", "NRML": "NRML",
+                     "INTRADAY": "MIS", "MARGIN": "NRML"}
+            _OTYPE = {"MKT": "MARKET", "LMT": "LIMIT", "SL-LMT": "SL", "SL-MKT": "SL-M",
+                      "MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "SL", "SL-M": "SL-M"}
+
+            raw_side = (order.get("side") or order.get("transaction_type", "B")).upper()
+            raw_prd  = (order.get("product") or order.get("product_type", "MIS")).upper()
+            raw_otype = (order.get("order_type") or order.get("price_type", "MARKET")).upper()
+
             normalised = {
                 "symbol":        order.get("symbol") or order.get("tradingsymbol", ""),
                 "exchange":      order.get("exchange", "NSE"),
-                "side":          "BUY" if (order.get("side") or order.get("transaction_type", "B")).upper() in ("BUY", "B") else "SELL",
-                "product":       order.get("product") or order.get("product_type", "MIS"),
-                "order_type":    order.get("order_type") or order.get("price_type", "MARKET"),
+                "side":          _SIDE.get(raw_side, "BUY"),
+                "product":       _PRD.get(raw_prd, raw_prd),
+                "order_type":    _OTYPE.get(raw_otype, raw_otype),
                 "qty":           int(order.get("qty") or order.get("quantity", 0)),
                 "price":         float(order.get("price", 0) or 0),
                 "trigger_price": float(order.get("trigger_price", 0) or 0),
+                "tag":           order.get("tag") or order.get("remarks") or "smart_trader",
+                "retention":     order.get("retention") or "DAY",
             }
             return self._adapter.place_order(normalised)
 
@@ -519,6 +657,142 @@ class MultiAccountRegistry:
             log.info("Fyers session registered for config=%s", config_id)
         else:
             log.error("Fyers session injection FAILED for config=%s — %s", config_id, sess.error)
+        return sess
+
+    def register_angelone(
+        self,
+        user_id:   str,
+        config_id: str,
+        client_id: str,
+        creds:     dict,
+        jwt_token: str,
+    ) -> BrokerAccountSession:
+        """Register (or refresh) a live Angel One session."""
+        log = _make_log(user_id, "angel", client_id)
+        with self._lock:
+            user_map = self._sessions.setdefault(user_id, {})
+            sess = user_map.get(config_id)
+            if sess is None:
+                sess = BrokerAccountSession(user_id, config_id, "angel", client_id)
+                user_map[config_id] = sess
+                log.info("New Angel One BrokerAccountSession created")
+            else:
+                log.info("Refreshing existing Angel One BrokerAccountSession")
+
+        ok = sess.inject_angelone_token(creds, jwt_token)
+        if ok:
+            log.info("Angel One session registered for config=%s", config_id)
+        else:
+            log.error("Angel One session injection FAILED for config=%s — %s", config_id, sess.error)
+        return sess
+
+    def register_dhan(
+        self,
+        user_id:   str,
+        config_id: str,
+        client_id: str,
+        creds:     dict,
+        access_token: str,
+    ) -> BrokerAccountSession:
+        """Register (or refresh) a live Dhan session."""
+        log = _make_log(user_id, "dhan", client_id)
+        with self._lock:
+            user_map = self._sessions.setdefault(user_id, {})
+            sess = user_map.get(config_id)
+            if sess is None:
+                sess = BrokerAccountSession(user_id, config_id, "dhan", client_id)
+                user_map[config_id] = sess
+                log.info("New Dhan BrokerAccountSession created")
+            else:
+                log.info("Refreshing existing Dhan BrokerAccountSession")
+
+        ok = sess.inject_dhan_token(creds, access_token)
+        if ok:
+            log.info("Dhan session registered for config=%s", config_id)
+        else:
+            log.error("Dhan session injection FAILED for config=%s — %s", config_id, sess.error)
+        return sess
+
+    def register_groww(
+        self,
+        user_id:   str,
+        config_id: str,
+        client_id: str,
+        creds:     dict,
+        access_token: str,
+    ) -> BrokerAccountSession:
+        """Register (or refresh) a live Groww session."""
+        log = _make_log(user_id, "groww", client_id)
+        with self._lock:
+            user_map = self._sessions.setdefault(user_id, {})
+            sess = user_map.get(config_id)
+            if sess is None:
+                sess = BrokerAccountSession(user_id, config_id, "groww", client_id)
+                user_map[config_id] = sess
+                log.info("New Groww BrokerAccountSession created")
+            else:
+                log.info("Refreshing existing Groww BrokerAccountSession")
+
+        ok = sess.inject_groww_token(creds, access_token)
+        if ok:
+            log.info("Groww session registered for config=%s", config_id)
+        else:
+            log.error("Groww session injection FAILED for config=%s — %s", config_id, sess.error)
+        return sess
+
+    def register_upstox(
+        self,
+        user_id:   str,
+        config_id: str,
+        client_id: str,
+        creds:     dict,
+        access_token: str,
+    ) -> BrokerAccountSession:
+        """Register (or refresh) a live Upstox session."""
+        log = _make_log(user_id, "upstox", client_id)
+        with self._lock:
+            user_map = self._sessions.setdefault(user_id, {})
+            sess = user_map.get(config_id)
+            if sess is None:
+                sess = BrokerAccountSession(user_id, config_id, "upstox", client_id)
+                user_map[config_id] = sess
+                log.info("New Upstox BrokerAccountSession created")
+            else:
+                log.info("Refreshing existing Upstox BrokerAccountSession")
+
+        ok = sess.inject_upstox_token(creds, access_token)
+        if ok:
+            log.info("Upstox session registered for config=%s", config_id)
+        else:
+            log.error("Upstox session injection FAILED for config=%s — %s", config_id, sess.error)
+        return sess
+
+    def register_kite(
+        self,
+        user_id:   str,
+        config_id: str,
+        client_id: str,
+        creds:     dict,
+        api_key:   str,
+        access_token: str,
+    ) -> BrokerAccountSession:
+        """Register (or refresh) a live Zerodha Kite session."""
+        log = _make_log(user_id, "zerodha", client_id)
+        with self._lock:
+            user_map = self._sessions.setdefault(user_id, {})
+            sess = user_map.get(config_id)
+            if sess is None:
+                sess = BrokerAccountSession(user_id, config_id, "zerodha", client_id)
+                user_map[config_id] = sess
+                log.info("New Kite BrokerAccountSession created")
+            else:
+                log.info("Refreshing existing Kite BrokerAccountSession")
+
+        ok = sess.inject_kite_token(creds, api_key, access_token)
+        if ok:
+            log.info("Kite session registered for config=%s", config_id)
+        else:
+            log.error("Kite session injection FAILED for config=%s — %s", config_id, sess.error)
         return sess
 
     def deregister(self, user_id: str, config_id: str) -> None:

@@ -14,7 +14,14 @@ import {
 } from 'lucide-react'
 import type { BasketLeg, TransactionType, OrderType } from '../types'
 
-const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX']
+// Underlying → F&O exchange mapping
+const UNDERLYING_MAP: Record<string, string> = {
+  NIFTY: 'NFO', BANKNIFTY: 'NFO', FINNIFTY: 'NFO', MIDCPNIFTY: 'NFO',
+  SENSEX: 'BFO', BANKEX: 'BFO',
+  CRUDEOIL: 'MCX', GOLD: 'MCX', SILVER: 'MCX', NATURALGAS: 'MCX', COPPER: 'MCX',
+  USDINR: 'CDS',
+}
+const UNDERLYINGS = Object.keys(UNDERLYING_MAP)
 
 type OCTab = 'chain' | 'analytics' | 'basket'
 
@@ -309,7 +316,7 @@ function OptionChainTable() {
                   {/* Call LTP (always visible) */}
                   <td
                     className="px-2 py-1.5 text-right font-mono font-bold text-profit bg-profit/5 cursor-pointer hover:underline"
-                    onClick={() => openOrderModal((row.call as any)?.trading_symbol || data.underlying + `${row.strike}CE`)}
+                    onClick={() => openOrderModal((row.call as any)?.trading_symbol || data.underlying + `${row.strike}CE`, (data as any)?.exchange || UNDERLYING_MAP[data.underlying] || 'NFO')}
                   >
                     {fmtNum(row.call.ltp)}
                   </td>
@@ -324,7 +331,7 @@ function OptionChainTable() {
                   {/* PUT LTP (always visible) */}
                   <td
                     className="px-2 py-1.5 text-left font-mono font-bold text-loss bg-loss/5 cursor-pointer hover:underline"
-                    onClick={() => openOrderModal((row.put as any)?.trading_symbol || data.underlying + `${row.strike}PE`)}
+                    onClick={() => openOrderModal((row.put as any)?.trading_symbol || data.underlying + `${row.strike}PE`, (data as any)?.exchange || UNDERLYING_MAP[data.underlying] || 'NFO')}
                   >
                     {fmtNum(row.put.ltp)}
                   </td>
@@ -449,7 +456,7 @@ function BasketOrder() {
     const tsym = (side as any)?.trading_symbol || `${data.underlying}${data.expiry}${newLeg.strike}${newLeg.type}`
     const lotSize = (side as any)?.lot_size || (data as any)?.lot_size || 50
     addToBasket({
-      id: uid(), symbol: tsym, tradingsymbol: tsym, exchange: 'NFO',
+      id: uid(), symbol: tsym, tradingsymbol: tsym, exchange: (data as any)?.exchange || UNDERLYING_MAP[data.underlying] || 'NFO',
       transactionType: newLeg.txn, quantity: newLeg.qty * lotSize,
       orderType: newLeg.orderType, price: ltp ?? newLeg.price, product: 'MIS', ltp,
     })

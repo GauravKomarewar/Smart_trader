@@ -280,7 +280,9 @@ async def get_option_chain(
                 oc = data
 
     # 3) ScriptMaster chain (structure with strikes, zero prices)
-    oc_exchange = "NFO" if exchange in ("NSE", "NFO") else exchange
+    # Map equity exchange to F&O exchange for option chain lookup
+    _fo_map = {"NSE": "NFO", "NFO": "NFO", "BSE": "BFO", "BFO": "BFO"}
+    oc_exchange = _fo_map.get(exchange, exchange)
     if not oc or not oc.get("rows"):
         sm_chain = build_option_chain_from_scriptmaster(
             sym, exchange=oc_exchange, expiry=expiry or "",
@@ -309,8 +311,9 @@ async def get_option_chain(
         for row in oc.get("rows", []):
             enrich_option_chain_row(row, sym, oc_exchange, oc_expiry)
 
-    # Add lot_size at top level
+    # Add lot_size and exchange at top level
     oc.setdefault("lot_size", get_lot_size(sym, oc_exchange))
+    oc["exchange"] = oc_exchange
 
     return oc
 
@@ -338,20 +341,46 @@ async def search_instruments_api(
     instrument_type: str = Query("", alias="type"),
 ):
     """
-    Search instruments from ScriptMaster — broker-agnostic, always available.
+    Search instruments across ALL broker scriptmasters (Fyers + Shoonya).
 
-    Falls back to broker searchscrip only if ScriptMaster returns nothing.
+    Returns unified results with per-broker trading symbols for
+    NSE, NFO, BSE, BFO, MCX exchanges.
     """
     q_upper = q.upper().strip()
     results = []
 
-    # Primary: ScriptMaster search (120K+ instruments, no broker needed)
-    normalized = search_instruments(q_upper, exchange=exchange,
-                                     instrument_type=instrument_type, limit=30)
-    if normalized:
-        results = [inst.to_search_result() for inst in normalized]
+    # Primary: Unified ScriptMaster search (Fyers + Shoonya, all exchanges)
+    try:
+        from scripts.unified_scriptmaster import search_all
+        unified = search_all(q_upper, exchange=exchange,
+                              instrument_type=instrument_type, limit=30)
+        for rec in unified:
+            results.append({
+                "symbol":          rec.get("symbol", ""),
+                "trading_symbol":  rec.get("trading_symbol", ""),
+                "tradingsymbol":   rec.get("trading_symbol", ""),
+                "exchange":        rec.get("exchange", ""),
+                "type":            rec.get("instrument_type", "EQ"),
+                "token":           rec.get("token", ""),
+                "name":            rec.get("description") or rec.get("symbol", ""),
+                "lot_size":        rec.get("lot_size", 1),
+                "expiry":          rec.get("expiry", ""),
+                "strike":          rec.get("strike", 0),
+                "option_type":     rec.get("option_type", ""),
+                "fyers_symbol":    rec.get("fyers_symbol", ""),
+                "shoonya_symbol":  rec.get("shoonya_symbol", ""),
+            })
+    except Exception as exc:
+        logger.warning("Unified search error: %s", exc)
 
-    # Fallback: live broker searchscrip (for symbols not in Fyers CSVs)
+    # Fallback: old ScriptMaster search
+    if not results:
+        normalized = search_instruments(q_upper, exchange=exchange,
+                                         instrument_type=instrument_type, limit=30)
+        if normalized:
+            results = [inst.to_search_result() for inst in normalized]
+
+    # Fallback: live broker searchscrip
     if not results:
         session = get_session()
         exch = exchange or "NSE"

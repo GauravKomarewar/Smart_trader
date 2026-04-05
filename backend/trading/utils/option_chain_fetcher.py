@@ -245,10 +245,10 @@ def _process_fyers_chain(exchange: str, symbol: str, data: Dict) -> Optional[str
 
     # Get lot size from scriptmaster
     try:
-        from scripts.scriptmaster import get_lot_size
+        from scripts.unified_scriptmaster import get_lot_size
         lot_size = get_lot_size(symbol, exchange)
     except Exception:
-        lot_size = {"NIFTY": 75, "BANKNIFTY": 30, "FINNIFTY": 40, "SENSEX": 10}.get(symbol, 1)
+        lot_size = 1
 
     # Group by strike and build rows
     by_strike: Dict[float, Dict[str, Dict]] = defaultdict(dict)
@@ -357,7 +357,7 @@ def _process_shoonya_chain(exchange: str, symbol: str, data: Dict) -> Optional[s
         return None
 
     try:
-        from scripts.scriptmaster import get_lot_size
+        from scripts.unified_scriptmaster import get_lot_size
         lot_size = get_lot_size(symbol, exchange)
     except Exception:
         lot_size = 1

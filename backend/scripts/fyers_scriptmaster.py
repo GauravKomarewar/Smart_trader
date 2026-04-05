@@ -10,6 +10,9 @@ CSV Sources (no auth required):
     BSE_FO.csv  — BSE F&O
     NSE_CM.csv  — NSE equity
     BSE_CM.csv  — BSE equity
+    MCX_COM.csv — MCX commodities (CRUDEOIL, GOLD, SILVER, etc.)
+    NSE_CD.csv  — NSE currency derivatives (USDINR, EURINR, etc.)
+    BSE_CD.csv  — BSE currency derivatives
 
 Column layout (no headers in file):
     0  fyToken          — unique Fyers token (long int as str)
@@ -55,10 +58,13 @@ SCRIPTMASTER_VERSION = "1.0"
 BASE_URL = "https://public.fyers.in/sym_details"
 
 SCRIPTMASTER_URLS: Dict[str, str] = {
-    "NSE_FO": f"{BASE_URL}/NSE_FO.csv",
-    "BSE_FO": f"{BASE_URL}/BSE_FO.csv",
-    "NSE_CM": f"{BASE_URL}/NSE_CM.csv",
-    "BSE_CM": f"{BASE_URL}/BSE_CM.csv",
+    "NSE_FO":  f"{BASE_URL}/NSE_FO.csv",
+    "BSE_FO":  f"{BASE_URL}/BSE_FO.csv",
+    "NSE_CM":  f"{BASE_URL}/NSE_CM.csv",
+    "BSE_CM":  f"{BASE_URL}/BSE_CM.csv",
+    "MCX_COM": f"{BASE_URL}/MCX_COM.csv",
+    "NSE_CD":  f"{BASE_URL}/NSE_CD.csv",
+    "BSE_CD":  f"{BASE_URL}/BSE_CD.csv",
 }
 
 _HERE = Path(__file__).resolve().parent
@@ -77,6 +83,14 @@ _INSTR_CODE: Dict[str, str] = {
     "13": "FUT",   # Stock futures
     "14": "OPT",   # Index options
     "15": "OPT",   # Stock options
+    "16": "FUT",   # Currency futures
+    "17": "OPT",   # Currency options
+    "18": "FUT",   # Currency futures (weekly)
+    "19": "OPT",   # Currency options (weekly)
+    "23": "FUT",   # BSE currency futures
+    "25": "OPT",   # BSE currency options
+    "30": "FUT",   # Commodity futures (MCX)
+    "31": "OPT",   # Commodity options (MCX)
     "50": "EQ",    # BSE equity
 }
 
@@ -133,10 +147,13 @@ def _epoch_to_date(epoch_str: str) -> str:
 def _exchange_from_segment(segment_key: str) -> str:
     """Derive canonical exchange name from segment key (NSE_FO → NFO, NSE_CM → NSE)."""
     mapping = {
-        "NSE_FO": "NFO",
-        "BSE_FO": "BFO",
-        "NSE_CM": "NSE",
-        "BSE_CM": "BSE",
+        "NSE_FO":  "NFO",
+        "BSE_FO":  "BFO",
+        "NSE_CM":  "NSE",
+        "BSE_CM":  "BSE",
+        "MCX_COM": "MCX",
+        "NSE_CD":  "CDS",
+        "BSE_CD":  "BCD",
     }
     return mapping.get(segment_key, segment_key)
 
