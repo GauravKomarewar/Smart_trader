@@ -237,6 +237,26 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
         from trading.strategy_runner.executor import StrategyExecutor
         executor = StrategyExecutor(config_path, state_path)
 
+        # Wire OMS into the executor for order placement
+        try:
+            from trading.oms import OrderManagementSystem
+            paper_mode = cfg.get("identity", {}).get("paper_mode", True)
+            broker_adapter = None
+            if not paper_mode:
+                try:
+                    from broker.multi_broker import registry as broker_registry
+                    sessions = broker_registry.get_all_sessions()
+                    if sessions:
+                        broker_adapter = list(sessions.values())[0]
+                except Exception as ba_err:
+                    logger.warning("No live broker adapter available, falling back to paper: %s", ba_err)
+            oms = OrderManagementSystem(broker_adapter=broker_adapter)
+            executor.set_oms(oms)
+            logger.info("OMS injected into executor (paper=%s, broker=%s)",
+                        paper_mode, type(broker_adapter).__name__ if broker_adapter else "None")
+        except Exception as oms_err:
+            logger.warning("OMS injection failed, executor will run without OMS: %s", oms_err)
+
         # Store executor reference for monitoring endpoints
         with _lock:
             if safe_name in _running:

@@ -160,6 +160,14 @@ async def on_startup():
         import logging
         logging.getLogger("smart_trader").warning("trading_db init failed: %s", exc)
 
+    # Load instrument master (fyers scriptmaster — downloads once/day)
+    try:
+        from scripts.scriptmaster import refresh as sm_refresh
+        count = sm_refresh()
+        logger.info("ScriptMaster loaded: %d instruments", count)
+    except Exception as exc:
+        logger.warning("ScriptMaster load failed (will retry lazily): %s", exc)
+
     # Seed admin + demo users
     from db.database import SessionLocal, User
     from core.config import config
