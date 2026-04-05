@@ -64,6 +64,8 @@ async def list_configs(payload: dict = Depends(current_user)):
     """List all saved strategy configs."""
     configs: List[Dict[str, Any]] = []
     for path in sorted(SAVED_CONFIGS_DIR.glob("*.json")):
+        if path.name.endswith(".schema.json"):
+            continue  # skip JSON schema files
         try:
             with open(path) as f:
                 c = json.load(f)
@@ -82,8 +84,14 @@ async def list_configs(payload: dict = Depends(current_user)):
                 "exchange": c.get("identity", {}).get("exchange", "NFO"),
                 "lots": c.get("identity", {}).get("lots", 1),
                 "legs": len(c.get("entry", {}).get("legs", [])),
-                "entry_time": c.get("timing", {}).get("entry_time", ""),
-                "exit_time": c.get("timing", {}).get("exit_time", ""),
+                "entry_time": (
+                    c.get("timing", {}).get("entry_window_start", "")
+                    or c.get("schedule", {}).get("entry_time", "")
+                ),
+                "exit_time": (
+                    c.get("timing", {}).get("eod_exit_time", "")
+                    or c.get("schedule", {}).get("exit_time", "")
+                ),
                 "status": "running" if is_alive else entry.get("status", "stopped"),
                 "error": entry.get("error"),
                 "file": path.name,
@@ -178,9 +186,10 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
             cfg = json.load(fp)
 
         ok, errors = validate_config(cfg)
-        if not ok and errors:
-            msgs = [str(e) for e in errors[:3]]
-            raise ValueError(f"Config validation failed: {'; '.join(msgs)}")
+        if not ok:
+            errs = [str(e) for e in errors if e.severity == "error"]
+            if errs:
+                raise ValueError(f"Config validation failed: {'; '.join(errs[:3])}")
 
         # Simple heartbeat loop — replace with real executor tick when bot is available
         while not stop_evt.is_set():
@@ -215,17 +224,21 @@ async def run_strategy(name: str, payload: dict = Depends(current_user)):
             raise HTTPException(status_code=409, detail=f"Strategy '{name}' is already running")
 
     # Pre-validate config before spawning thread
+    warnings_list: List[str] = []
     try:
         with open(path) as fp:
             cfg = json.load(fp)
         from trading.strategy_runner.config_schema import validate_config
         ok, errors = validate_config(cfg)
-        if not ok and errors:
-            msgs = [str(e) for e in errors[:5]]
-            raise HTTPException(
-                status_code=422,
-                detail=f"Config validation failed: {'; '.join(msgs)}"
-            )
+        if not ok:
+            errs = [str(e) for e in errors if e.severity == "error"]
+            if errs:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Config validation failed: {'; '.join(errs[:5])}"
+                )
+        # Collect warnings for the response
+        warnings_list = [str(e) for e in errors if e.severity == "warning"]
     except HTTPException:
         raise
     except Exception as exc:
@@ -259,7 +272,12 @@ async def run_strategy(name: str, payload: dict = Depends(current_user)):
         }
         t.start()
 
-    return {"ok": True, "name": safe, "status": "running"}
+    return {
+        "ok": True,
+        "name": safe,
+        "status": "running",
+        "warnings": warnings_list[:5] if warnings_list else [],
+    }
 
 
 @router.post("/strategy/stop/{name}")
@@ -296,6 +314,8 @@ async def all_status(payload: dict = Depends(current_user)):
     """Return status of all saved strategies."""
     result: List[Dict[str, Any]] = []
     for path in sorted(SAVED_CONFIGS_DIR.glob("*.json")):
+        if path.name.endswith(".schema.json"):
+            continue
         try:
             with open(path) as fp:
                 cfg = json.load(fp)

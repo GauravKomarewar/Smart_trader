@@ -785,14 +785,15 @@ export default function StrategyPage() {
 
   async function handleRun(name: string) {
     try {
-      await api.runStrategy(name)
-      toast(`Strategy "${name}" started`, 'success')
+      const res = await api.runStrategy(name) as any
+      const warns = res?.warnings?.length ? ` (${res.warnings.length} warnings)` : ''
+      toast(`Strategy "${name}" started${warns}`, 'success')
       loadSaved()
     } catch (e: any) {
       let msg = 'Failed to start strategy'
       try {
         const parsed = JSON.parse(e?.message || '{}')
-        msg = parsed.detail || e?.message || msg
+        msg = parsed.detail || msg
       } catch {
         msg = e?.message || msg
       }

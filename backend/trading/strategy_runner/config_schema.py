@@ -192,37 +192,37 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[ValidationError]
     else:
         errors.append(ValidationError("identity", "Missing required section 'identity'"))
 
-    # timing section
+    # timing section (warning if missing — still runnable in paper/heartbeat mode)
     if "timing" in config:
         _validate_timing(config["timing"], errors, prefix="timing")
     else:
-        errors.append(ValidationError("timing", "Missing required section 'timing'"))
+        errors.append(ValidationError("timing", "Missing section 'timing'", "warning"))
 
-    # schedule section
+    # schedule section (warning if missing)
     if "schedule" in config:
         _validate_schedule(config["schedule"], errors, prefix="schedule")
     else:
-        errors.append(ValidationError("schedule", "Missing required section 'schedule'"))
+        errors.append(ValidationError("schedule", "Missing section 'schedule'", "warning"))
 
     # market_data section (optional)
     if "market_data" in config:
         _validate_market_data(config["market_data"], errors, prefix="market_data")
 
-    # entry section
+    # entry section (warning if missing)
     if "entry" in config:
         _validate_entry(config["entry"], errors, prefix="entry")
     else:
-        errors.append(ValidationError("entry", "Missing required section 'entry'"))
+        errors.append(ValidationError("entry", "Missing section 'entry'", "warning"))
 
     # adjustment section (optional)
     if "adjustment" in config:
         _validate_adjustment(config["adjustment"], errors, prefix="adjustment")
 
-    # exit section
+    # exit section (warning if missing)
     if "exit" in config:
         _validate_exit(config["exit"], errors, prefix="exit")
     else:
-        errors.append(ValidationError("exit", "Missing required section 'exit'"))
+        errors.append(ValidationError("exit", "Missing section 'exit'", "warning"))
 
     # rms section (optional)
     if "rms" in config:
@@ -374,7 +374,7 @@ def _validate_identity(identity: Dict, errors: List[ValidationError], prefix: st
         )
     test_mode = identity.get("test_mode")
     if test_mode is not None and not isinstance(test_mode, bool):
-        errors.append(ValidationError(f"{prefix}.test_mode", "test_mode must be a boolean"))
+        errors.append(ValidationError(f"{prefix}.test_mode", "test_mode should be a boolean", "warning"))
 
 
 def _validate_timing(timing: Dict, errors: List[ValidationError], prefix: str):
@@ -385,9 +385,9 @@ def _validate_timing(timing: Dict, errors: List[ValidationError], prefix: str):
     for key in ("entry_window_start", "entry_window_end", "eod_exit_time"):
         val = timing.get(key)
         if not val:
-            errors.append(ValidationError(f"{prefix}.{key}", f"Missing {key}"))
+            errors.append(ValidationError(f"{prefix}.{key}", f"Missing {key}", "warning"))
         elif not _is_valid_time(val):
-            errors.append(ValidationError(f"{prefix}.{key}", f"Invalid time format '{val}'. Expected HH:MM"))
+            errors.append(ValidationError(f"{prefix}.{key}", f"Invalid time format '{val}'. Expected HH:MM", "warning"))
 
     # Optionally check that entry_start < entry_end
     start = timing.get("entry_window_start")
@@ -482,7 +482,7 @@ def _validate_entry(entry: Dict, errors: List[ValidationError], prefix: str):
     # legs
     legs = entry.get("legs")
     if not legs:
-        errors.append(ValidationError(f"{prefix}.legs", "Missing entry.legs"))
+        errors.append(ValidationError(f"{prefix}.legs", "No entry legs defined", "warning"))
     elif not isinstance(legs, list):
         errors.append(ValidationError(f"{prefix}.legs", "legs must be an array"))
     else:
@@ -646,15 +646,13 @@ def _validate_leg_strike_config(
         if opt_type not in valid_option_types:
             errors.append(ValidationError(f"{path}.option_type", f"Invalid option_type '{opt_type}'. Valid: {sorted(valid_option_types)}"))
 
-    # strike_mode (required)
+    # strike_mode (optional — defaults to "standard" when absent)
     strike_mode = cfg.get("strike_mode")
-    if not strike_mode:
-        errors.append(ValidationError(f"{path}.strike_mode", "Missing strike_mode"))
-    elif strike_mode not in VALID_STRIKE_MODES:
+    if strike_mode and strike_mode not in VALID_STRIKE_MODES:
         errors.append(ValidationError(f"{path}.strike_mode", f"Invalid strike_mode '{strike_mode}'. Valid: {sorted(VALID_STRIKE_MODES)}"))
 
-    # Now validate based on strike_mode
-    if strike_mode == "standard":
+    # Now validate based on strike_mode (default to "standard" if absent)
+    if not strike_mode or strike_mode == "standard":
         sel = cfg.get("strike_selection")
         if not sel:
             errors.append(ValidationError(f"{path}.strike_selection", "Missing strike_selection for standard mode"))
@@ -778,6 +776,9 @@ def _validate_condition(cond: Dict, path: str, errors: List[ValidationError]):
     # For between/not_between, runtime uses separate 'value' and 'value2' fields.
     # ✅ BUG FIX: Schema was validating value as [min, max] list, but _dict_to_condition
     # reads d["value"] and d.get("value2") as separate fields. Accept both formats.
+    # Time parameters ("time_current", "time_since_*", etc.) may use HH:MM strings.
+    _is_time_param = isinstance(param, str) and ("time" in param.lower())
+
     if comp in ("between", "not_between"):
         val = cond.get("value")
         val2 = cond.get("value2")
@@ -793,23 +794,24 @@ def _validate_condition(cond: Dict, path: str, errors: List[ValidationError]):
                         float(val[0])
                         float(val[1])
                 except (TypeError, ValueError):
-                    errors.append(ValidationError(f"{path}.value", "Both elements of value must be numbers"))
+                    if not _is_time_param:
+                        errors.append(ValidationError(f"{path}.value", "Both elements of value must be numbers", "warning"))
         else:
             # Preferred format: value + value2 as separate fields
             if val is None:
                 errors.append(ValidationError(f"{path}.value", f"Comparator '{comp}' requires value"))
-            else:
+            elif not _is_time_param:
                 try:
                     float(val)
                 except (TypeError, ValueError):
-                    errors.append(ValidationError(f"{path}.value", "value must be a number"))
+                    errors.append(ValidationError(f"{path}.value", "value must be a number", "warning"))
             if val2 is None:
                 errors.append(ValidationError(f"{path}.value2", f"Comparator '{comp}' requires value2"))
-            else:
+            elif not _is_time_param:
                 try:
                     float(val2)
                 except (TypeError, ValueError):
-                    errors.append(ValidationError(f"{path}.value2", "value2 must be a number"))
+                    errors.append(ValidationError(f"{path}.value2", "value2 must be a number", "warning"))
 
     # For ~=, tolerance is optional but if present should be number
     if comp == "~=" and "tolerance" in cond:
