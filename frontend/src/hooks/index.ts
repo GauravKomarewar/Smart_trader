@@ -7,12 +7,10 @@ import { api } from '../lib/api'
 import { ws } from '../lib/ws'
 import {
   useAuthStore, useDashboardStore, useMarketStore,
-  useOptionChainStore, useToastStore,
+  useOptionChainStore, useToastStore, useBrokerAccountsStore,
 } from '../stores'
-import {
-  DEMO_INDICES, DEMO_SCREENER,
-  generateOptionChain,
-} from '../lib/mockData'
+import type { BrokerAccountWS } from '../stores'
+
 import type { DashboardData, IndexQuote, ScreenerRow, RiskMetrics } from '../types'
 
 // ── Empty dashboard (no fake data - used when no broker connected) ──
@@ -45,6 +43,52 @@ const EMPTY_DASHBOARD: DashboardData = {
     usedMargin: 0,
     availableMargin: 0,
   },
+}
+
+// ── WebSocket live data — connects on auth, pushes to stores ──
+export function useLiveData() {
+  const { isAuthenticated } = useAuthStore()
+  const { setData } = useDashboardStore()
+  const { setAccounts, setBrokerData } = useBrokerAccountsStore()
+  const connectedRef = useRef(false)
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      if (connectedRef.current) {
+        ws.disconnect()
+        connectedRef.current = false
+      }
+      return
+    }
+    const token = localStorage.getItem('st_token')
+    if (!token) return
+    if (connectedRef.current) return
+
+    // Handlers
+    const onDashboard = (data: any) => {
+      if (data) setData(data as DashboardData)
+    }
+    const onBrokerAccounts = (data: any) => {
+      if (Array.isArray(data)) setAccounts(data as BrokerAccountWS[])
+    }
+    const onBrokerData = (data: any) => {
+      if (data) setBrokerData(data)
+    }
+
+    ws.on('dashboard', onDashboard)
+    ws.on('broker_accounts', onBrokerAccounts)
+    ws.on('broker_data', onBrokerData)
+    ws.connect(token)
+    connectedRef.current = true
+
+    return () => {
+      ws.off('dashboard', onDashboard)
+      ws.off('broker_accounts', onBrokerAccounts)
+      ws.off('broker_data', onBrokerData)
+      ws.disconnect()
+      connectedRef.current = false
+    }
+  }, [isAuthenticated])
 }
 
 // ── Auth check on mount ──────────────────────────
@@ -153,7 +197,7 @@ export function useDashboardData() {
   useEffect(() => {
     setLoading(true)
     fetch()
-    intervalRef.current = setInterval(fetch, 5000)
+    intervalRef.current = setInterval(fetch, 30_000)  // fallback — WS is primary
     return () => clearInterval(intervalRef.current)
   }, [fetch])
 }
@@ -174,8 +218,8 @@ export function useMarketIndices() {
           return
         }
       } catch { /* fall through */ }
-      // Only use demo indices if API completely fails
-      setIndices(DEMO_INDICES)
+      // API failed — show empty (no fake data)
+      setIndices([])
     }
     load()
     const t = setInterval(load, 5000)
@@ -199,7 +243,7 @@ export function useScreenerData() {
           return
         }
       } catch { /* fall through */ }
-      setScreener(DEMO_SCREENER)
+      setScreener([])
     }
     load()
     const t = setInterval(load, 30000)
@@ -227,12 +271,7 @@ export function useGlobalMarkets() {
 }
 
 // ── Option chain loading ────────────────────────
-const OC_LTP_MAP: Record<string, number> = { NIFTY: 24387, BANKNIFTY: 53842, FINNIFTY: 23450, MIDCPNIFTY: 12240, SENSEX: 80248 }
 
-function demoOptionChain(underlying: string, expiry: string) {
-  const ltp = OC_LTP_MAP[underlying] ?? 24387
-  return generateOptionChain(underlying, ltp, expiry || '10Apr2026')
-}
 
 export function useOptionChain() {
   const { selectedUnderlying, selectedExpiry, setData, setLoading } = useOptionChainStore()
@@ -248,8 +287,8 @@ export function useOptionChain() {
           return
         }
       } catch { /* fall through */ }
-      // Fall to demo only if API returned nothing or failed
-      setData(demoOptionChain(selectedUnderlying, selectedExpiry || '10Apr2026'))
+      // API returned nothing — show empty state (no fake data)
+      setData({ underlying: selectedUnderlying, underlyingLtp: 0, expiry: selectedExpiry || '', expiries: [], pcr: 0, maxPainStrike: 0, rows: [] } as any)
     }
     load()
     const t = setInterval(load, 5000)
@@ -272,10 +311,7 @@ export function useInstrumentSearch(query: string) {
         const data = await api.search(query) as any[]
         setResults(data)
       } catch {
-        // Demo fallback
-        const demo = ['RELIANCE', 'RELIANCE EQ', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK', 'BHARTIARTL']
-        setResults(demo.filter(s => s.toLowerCase().includes(query.toLowerCase()))
-          .map(s => ({ symbol: s, tradingsymbol: s, exchange: 'NSE', type: 'EQ', name: s })))
+        setResults([])
       } finally {
         setLoading(false)
       }

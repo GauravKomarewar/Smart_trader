@@ -1,7 +1,6 @@
 """Market data router — quotes, option chain, indices, global markets."""
 
 import logging
-import random
 from collections import defaultdict
 from fastapi import APIRouter, Query
 from typing import Optional
@@ -21,24 +20,7 @@ NIFTY50_SYMBOLS = [
     "COALINDIA", "BAJAJFINSV", "NESTLEIND", "JSWSTEEL", "HINDALCO", "TATASTEEL",
 ]
 
-# ── demo stubs ─────────────────────────────────────────────────────────────────
-
-_DEMO_INDEX_PRICES = {
-    "NIFTY": 23500, "BANKNIFTY": 51200, "FINNIFTY": 24050,
-    "MIDCPNIFTY": 12400, "SENSEX": 73200,
-}
-
-def _demo_index(name: str) -> dict:
-    base = _DEMO_INDEX_PRICES.get(name, 20000)
-    chg  = round(random.uniform(-100, 150), 2)
-    return {
-        "symbol": name, "token": name, "exchange": "NSE",
-        "ltp": base + chg, "change": chg,
-        "changePct": round(chg / base * 100, 2),
-        "open": base - random.uniform(0, 50), "high": base + random.uniform(10, 100),
-        "low": base - random.uniform(10, 100), "close": base, "volume": 0,
-        "advances": 0, "declines": 0, "source": "demo",
-    }
+# ── no demo stubs — empty data returned when no live source ────────────────
 
 
 # ── /market/indices ────────────────────────────────────────────────────────────
@@ -64,9 +46,8 @@ async def get_indices():
         if result:
             return {"data": result, "count": len(result), "source": "shoonya"}
 
-    # Demo — only when no live source available
-    data = [_demo_index(n) for n in INDICES]
-    return {"data": data, "count": len(data), "source": "demo"}
+    # No live source available — return empty (no fake data)
+    return {"data": [], "count": 0, "source": "unavailable"}
 
 
 # ── /market/global ─────────────────────────────────────────────────────────────
@@ -81,20 +62,8 @@ async def get_global_markets():
         if data:
             return {"data": data, "count": len(data), "source": "fyers"}
 
-    # Static demo — clearly labelled
-    demo = [
-        {"name": "Gold",           "symbol": "MCX:GOLD",      "category": "commodity", "unit": "\u20b9/10g",   "ltp": 96080,  "change": 120,   "changePct": 0.13,  "source": "demo"},
-        {"name": "Silver",         "symbol": "MCX:SILVER",    "category": "commodity", "unit": "\u20b9/kg",    "ltp": 95200,  "change": -360,  "changePct": -0.38, "source": "demo"},
-        {"name": "Crude Oil",      "symbol": "MCX:CRUDEOIL",  "category": "commodity", "unit": "\u20b9/bbl",   "ltp": 6830,   "change": -44,   "changePct": -0.64, "source": "demo"},
-        {"name": "Natural Gas",    "symbol": "MCX:NATGAS",    "category": "commodity", "unit": "\u20b9/mmbtu", "ltp": 263,    "change": 3.2,   "changePct": 1.23,  "source": "demo"},
-        {"name": "Copper",         "symbol": "MCX:COPPER",    "category": "commodity", "unit": "\u20b9/kg",    "ltp": 844,    "change": 6.5,   "changePct": 0.78,  "source": "demo"},
-        {"name": "Aluminium",      "symbol": "MCX:ALUMINIUM", "category": "commodity", "unit": "\u20b9/kg",    "ltp": 218,    "change": -1.1,  "changePct": -0.50, "source": "demo"},
-        {"name": "USD/INR",        "symbol": "NSE:USDINR",    "category": "forex",     "unit": "\u20b9",        "ltp": 84.20,  "change": 0.05,  "changePct": 0.06,  "source": "demo"},
-        {"name": "EUR/INR",        "symbol": "NSE:EURINR",    "category": "forex",     "unit": "\u20b9",        "ltp": 91.50,  "change": -0.12, "changePct": -0.13, "source": "demo"},
-        {"name": "GBP/INR",        "symbol": "NSE:GBPINR",    "category": "forex",     "unit": "\u20b9",        "ltp": 107.30, "change": 0.22,  "changePct": 0.21,  "source": "demo"},
-        {"name": "JPY/INR (\u00d7100)", "symbol": "NSE:JPYINR", "category": "forex", "unit": "\u20b9",        "ltp": 55.80,  "change": -0.08, "changePct": -0.14, "source": "demo"},
-    ]
-    return {"data": demo, "count": len(demo), "source": "demo"}
+    # No live source — return empty (no fake data)
+    return {"data": [], "count": 0, "source": "unavailable"}
 
 
 # ── /market/quote/{symbol} ─────────────────────────────────────────────────────
@@ -167,17 +136,8 @@ async def get_screener(
                     })
 
     if not rows:
-        for sym in symbols:
-            q = _make_demo_quote(sym)
-            base = q.get("ltp", 100)
-            rows.append({
-                "symbol": sym, "name": sym, "tradingsymbol": sym, "exchange": "NSE",
-                "ltp": base, "change": q.get("change", 0), "changePct": q.get("changePct", 0),
-                "volume": q.get("volume", 0),
-                "marketCap": 0, "pe": 0,
-                "high52w": q.get("high", base), "low52w": q.get("low", base),
-                "rsi": 0, "source": "demo",
-            })
+        # No live source — return empty (no fake data)
+        return {"data": [], "count": 0}
 
     if filter == "gainers":
         rows = [r for r in rows if r.get("changePct", 0) > 0]

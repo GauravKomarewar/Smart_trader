@@ -1,14 +1,14 @@
 import { Outlet, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useState, useEffect, useRef } from 'react'
 import { useUIStore, useAuthStore, useDashboardStore, useSettingsStore } from '../../stores'
-import { useKeyboard, useClock, useMarketState, useLogout } from '../../hooks'
+import { useKeyboard, useClock, useMarketState, useLogout, useDashboardData } from '../../hooks'
 import { cn, fmtINR, pnlClass } from '../../lib/utils'
 import { playOrderFill, playOrderReject } from '../../lib/sounds'
 import {
   LayoutDashboard, TrendingUp, Layers, BookOpen, Settings,
   Menu, X, Activity, ChevronDown, Search,
   Keyboard, Plus, ChevronRight, GitBranch, ShieldCheck, Cpu,
-  ShieldAlert, Calculator, BarChart2,
+  BarChart2,
 } from 'lucide-react'
 import { LogOut } from 'lucide-react'
 import PlaceOrderModal from '../modals/PlaceOrderModal'
@@ -25,13 +25,14 @@ const NAV: NavItem[] = [
   { to: '/app/watchlist',    icon: BookOpen,        label: 'Watchlist'     },
   { to: '/app/strategies',      icon: GitBranch,  label: 'Strategies'    },
   { to: '/app/strategy-builder', icon: Cpu,        label: 'Strat Builder'  },
-  { to: '/app/positions',        icon: ShieldAlert, label: 'Positions'     },
-  { to: '/app/greeks',           icon: Calculator,  label: 'Greeks'         },
+
   { to: '/app/analytics',        icon: BarChart2,   label: 'Analytics'      },
+  { to: '/app/broker-accounts',  icon: Activity,    label: 'Brokers'        },
   { to: '/app/settings',         icon: Settings,    label: 'Settings'       },
 ]
 
 export default function AppLayout() {
+  useDashboardData()  // HTTP fallback for dashboard data (WS is primary)
   const { sidebarOpen, setSidebarOpen, openOrderModal,
           searchOpen, setSearchOpen, shortcutsOpen, setShortcutsOpen } = useUIStore()
   const { user, accounts, activeAccountId, setActiveAccount, isBrokerLive } = useAuthStore()
@@ -62,8 +63,8 @@ export default function AppLayout() {
     '/app': 'Dashboard', '/app/market': 'Market & Screener',
     '/app/option-chain': 'Option Chain', '/app/watchlist': 'Watchlist & Chart',
     '/app/strategies': 'Strategies', '/app/strategy-builder': 'Strategy Builder',
-    '/app/positions': 'Position Manager', '/app/greeks': 'Greeks Calculator',
     '/app/analytics': 'Historical Analytics',
+    '/app/broker-accounts': 'Broker Accounts',
     '/app/settings': 'Settings',
   }
   const title = pageTitle[location.pathname] ?? location.pathname.split('/').filter(Boolean).pop() ?? 'Dashboard'

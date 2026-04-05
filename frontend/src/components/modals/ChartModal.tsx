@@ -246,27 +246,6 @@ export default function ChartModal() {
 }
 
 function generateMockCandles(interval: ChartInterval) {
-  const msPerBar: Record<ChartInterval, number> = {
-    '1m': 60000, '3m': 180000, '5m': 300000, '10m': 600000,
-    '15m': 900000, '30m': 1800000, '1h': 3600000, '2h': 7200000,
-    '4h': 14400000, 'D': 86400000, 'W': 604800000,
-  }
-  const count = interval === 'D' ? 300 : interval === 'W' ? 150 : 200
-  const bars: any[] = []
-  let t = Date.now() - count * (msPerBar[interval] ?? 900000)
-  let price = 19850 + Math.random() * 500
-  for (let i = 0; i < count; i++) {
-    const o = price
-    const h = o + Math.abs((Math.random() - 0.3) * o * 0.01)
-    const l = o - Math.abs((Math.random() - 0.3) * o * 0.01)
-    const c = l + Math.random() * (h - l)
-    price = c
-    bars.push({
-      time: Math.floor(t / 1000) as UTCTimestamp,
-      open: +o.toFixed(2), high: +h.toFixed(2), low: +l.toFixed(2), close: +c.toFixed(2),
-      volume: Math.floor(100000 + Math.random() * 900000),
-    })
-    t += msPerBar[interval] ?? 900000
-  }
-  return bars
+  // No fake data — return empty array. Chart will show empty state.
+  return [] as { time: UTCTimestamp; open: number; high: number; low: number; close: number; volume: number }[]
 }

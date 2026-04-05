@@ -85,30 +85,21 @@ class _MinimalShoonyaConfig:
         }
 
 
-# ── Demo market data ─────────────────────────────────────────────────────────
-import random
+# ── Empty market data stubs (no fake data) ─────────────────────────────────────────────────────────
 
 def _make_demo_quote(symbol: str) -> dict:
-    base_prices = {
-        "NIFTY": 23500, "BANKNIFTY": 51000, "FINNIFTY": 22300,
-        "MIDCPNIFTY": 11500, "SENSEX": 76000,
-    }
-    base = base_prices.get(symbol, 1000 + hash(symbol) % 9000)
-    ltp = base + random.uniform(-base * 0.01, base * 0.01)
-    prev = ltp - random.uniform(-base * 0.005, base * 0.005)
-    chg_pct = ((ltp - prev) / prev) * 100
     return {
         "symbol": symbol,
-        "ltp": round(ltp, 2),
-        "close": round(prev, 2),
-        "change": round(ltp - prev, 2),
-        "changePct": round(chg_pct, 4),
-        "open": round(base + random.uniform(-50, 50), 2),
-        "high": round(ltp + random.uniform(0, base * 0.005), 2),
-        "low":  round(ltp - random.uniform(0, base * 0.005), 2),
-        "volume": random.randint(1_000_000, 50_000_000),
+        "ltp": 0,
+        "close": 0,
+        "change": 0,
+        "changePct": 0,
+        "open": 0,
+        "high": 0,
+        "low": 0,
+        "volume": 0,
         "oi": 0,
-        "source": "demo",
+        "source": "unavailable",
     }
 
 
@@ -361,11 +352,10 @@ class BrokerSession:
         logger.info("place_order: %s", order)
 
         if self._demo_mode:
-            import time as _t
             return {
-                "success": True,
-                "orderId": f"DEMO-{int(_t.time())}",
-                "message": "Order placed in DEMO mode",
+                "success": False,
+                "orderId": "",
+                "message": "Cannot place orders — no broker connected (demo mode)",
             }
 
         if not self._client:
@@ -493,67 +483,15 @@ class BrokerSession:
 # ── Demo option chain ─────────────────────────────────────────────────────────
 
 def _make_demo_option_chain(symbol: str, strikes: int = 10) -> dict:
-    base = {"NIFTY": 23500, "BANKNIFTY": 51000, "FINNIFTY": 22300}.get(symbol, 20000)
-    atm = round(base / 50) * 50
-    rows = []
-    for i in range(-strikes, strikes + 1):
-        strike = atm + i * 50
-        call_iv = max(0.05, 0.2 - abs(i) * 0.01 + random.uniform(-0.02, 0.02))
-        put_iv  = max(0.05, 0.2 - abs(i) * 0.01 + random.uniform(-0.02, 0.02))
-        call_ltp = max(0.5, (base - strike) if strike < base else (base * call_iv * 0.3))
-        put_ltp  = max(0.5, (strike - base) if strike > base else (base * put_iv  * 0.3))
-        base_oi  = random.randint(100, 5000) * 75
-        # Greeks approximations
-        call_delta = round(max(0.01, min(0.99, 0.5 - i * 0.05)), 4)
-        put_delta  = round(max(-0.99, min(-0.01, -0.5 + i * 0.05)), 4)
-        # Gamma peaks at ATM, decays away from it
-        gamma_val  = round(max(0.0001, 0.002 * (1 - abs(i) * 0.08)), 6)
-        # Theta is negative (time decay), larger for ATM
-        call_theta = round(-max(0.1, call_ltp * 0.01 * (1 - abs(i) * 0.04)), 4)
-        put_theta  = round(-max(0.1, put_ltp  * 0.01 * (1 - abs(i) * 0.04)), 4)
-        # Vega: higher for ATM
-        vega_val   = round(max(0.5, 15 * (1 - abs(i) * 0.07)), 4)
-        rows.append({
-            "strike": strike,
-            "call": {
-                "ltp": round(call_ltp, 2),
-                "iv": round(call_iv * 100, 2),
-                "delta": call_delta,
-                "gamma": gamma_val,
-                "theta": call_theta,
-                "vega": vega_val,
-                "oi": base_oi + random.randint(-500, 500) * 75,
-                "oiChange": random.randint(-200, 200) * 75,
-                "volume": random.randint(1000, 100000),
-                "bid": round(call_ltp * 0.995, 2),
-                "ask": round(call_ltp * 1.005, 2),
-            },
-            "put": {
-                "ltp": round(put_ltp, 2),
-                "iv": round(put_iv * 100, 2),
-                "delta": put_delta,
-                "gamma": gamma_val,
-                "theta": put_theta,
-                "vega": vega_val,
-                "oi": base_oi + random.randint(-500, 500) * 75,
-                "oiChange": random.randint(-200, 200) * 75,
-                "volume": random.randint(1000, 100000),
-                "bid": round(put_ltp * 0.995, 2),
-                "ask": round(put_ltp * 1.005, 2),
-            },
-        })
-    total_ce_oi = sum(r["call"]["oi"] for r in rows)
-    total_pe_oi = sum(r["put"]["oi"]  for r in rows)
-    pcr = round(total_pe_oi / max(total_ce_oi, 1), 4)
     return {
         "underlying": symbol,
-        "underlyingLtp": base + random.uniform(-50, 50),
-        "expiry": "28-NOV-2024",
-        "expiries": ["28-NOV-2024", "05-DEC-2024", "19-DEC-2024"],
-        "pcr": pcr,
-        "maxPainStrike": atm,
-        "rows": rows,
-        "source": "demo",
+        "underlyingLtp": 0,
+        "expiry": "",
+        "expiries": [],
+        "pcr": 0,
+        "maxPainStrike": 0,
+        "rows": [],
+        "source": "unavailable",
     }
 
 

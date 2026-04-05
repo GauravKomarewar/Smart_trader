@@ -32,14 +32,17 @@ export default function HistoricalAnalyticsPage() {
     setLoading(true)
     setError('')
     try {
-      const [eq, st, bd] = await Promise.all([
+      const results = await Promise.allSettled([
         api.get<EquityPoint[]>(`/analytics/equity-curve?days=${days}`),
         api.get<Statistics>(`/analytics/statistics?days=${days}`),
         api.get<StrategyBreakdown[]>(`/analytics/strategy-breakdown?days=${days}`),
       ])
-      setEquity(eq)
+      const eq = results[0].status === 'fulfilled' ? results[0].value : []
+      const st = results[1].status === 'fulfilled' ? results[1].value : null
+      const bd = results[2].status === 'fulfilled' ? results[2].value : []
+      setEquity(Array.isArray(eq) ? eq : [])
       setStats(st)
-      setBreakdown(bd)
+      setBreakdown(Array.isArray(bd) ? bd : [])
     } catch (e: any) {
       setError(e.message || 'Failed to load analytics')
     } finally {
@@ -86,9 +89,16 @@ export default function HistoricalAnalyticsPage() {
 
       {loading ? (
         <div className="flex justify-center py-20"><Loader2 className="animate-spin text-blue-400" size={32} /></div>
+      ) : !stats && equity.length === 0 && breakdown.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <BarChart2 size={48} className="text-gray-600 mb-4" />
+          <h2 className="text-lg font-semibold text-gray-300 mb-2">No Analytics Data Yet</h2>
+          <p className="text-sm text-gray-500 max-w-md">
+            Analytics will populate as you trade. Run strategies and execute trades to see PnL curves, win rates, and strategy breakdowns here.
+          </p>
+        </div>
       ) : (
         <>
-          {/* Stats cards */}
           {stats && (
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
               <StatCard label="Total PnL"    value={fmtINR(stats.total_pnl)} color={stats.total_pnl >= 0 ? 'green' : 'red'} />

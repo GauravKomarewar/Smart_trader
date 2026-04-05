@@ -379,9 +379,7 @@ class OrderManagementSystem:
         pos.ltp = price
 
     def _get_demo_ltp(self, symbol: str) -> float:
-        import random
-        base = 1000 + hash(symbol) % 4000
-        return round(base * (1 + random.uniform(-0.01, 0.01)), 2)
+        return 0.0
 
 
 # ── OMS Router ────────────────────────────────────────────────────────────────

@@ -1,14 +1,20 @@
 /* ═══════════════════════════════════════════════
    SMART TRADER — WebSocket manager
    Auto-reconnect, subscription-based feed
+   Handles: dashboard, broker_accounts, broker_data,
+            quote, order_update, position_update, heartbeat
    ═══════════════════════════════════════════════ */
 import type { Quote } from '../types'
 
-type WsEventType = 'quote' | 'order_update' | 'position_update' | 'alert' | 'heartbeat'
+type WsEventType =
+  | 'quote' | 'order_update' | 'position_update' | 'alert' | 'heartbeat'
+  | 'dashboard' | 'broker_accounts' | 'broker_data'
+  | 'broker_subscribed' | 'broker_unsubscribed' | 'pong'
 
 interface WsMessage {
   type: WsEventType
   data: unknown
+  ts?: number
 }
 
 type Subscriber<T = unknown> = (data: T) => void
@@ -20,8 +26,8 @@ class SmartTraderWS {
   private maxDelay = 30_000
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private subs: Map<WsEventType, Set<Subscriber>> = new Map()
-  private subscribed = new Set<string>()  // token subscriptions
   private _open = false
+  private _subscribedBroker: string | null = null
 
   get isOpen() { return this._open }
 
@@ -39,9 +45,9 @@ class SmartTraderWS {
       this._open = true
       this.reconnectDelay = 2000
       this._startPing()
-      // re-subscribe all tokens
-      if (this.subscribed.size > 0) {
-        this._send({ action: 'subscribe', tokens: [...this.subscribed] })
+      // restore broker subscription on reconnect
+      if (this._subscribedBroker) {
+        this._send({ action: 'subscribe_broker', config_id: this._subscribedBroker })
       }
     }
 
@@ -79,14 +85,16 @@ class SmartTraderWS {
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null }
   }
 
-  subscribe(tokens: string[]) {
-    tokens.forEach(t => this.subscribed.add(t))
-    this._send({ action: 'subscribe', tokens })
+  /** Subscribe to a specific broker's filtered data feed */
+  subscribeBroker(configId: string) {
+    this._subscribedBroker = configId
+    this._send({ action: 'subscribe_broker', config_id: configId })
   }
 
-  unsubscribe(tokens: string[]) {
-    tokens.forEach(t => this.subscribed.delete(t))
-    this._send({ action: 'unsubscribe', tokens })
+  /** Unsubscribe from broker-specific feed */
+  unsubscribeBroker() {
+    this._subscribedBroker = null
+    this._send({ action: 'unsubscribe_broker' })
   }
 
   on<T>(event: WsEventType, handler: Subscriber<T>) {
@@ -100,6 +108,7 @@ class SmartTraderWS {
 
   disconnect() {
     this._stopPing()
+    this._subscribedBroker = null
     if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null }
     this._open = false
   }

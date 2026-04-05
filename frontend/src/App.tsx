@@ -1,7 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect } from 'react'
 import { useAuthStore, useToastStore, useSettingsStore } from './stores'
-import { useAuthCheck } from './hooks'
+import { useAuthCheck, useLiveData } from './hooks'
 import AppLayout from './components/layout/AppLayout'
 import LandingPage from './pages/LandingPage'
 import LoginPage from './pages/LoginPage'
@@ -15,9 +15,8 @@ import WatchlistChartPage from './pages/WatchlistChartPage'
 import StrategyPage from './pages/StrategyPage'
 import StrategyBuilderPage from './pages/StrategyBuilderPage'
 import SettingsPage from './pages/SettingsPage'
-import PositionManagerPage from './pages/PositionManagerPage'
-import GreeksDashboardPage from './pages/GreeksDashboardPage'
 import HistoricalAnalyticsPage from './pages/HistoricalAnalyticsPage'
+import BrokerAccountsPage from './pages/BrokerAccountsPage'
 import ToastContainer from './components/common/ToastContainer'
 
 /* ── Apply theme + font globally (works on every page) ── */
@@ -69,6 +68,7 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   useAuthCheck()
+  useLiveData()
 
   return (
     <>
@@ -102,9 +102,9 @@ export default function App() {
           <Route path="watchlist" element={<WatchlistChartPage />} />
           <Route path="strategies" element={<StrategyPage />} />
           <Route path="strategy-builder" element={<StrategyBuilderPage />} />
-          <Route path="positions" element={<PositionManagerPage />} />
-          <Route path="greeks" element={<GreeksDashboardPage />} />
+
           <Route path="analytics" element={<HistoricalAnalyticsPage />} />
+          <Route path="broker-accounts" element={<BrokerAccountsPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="settings/:tab" element={<SettingsPage />} />
         </Route>

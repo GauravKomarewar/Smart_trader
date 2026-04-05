@@ -1048,72 +1048,119 @@ def _connect_fyers(
 
 def _fyers_direct_login(creds: dict, log) -> str:
     """
-    Fallback: use fyers_apiv3 directly (no shoonya_platform wrapper).
-    Performs TOTP-based authcode flow and returns the access token.
+    Perform Fyers TOTP-based login using the v2 API endpoints.
+    Flow: send_login_otp_v2 → verify_otp (TOTP) → verify_pin_v2 → token exchange.
+    Returns the access token string.
     """
+    import base64
     import pyotp
     import requests as _req
+    from urllib.parse import parse_qs, urlparse
+    from datetime import datetime
 
     client_id  = creds["CLIENT_ID"]
     app_id     = creds["APP_ID"]
     secret_key = creds["SECRET_KEY"]
     totp_key   = creds["TOTP_KEY"]
     pin        = creds["PIN"]
+    redirect_url = creds.get("REDIRECT_URL", "https://trade.fyers.in/api-login/redirect-uri/index.html")
+
+    def _b64(s):
+        return base64.b64encode(str(s).encode()).decode()
 
     log.info("Fyers direct login: client_id=%s app_id=%s", client_id, app_id)
 
     try:
-        from fyers_apiv3.fyersModel import SessionModel as _FyersSessionModel
+        from fyers_apiv3 import fyersModel as _fyersModel
     except ImportError:
         raise RuntimeError(
             "fyers_apiv3 not installed. Run: pip install fyers-apiv3"
         )
 
-    session_model = _FyersSessionModel(
-        client_id=app_id,
-        secret_key=secret_key,
-        redirect_uri="https://trade.fyers.in/api-login/redirect-uri/index.html",
-        response_type="code",
-        grant_type="authorization_code",
-    )
-
-    # Step A: get auth URL
-    auth_url = session_model.generate_authcode()
-    log.debug("Fyers auth URL: %s", auth_url)
-
-    # Step B: automated TOTP + PIN auth via undocumented verify endpoint
-    totp_code = pyotp.TOTP(totp_key).now()
     verify_url = "https://api-t2.fyers.in/vagator/v2"
 
-    # Login with client_id + PIN
+    # Step 1: Send login OTP (v2 endpoint, base64-encoded fy_id)
     r1 = _req.post(
-        f"{verify_url}/send_login_otp",
-        json={"fy_id": client_id, "app_id": "2"},
+        f"{verify_url}/send_login_otp_v2",
+        json={"fy_id": _b64(client_id), "app_id": "2"},
         timeout=15,
     )
     r1.raise_for_status()
-    request_key = r1.json().get("request_key", "")
+    j1 = r1.json()
+    request_key1 = j1.get("request_key", "")
+    if not request_key1:
+        raise RuntimeError(f"Fyers send_login_otp_v2 failed: {j1}")
+    log.debug("Fyers Step 1 OK: OTP sent")
 
+    # Wait if near TOTP boundary to avoid stale code
+    if datetime.now().second % 30 > 27:
+        import time
+        time.sleep(5)
+
+    # Step 2: Verify OTP with TOTP code
+    totp_code = pyotp.TOTP(totp_key).now()
     r2 = _req.post(
-        f"{verify_url}/verify_pin",
-        json={"request_key": request_key, "identity_type": "pin", "identifier": pin},
+        f"{verify_url}/verify_otp",
+        json={"request_key": request_key1, "otp": totp_code},
         timeout=15,
     )
     r2.raise_for_status()
-    request_key2 = r2.json().get("request_key", "")
+    j2 = r2.json()
+    request_key2 = j2.get("request_key", "")
+    if not request_key2:
+        raise RuntimeError(f"Fyers verify_otp failed: {j2}")
+    log.debug("Fyers Step 2 OK: TOTP verified")
 
+    # Step 3: Verify PIN (v2 endpoint, base64-encoded pin)
     r3 = _req.post(
-        f"{verify_url}/verify_otp",
-        json={"request_key": request_key2, "identity_type": "totp", "identifier": totp_code},
+        f"{verify_url}/verify_pin_v2",
+        json={"request_key": request_key2, "identity_type": "pin", "identifier": _b64(pin)},
         timeout=15,
     )
     r3.raise_for_status()
-    auth_code_data = r3.json().get("data", {})
-    auth_code = auth_code_data.get("authorization_code", "")
-    if not auth_code:
-        raise RuntimeError(f"Fyers TOTP auth failed: {r3.json()}")
+    j3 = r3.json()
+    bearer_token = j3.get("data", {}).get("access_token", "")
+    if not bearer_token:
+        raise RuntimeError(f"Fyers verify_pin_v2 failed: {j3}")
+    log.debug("Fyers Step 3 OK: PIN verified")
 
-    # Step C: exchange auth_code for access token
+    # Step 4: Exchange bearer for auth_code via token endpoint
+    ses = _req.Session()
+    ses.headers.update({"authorization": f"Bearer {bearer_token}"})
+    r4 = ses.post(
+        "https://api-t1.fyers.in/api/v3/token",
+        json={
+            "fyers_id": client_id,
+            "app_id": app_id[:-4],  # strip "-100" suffix
+            "redirect_uri": redirect_url,
+            "appType": "100",
+            "code_challenge": "",
+            "state": "None",
+            "scope": "",
+            "nonce": "",
+            "response_type": "code",
+            "create_cookie": True,
+        },
+        timeout=15,
+    )
+    r4.raise_for_status()
+    j4 = r4.json()
+    token_url = j4.get("Url", "")
+    if not token_url:
+        raise RuntimeError(f"Fyers token endpoint failed: {j4}")
+    auth_code = parse_qs(urlparse(token_url).query).get("auth_code", [""])[0]
+    if not auth_code:
+        raise RuntimeError(f"No auth_code in Fyers redirect URL: {token_url}")
+    log.debug("Fyers Step 4 OK: got auth_code")
+
+    # Step 5: Generate access token via SessionModel
+    session_model = _fyersModel.SessionModel(
+        client_id=app_id,
+        secret_key=secret_key,
+        redirect_uri=redirect_url,
+        response_type="code",
+        grant_type="authorization_code",
+    )
     session_model.set_token(auth_code)
     token_resp = session_model.generate_token()
     access_token = token_resp.get("access_token", "")

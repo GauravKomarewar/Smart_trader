@@ -7,7 +7,7 @@ import { createChart, CandlestickSeries, HistogramSeries, type IChartApi, type I
 import { useWatchlistStore, useToastStore, useUIStore } from '../stores'
 import { useInstrumentSearch, useKeyboard } from '../hooks'
 import { cn, fmtNum, changeCls, fmtVol } from '../lib/utils'
-import { DEMO_INDICES, DEMO_SCREENER } from '../lib/mockData'
+import { api } from '../lib/api'
 import {
   Search, Plus, X, BarChart2, BookOpen, ChevronDown,
   TrendingUp, TrendingDown, Trash2, MoreHorizontal,
@@ -15,13 +15,21 @@ import {
 } from 'lucide-react'
 import type { WatchlistItem, ChartInterval } from '../types'
 
-// ── Mock LTP lookup ────────────────────────────────
-function getMockQuote(symbol: string) {
-  const idx = DEMO_INDICES.find(i => i.symbol === symbol)
-  if (idx) return { ltp: idx.ltp, changePct: idx.changePct, change: idx.change, volume: idx.volume }
-  const sc = DEMO_SCREENER.find(s => s.symbol === symbol || s.tradingsymbol === symbol)
-  if (sc) return { ltp: sc.ltp, changePct: sc.changePct, change: sc.change, volume: sc.volume }
-  return { ltp: 1000 + Math.random() * 4000, changePct: (Math.random() - 0.5) * 4, change: 0, volume: Math.floor(Math.random() * 1e6) }
+// ── Live quote cache (fetched from API) ──────────────────
+const _quoteCache: Record<string, { ltp: number; changePct: number; change: number; volume: number }> = {}
+
+function getCachedQuote(symbol: string) {
+  return _quoteCache[symbol] ?? { ltp: 0, changePct: 0, change: 0, volume: 0 }
+}
+
+async function fetchQuote(symbol: string) {
+  try {
+    const res = await api.get(`/market/quote/${encodeURIComponent(symbol)}`) as any
+    if (res && res.ltp) {
+      _quoteCache[symbol] = { ltp: res.ltp, changePct: res.changePct ?? 0, change: res.change ?? 0, volume: res.volume ?? 0 }
+    }
+  } catch { /* silent */ }
+  return getCachedQuote(symbol)
 }
 
 const CHART_INTERVALS: ChartInterval[] = ['1m','3m','5m','15m','30m','1h','4h','D','W']
@@ -242,9 +250,15 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
   onSelect: () => void
   onRemove: () => void
 }) {
-  const quote = getMockQuote(item.symbol)
+  const [quote, setQuote] = useState(getCachedQuote(item.symbol))
   const { openOrderModal } = useUIStore()
   const [hover, setHover] = useState(false)
+
+  useEffect(() => {
+    fetchQuote(item.symbol).then(setQuote)
+    const t = setInterval(() => fetchQuote(item.symbol).then(setQuote), 5000)
+    return () => clearInterval(t)
+  }, [item.symbol])
 
   return (
     <div
@@ -299,30 +313,13 @@ function ChartPanel({ symbol }: { symbol: string }) {
   const [interval, setInterval] = useState<ChartInterval>('5m')
   const { openOrderModal, openChartModal } = useUIStore()
 
-  const quote = getMockQuote(symbol)
+  const [quote, setQuote] = useState(getCachedQuote(symbol))
 
-  // Generate mock OHLCV data
-  function generateCandles(sym: string, ivl: ChartInterval) {
-    const bars: {time: UTCTimestamp; open: number; high: number; low: number; close: number}[] = []
-    const count = ivl === 'D' ? 200 : ivl === 'W' ? 100 : 100
-    const msPerBar: Record<ChartInterval, number> = {
-      '1m': 60000, '3m': 180000, '5m': 300000, '10m': 600000,
-      '15m': 900000, '30m': 1800000, '1h': 3600000, '2h': 7200000,
-      '4h': 14400000, 'D': 86400000, 'W': 604800000,
-    }
-    let t = Date.now() - count * (msPerBar[ivl] ?? 300000)
-    let price = quote.ltp * 0.9
-    for (let i = 0; i < count; i++) {
-      const o = price
-      const h = o + Math.abs((Math.random() - 0.3) * o * 0.012)
-      const l = o - Math.abs((Math.random() - 0.3) * o * 0.012)
-      const c = l + Math.random() * (h - l)
-      price = c
-    bars.push({ time: Math.floor(t / 1000) as UTCTimestamp, open: +o.toFixed(2), high: +h.toFixed(2), low: +l.toFixed(2), close: +c.toFixed(2) })
-      t += msPerBar[ivl] ?? 300000
-    }
-    return bars
-  }
+  useEffect(() => {
+    fetchQuote(symbol).then(setQuote)
+    const t = window.setInterval(() => fetchQuote(symbol).then(setQuote), 5000)
+    return () => clearInterval(t)
+  }, [symbol])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -364,13 +361,12 @@ function ChartPanel({ symbol }: { symbol: string }) {
     })
     volSeriesRef.current = volSeries
 
-    const candles = generateCandles(symbol, interval)
-    series.setData(candles)
-    volSeries.setData(candles.map(c => ({
-      time: c.time,
-      value: Math.floor(Math.random() * 500000 + 50000),
-      color: c.close >= c.open ? 'rgba(34,197,94,.4)' : 'rgba(244,63,94,.4)',
-    })))
+    // No candle data available — chart will be empty until live data source is connected
+    // Show a single point at current LTP if available
+    if (quote.ltp > 0) {
+      const now = Math.floor(Date.now() / 1000) as UTCTimestamp
+      series.setData([{ time: now, open: quote.ltp, high: quote.ltp, low: quote.ltp, close: quote.ltp }])
+    }
     chart.timeScale().fitContent()
 
     const ro = new ResizeObserver(() => {

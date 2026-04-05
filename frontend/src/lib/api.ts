@@ -100,6 +100,8 @@ export const api = {
   livePositions: () => api.get<{ data: any[]; count: number }>('/orders/positions'),
   liveOrders:    () => api.get<{ data: any[]; count: number }>('/orders/book'),
   accountSummary: () => api.get<{ accounts: any[]; count: number }>('/orders/account-summary'),
+  brokerAccounts: () => api.get<{ accounts: any[]; count: number }>('/orders/broker-accounts'),
+  brokerData: (configId: string) => api.get<any>(`/orders/broker-data?config_id=${configId}`),
 
   // ── Broker diagnostics ──
   allSessions: () => api.get<any[]>('/broker/all-sessions'),
@@ -124,7 +126,7 @@ export const api = {
 
   // ── Orders ──
   orders:       (accountId: string) => api.get(`/orders?account=${accountId}`),
-  placeOrder:   (data: unknown)     => api.post('/orders', data),
+  placeOrder:   (data: unknown)     => api.post('/orders/place', data),
   cancelOrder:  (id: string)        => api.delete(`/orders/${id}`),
   modifyOrder:  (id: string, data: unknown) => api.patch(`/orders/${id}`, data),
 

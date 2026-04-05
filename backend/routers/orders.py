@@ -602,3 +602,316 @@ async def get_account_summary(
         })
 
     return {"accounts": summaries, "count": len(summaries)}
+
+
+# ── Enriched Broker Account Cards ─────────────────────────────────────────────
+
+@router.get("/broker-accounts")
+async def get_broker_accounts(
+    payload: dict = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Return enriched per-broker account cards for the dashboard.
+    Each card includes: cash, collateral, client_id, email, margin used,
+    day P&L, connection status, risk manager status, trades today, orders today.
+    """
+    user_id = payload["sub"]
+    from broker.multi_broker import registry as mb
+    from db.database import BrokerConfig as DBConfig, BrokerSession as DBSess
+
+    live_sessions = mb.list_live_sessions(user_id)
+
+    # All DB broker configs for this user
+    db_configs = (
+        db.query(DBConfig)
+        .filter(DBConfig.user_id == user_id, DBConfig.is_active == True)
+        .all()
+    )
+    db_by_id = {str(c.id): c for c in db_configs}
+
+    accounts = []
+    seen_ids = set()
+
+    for sess in live_sessions:
+        seen_ids.add(sess.config_id)
+        limits = {}
+        positions = []
+        orders = []
+        trades = []
+
+        try:
+            limits = sess.get_limits() or {}
+        except Exception:
+            pass
+        try:
+            positions = sess.get_positions() or []
+        except Exception:
+            pass
+        try:
+            orders = sess.get_order_book() or []
+        except Exception:
+            pass
+        try:
+            trades = sess.get_tradebook() or []
+        except Exception:
+            pass
+
+        # Calculate P&L from positions
+        day_pnl = 0.0
+        unrealized_pnl = 0.0
+        realized_pnl = 0.0
+        for p in positions:
+            if isinstance(p, dict):
+                u = float(p.get("unrealised_pnl") or p.get("pnl") or p.get("urmtom", 0) or 0)
+                r = float(p.get("realised_pnl") or p.get("rpnl", 0) or 0)
+                unrealized_pnl += u
+                realized_pnl += r
+                day_pnl += u + r
+            elif hasattr(p, "pnl"):
+                u = float(getattr(p, "unrealised_pnl", 0) or getattr(p, "pnl", 0) or 0)
+                r = float(getattr(p, "realised_pnl", 0) or 0)
+                unrealized_pnl += u
+                realized_pnl += r
+                day_pnl += u + r
+
+        # Funds: handle both adapter format (Funds.to_dict()) and raw client format
+        # Adapter keys: available_cash, used_margin, total_balance, realised_pnl, unrealised_pnl, collateral
+        # Legacy keys: cash, marginUsed, marginAvailable, totalBalance, raw
+        cash = float(
+            limits.get("available_cash")
+            or limits.get("cash")
+            or limits.get("marginAvailable")
+            or limits.get("net")
+            or 0
+        )
+        collateral = float(limits.get("collateral") or limits.get("collateralvalue") or 0)
+        available = float(
+            limits.get("available_cash")
+            or limits.get("marginAvailable")
+            or limits.get("cash")
+            or limits.get("net")
+            or 0
+        )
+        used = float(
+            limits.get("used_margin")
+            or limits.get("marginUsed")
+            or limits.get("utilizedDebits")
+            or 0
+        )
+        total = float(
+            limits.get("total_balance")
+            or limits.get("totalBalance")
+            or limits.get("grossAvailableMargin")
+            or (available + used)
+            or 0
+        )
+        # Use fund-level PnL if positions didn't provide any
+        if day_pnl == 0 and unrealized_pnl == 0:
+            unrealized_pnl = float(limits.get("unrealised_pnl") or limits.get("unrealizedPnl") or 0)
+            realized_pnl = float(limits.get("realised_pnl") or limits.get("realizedPnl") or 0)
+            day_pnl = unrealized_pnl + realized_pnl
+        payin = float(limits.get("payin") or 0)
+        payout = float(limits.get("payout") or 0)
+
+        # Count completed orders and trades
+        orders_count = len(orders)
+        trades_count = len(trades)
+        completed_orders = sum(1 for o in orders if _get_order_status(o) == "COMPLETE")
+        open_orders = sum(1 for o in orders if _get_order_status(o) in ("OPEN", "PENDING", "TRIGGER_PENDING"))
+
+        # Risk manager status
+        risk_info = _get_risk_status(user_id, sess.config_id, sess.broker_id, sess.client_id)
+
+        # DB session info
+        db_sess = (
+            db.query(DBSess)
+            .filter(DBSess.config_id == sess.config_id, DBSess.user_id == user_id)
+            .order_by(DBSess.login_at.desc())
+            .first()
+        )
+        login_at = db_sess.login_at.isoformat() if db_sess and db_sess.login_at else None
+
+        db_cfg = db_by_id.get(sess.config_id)
+
+        accounts.append({
+            "config_id":      sess.config_id,
+            "broker_id":      sess.broker_id,
+            "broker_name":    (db_cfg.broker_name if db_cfg else sess.broker_id).title(),
+            "client_id":      sess.client_id,
+            "is_live":        True,
+            "mode":           sess.mode,
+            "connected_at":   sess.connected_at.isoformat() if sess.connected_at else None,
+            "login_at":       login_at,
+            # Financials — from broker API
+            "cash":           cash,
+            "collateral":     collateral,
+            "available_margin": available,
+            "used_margin":    used,
+            "total_balance":  total,
+            "payin":          payin,
+            "payout":         payout,
+            "day_pnl":        round(day_pnl, 2),
+            "unrealized_pnl": round(unrealized_pnl, 2),
+            "realized_pnl":   round(realized_pnl, 2),
+            # Activity
+            "positions_count":  len(positions),
+            "orders_count":     orders_count,
+            "open_orders":      open_orders,
+            "completed_orders": completed_orders,
+            "trades_count":     trades_count,
+            # Risk
+            "risk_status":    risk_info.get("trading_allowed", True),
+            "risk_daily_pnl": risk_info.get("daily_pnl", 0),
+            "risk_halt_reason": risk_info.get("halt_reason"),
+            "risk_force_exit": risk_info.get("force_exit_triggered", False),
+            "error":          sess.error,
+            # Raw broker limits for transparency
+            "raw_limits":     {k: v for k, v in limits.items() if k not in ("raw",)},
+        })
+
+    # Disconnected / offline configs
+    for cfg in db_configs:
+        if cfg.id in seen_ids:
+            continue
+        db_sess = (
+            db.query(DBSess)
+            .filter(DBSess.config_id == cfg.id, DBSess.user_id == user_id)
+            .order_by(DBSess.login_at.desc())
+            .first()
+        )
+        accounts.append({
+            "config_id":      cfg.id,
+            "broker_id":      cfg.broker_id,
+            "broker_name":    (cfg.broker_name or cfg.broker_id).title(),
+            "client_id":      cfg.client_id,
+            "is_live":        False,
+            "mode":           "offline",
+            "connected_at":   None,
+            "login_at":       db_sess.login_at.isoformat() if db_sess and db_sess.login_at else None,
+            "cash": 0, "collateral": 0, "available_margin": 0, "used_margin": 0, "total_balance": 0,
+            "payin": 0, "payout": 0,
+            "day_pnl": 0, "unrealized_pnl": 0, "realized_pnl": 0,
+            "positions_count": 0, "orders_count": 0, "open_orders": 0,
+            "completed_orders": 0, "trades_count": 0,
+            "risk_status": True, "risk_daily_pnl": 0, "risk_halt_reason": None,
+            "risk_force_exit": False, "error": None,
+            "raw_limits": {},
+        })
+
+    return {"accounts": accounts, "count": len(accounts)}
+
+
+def _get_order_status(order) -> str:
+    """Extract order status from raw order dict or model."""
+    if isinstance(order, dict):
+        st = order.get("status", "") or order.get("stat", "")
+        return str(st).upper().replace("_", " ").strip()
+    return str(getattr(order, "status", "")).upper()
+
+
+def _get_risk_status(user_id: str, config_id: str, broker_id: str, client_id: str) -> dict:
+    """Get risk manager status for an account (safe fallback)."""
+    try:
+        from broker.account_risk import get_account_risk
+        rm = get_account_risk(
+            user_id=user_id, config_id=config_id,
+            broker_id=broker_id, client_id=client_id,
+        )
+        return rm.get_status()
+    except Exception:
+        return {"trading_allowed": True, "daily_pnl": 0, "halt_reason": None, "force_exit_triggered": False}
+
+
+# ── Broker-filtered data ──────────────────────────────────────────────────────
+
+@router.get("/broker-data")
+async def get_broker_data(
+    config_id: str,
+    payload: dict = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Return positions/holdings/orders/tradebook for a specific broker account.
+    Uses the same normalization as /dashboard but filtered to ONE config_id.
+    """
+    user_id = payload["sub"]
+    from broker.multi_broker import registry as mb
+
+    sess = mb.get_session(user_id, config_id)
+    if not sess or sess.is_demo:
+        raise HTTPException(404, "Broker account not connected or not found")
+
+    raw_positions = []
+    raw_orders = []
+    raw_holdings = []
+    raw_trades = []
+    limits = {}
+
+    try:
+        raw_positions = sess.get_positions() or []
+    except Exception as e:
+        logger.warning("broker-data: positions failed for %s: %s", config_id[:8], e)
+    try:
+        raw_orders = sess.get_order_book() or []
+    except Exception as e:
+        logger.warning("broker-data: orders failed for %s: %s", config_id[:8], e)
+    try:
+        raw_holdings = sess.get_holdings() or []
+    except Exception as e:
+        logger.debug("broker-data: holdings failed for %s: %s", config_id[:8], e)
+    try:
+        raw_trades = sess.get_tradebook() or []
+    except Exception as e:
+        logger.debug("broker-data: trades failed for %s: %s", config_id[:8], e)
+    try:
+        limits = sess.get_limits() or {}
+    except Exception:
+        pass
+
+    positions = [_normalize_position(p, i) for i, p in enumerate(raw_positions)]
+    orders = [_normalize_order(o, i) for i, o in enumerate(raw_orders)]
+
+    holdings = []
+    for h in raw_holdings:
+        if isinstance(h, dict):
+            holdings.append(h)
+        else:
+            try:
+                holdings.append(h.to_dict() if hasattr(h, 'to_dict') else vars(h))
+            except Exception:
+                pass
+
+    trades = []
+    for t in raw_trades:
+        if isinstance(t, dict):
+            trades.append(t)
+        else:
+            try:
+                trades.append(t.to_dict() if hasattr(t, 'to_dict') else vars(t))
+            except Exception:
+                pass
+
+    total_pnl = sum(p["pnl"] for p in positions)
+    realized_pnl = 0.0
+    for rp in raw_positions:
+        if isinstance(rp, dict):
+            realized_pnl += float(rp.get("rpnl") or rp.get("realised_pnl") or rp.get("realized_pnl") or 0)
+
+    return {
+        "config_id": config_id,
+        "broker_id": sess.broker_id,
+        "client_id": sess.client_id,
+        "positions": positions,
+        "holdings": holdings,
+        "orders": orders,
+        "trades": trades,
+        "accountSummary": {
+            "totalEquity": limits.get("totalBalance") or limits.get("grossAvailableMargin", 0.0),
+            "dayPnl": total_pnl,
+            "unrealizedPnl": total_pnl - realized_pnl,
+            "realizedPnl": realized_pnl,
+            "usedMargin": limits.get("marginUsed") or limits.get("utilizedDebits", 0.0),
+            "availableMargin": limits.get("marginAvailable") or limits.get("cash", 0.0),
+        },
+    }

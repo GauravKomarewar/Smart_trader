@@ -300,3 +300,59 @@ export const useChartStore = create<ChartStore>((set) => ({
       : [...s.showIndicators, name],
   })),
 }))
+
+// ── Live Broker Accounts Store (fed by WebSocket) ──
+export interface BrokerAccountWS {
+  config_id: string
+  broker_id: string
+  broker_name: string
+  client_id: string
+  is_live: boolean
+  mode: string
+  connected_at: string | null
+  cash: number
+  collateral: number
+  available_margin: number
+  used_margin: number
+  total_balance: number
+  payin: number
+  payout: number
+  day_pnl: number
+  unrealized_pnl: number
+  realized_pnl: number
+  positions_count: number
+  orders_count: number
+  open_orders: number
+  completed_orders: number
+  trades_count: number
+  risk_status: boolean
+  risk_daily_pnl: number
+  risk_halt_reason: string | null
+  risk_force_exit: boolean
+  error: string | null
+  raw_limits: Record<string, any>
+}
+
+interface BrokerDataWS {
+  positions: any[]
+  holdings: any[]
+  orders: any[]
+  trades: any[]
+  config_id: string
+}
+
+interface BrokerAccountsStore {
+  accounts: BrokerAccountWS[]
+  brokerData: BrokerDataWS | null
+  lastUpdate: number
+  setAccounts: (a: BrokerAccountWS[]) => void
+  setBrokerData: (d: BrokerDataWS | null) => void
+}
+
+export const useBrokerAccountsStore = create<BrokerAccountsStore>((set) => ({
+  accounts: [],
+  brokerData: null,
+  lastUpdate: 0,
+  setAccounts: (accounts) => set({ accounts, lastUpdate: Date.now() }),
+  setBrokerData: (brokerData) => set({ brokerData }),
+}))
