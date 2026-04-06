@@ -66,7 +66,15 @@ export function useLiveData() {
 
     // Handlers
     const onDashboard = (data: any) => {
-      if (data) setData(data as DashboardData)
+      if (!data) return
+      // Skip empty pushes when we already have data (prevents flicker from stale sessions)
+      const cur = useDashboardStore.getState().data
+      const incoming = data as DashboardData
+      const hasPositions = incoming.positions && incoming.positions.length > 0
+      const hasOrders = incoming.orders && incoming.orders.length > 0
+      const hasSummary = incoming.accountSummary && Object.values(incoming.accountSummary).some((v: any) => v !== 0)
+      if (!hasPositions && !hasOrders && !hasSummary && cur?.positions?.length) return
+      setData(incoming)
     }
     const onBrokerAccounts = (data: any) => {
       if (Array.isArray(data)) setAccounts(data as BrokerAccountWS[])

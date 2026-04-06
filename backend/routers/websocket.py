@@ -270,7 +270,12 @@ def _build_dashboard(user_id: str) -> dict:
     trades = mb.get_tradebook(user_id)
     funds = mb.get_funds(user_id)
 
-    positions = [_normalize_position(p, i) for i, p in enumerate(raw_positions)]
+    # Filter out closed positions (qty=0) before normalizing
+    active_raw = [
+        p for p in raw_positions
+        if float(p.get("netqty") or p.get("net_quantity") or p.get("qty", 0)) != 0
+    ]
+    positions = [_normalize_position(p, i) for i, p in enumerate(active_raw)]
     orders = [_normalize_order(o, i) for i, o in enumerate(raw_orders)]
 
     total_equity = sum(f.get("available_cash", 0) + f.get("used_margin", 0) for f in funds)
@@ -344,7 +349,12 @@ def _build_broker_data(user_id: str, config_id: str) -> dict | None:
         pass
 
     from routers.orders import _normalize_position, _normalize_order
-    positions = [_normalize_position(p, i) for i, p in enumerate(raw_positions)]
+    # Filter out closed positions (qty=0)
+    active_raw = [
+        p for p in raw_positions
+        if float(p.get("netqty") or p.get("net_quantity") or p.get("qty", 0)) != 0
+    ]
+    positions = [_normalize_position(p, i) for i, p in enumerate(active_raw)]
     orders = [_normalize_order(o, i) for i, o in enumerate(raw_orders)]
 
     return {
@@ -389,8 +399,11 @@ async def live_feed_websocket(websocket: WebSocket):
     subscribed_broker: str | None = None  # config_id of broker to get filtered data for
     stop_event = asyncio.Event()
 
+    _last_good_dashboard: dict | None = None
+
     async def _push_loop():
         """Background task: push data every second."""
+        nonlocal _last_good_dashboard
         cycle = 0
         while not stop_event.is_set():
             try:
@@ -402,6 +415,16 @@ async def live_feed_websocket(websocket: WebSocket):
                     dashboard = await asyncio.get_event_loop().run_in_executor(
                         None, _build_dashboard, user_id
                     )
+                    # Skip pushing empty data when we had good data before (prevents flicker)
+                    has_data = (
+                        dashboard.get("positions")
+                        or dashboard.get("orders")
+                        or any(v for v in dashboard.get("accountSummary", {}).values() if v)
+                    )
+                    if has_data:
+                        _last_good_dashboard = dashboard
+                    elif _last_good_dashboard:
+                        dashboard = _last_good_dashboard
                     await websocket.send_text(json.dumps({
                         "type": "dashboard",
                         "data": dashboard,
