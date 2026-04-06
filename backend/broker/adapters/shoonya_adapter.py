@@ -296,6 +296,24 @@ class ShoonyaAdapter(BrokerAdapter):
             logger.exception("Shoonya place_order error: %s", e)
             return {"success": False, "message": str(e)}
 
+    # ── Market data ──────────────────────────────────────────────────────────
+
+    def get_ltp(self, exchange: str, symbol: str) -> Optional[float]:
+        """Fetch last traded price via Shoonya get_quotes API."""
+        client = getattr(self._session, "_client", None)
+        if client is None:
+            return None
+        try:
+            resp = client.get_quotes(exchange=exchange, token=symbol)
+            if resp and isinstance(resp, dict):
+                lp = resp.get("lp")
+                if lp is not None:
+                    return float(lp)
+            return None
+        except Exception as e:
+            logger.warning("get_ltp error for %s:%s — %s", exchange, symbol, e)
+            return None
+
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         client = getattr(self._session, "_client", None)
         if client is None:

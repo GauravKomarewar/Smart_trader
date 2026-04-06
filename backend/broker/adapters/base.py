@@ -282,6 +282,10 @@ class BrokerAdapter(ABC):
         """Return today's trade fills. Default: empty list."""
         return []
 
+    def get_ltp(self, exchange: str, symbol: str) -> Optional[float]:
+        """Return last traded price for a symbol. Default: None (not supported)."""
+        return None
+
     # ── Helpers for subclasses ─────────────────────────────────────────────────
 
     def _enrich(self, obj: Any) -> Any:

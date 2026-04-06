@@ -722,6 +722,37 @@ class BrokerAccountSession:
                 "retention":     order.get("retention") or "DAY",
             }
 
+            # ── Smart MKT → LIMIT conversion (SEBI compliance) ────────────
+            if normalised["order_type"] == "MARKET":
+                try:
+                    ltp = self._adapter.get_ltp(
+                        normalised["exchange"], normalised["symbol"]
+                    )
+                    if ltp and ltp > 0:
+                        side = normalised["side"]
+                        # Buffer: +0.5% for BUY, -0.5% for SELL to ensure fill
+                        buffer = 1.005 if side == "BUY" else 0.995
+                        smart_price = round(ltp * buffer, 2)
+                        # Snap to tick size 0.05
+                        smart_price = round(round(smart_price / 0.05) * 0.05, 2)
+                        normalised["order_type"] = "LIMIT"
+                        normalised["price"] = smart_price
+                        self._log.info(
+                            "SMART_LIMIT: MKT→LIMIT %s %s @ %.2f (LTP=%.2f, buffer=%.1f%%)",
+                            side, normalised["symbol"], smart_price, ltp,
+                            (buffer - 1) * 100,
+                        )
+                    else:
+                        self._log.warning(
+                            "SMART_LIMIT: LTP unavailable for %s:%s — falling back to MARKET",
+                            normalised["exchange"], normalised["symbol"],
+                        )
+                except Exception as e:
+                    self._log.warning(
+                        "SMART_LIMIT: LTP fetch failed for %s — falling back to MARKET: %s",
+                        normalised["symbol"], e,
+                    )
+
             # Attempt via adapter with ensure_login
             try:
                 result = self._call_with_relogin(self._adapter.place_order, normalised)

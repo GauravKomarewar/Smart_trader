@@ -168,7 +168,10 @@ class TradingBot:
                 "remarks":       getattr(command, "comment", "") or "",
             })
             broker_order_id = (
-                (resp or {}).get("norenordno") or (resp or {}).get("orderid") or ""
+                (resp or {}).get("norenordno")
+                or (resp or {}).get("order_id")
+                or (resp or {}).get("orderid")
+                or ""
             )
 
             # Update DB: CREATED → SENT_TO_BROKER

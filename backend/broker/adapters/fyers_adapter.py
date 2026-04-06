@@ -365,6 +365,26 @@ class FyersAdapter(BrokerAdapter):
             logger.exception("place_order error: %s", e)
             return {"success": False, "message": str(e)}
 
+    # ── Market data ──────────────────────────────────────────────────────────
+
+    def get_ltp(self, exchange: str, symbol: str) -> Optional[float]:
+        """Fetch last traded price via Fyers quotes API."""
+        if not self.is_connected():
+            return None
+        try:
+            fyers_sym = f"{exchange}:{symbol}" if ":" not in symbol else symbol
+            resp = self._client.quotes({"symbols": fyers_sym})
+            if isinstance(resp, dict) and resp.get("s") == "ok":
+                data_list = resp.get("d", [])
+                if data_list:
+                    ltp = data_list[0].get("v", {}).get("lp")
+                    if ltp is not None:
+                        return float(ltp)
+            return None
+        except Exception as e:
+            logger.warning("get_ltp error for %s:%s — %s", exchange, symbol, e)
+            return None
+
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         if not self.is_connected():
             return {"success": False, "message": "Not connected"}

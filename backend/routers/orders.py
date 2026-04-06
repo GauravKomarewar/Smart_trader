@@ -310,6 +310,50 @@ def _normalize_position(p: dict, idx: int) -> dict:
         "option_type": inst.option_type if inst else "",
     }
 
+def _normalize_db_order(rec, idx: int) -> dict:
+    """Convert an OrderRecord from PostgreSQL to the frontend Order schema."""
+    tsym = rec.symbol or f"UNKNOWN{idx}"
+    exch = rec.exchange or "NSE"
+    txn  = rec.side or "BUY"
+    qty  = int(rec.quantity or 0)
+    prc  = float(rec.price or 0)
+    # Map OMS status → dashboard status
+    _st_map = {
+        "CREATED": "PENDING", "SENT_TO_BROKER": "OPEN",
+        "EXECUTED": "COMPLETE", "FAILED": "REJECTED",
+    }
+    status = _st_map.get(rec.status, rec.status or "PENDING")
+    order_id = rec.broker_order_id or rec.command_id
+    placed_at = rec.created_at or datetime.now().isoformat()
+    prctyp  = _order_type_map(rec.order_type or "MARKET")
+    prd     = _prd_map(rec.product or "MIS")
+    return {
+        "id": order_id,
+        "accountId": rec.broker_user or "smart_trader",
+        "orderId": order_id,
+        "commandId": rec.command_id,
+        "symbol": tsym,
+        "tradingsymbol": tsym,
+        "exchange": exch,
+        "type": "OPT" if "CE" in tsym or "PE" in tsym else ("FUT" if "FUT" in tsym else "EQ"),
+        "transactionType": txn,
+        "orderType": prctyp,
+        "product": prd,
+        "quantity": qty,
+        "filledQty": qty if status == "COMPLETE" else 0,
+        "price": prc,
+        "triggerPrice": None,
+        "avgPrice": prc if status == "COMPLETE" else 0,
+        "status": status,
+        "statusMessage": None,
+        "validity": "DAY",
+        "tag": rec.tag or rec.strategy_name,
+        "placedAt": placed_at,
+        "updatedAt": rec.updated_at or placed_at,
+        "source": "smart_trader_db",
+    }
+
+
 def _normalize_order(o: dict, idx: int) -> dict:
     """Map raw Shoonya order fields to frontend Order schema."""
     tsym    = o.get("tsym") or o.get("tradingsymbol") or o.get("symbol", f"UNKNOWN{idx}")
@@ -408,6 +452,21 @@ async def get_dashboard(payload: dict = Depends(current_user), db: Session = Dep
 
     positions = [_normalize_position(p, i) for i, p in enumerate(all_raw_positions)]
     orders = [_normalize_order(o, i) for i, o in enumerate(all_raw_orders)]
+
+    # ── Merge DB orders (always show Smart Trader orders from PostgreSQL) ──
+    try:
+        from trading.persistence.repository import OrderRepository
+        db_repo = OrderRepository(user_id, "__all__")
+        db_records = db_repo.get_all(limit=200)
+        # Build set of broker_order_ids already in broker orders
+        broker_ids = {o.get("orderId") for o in orders if o.get("orderId")}
+        for i, rec in enumerate(db_records):
+            # Skip if broker already returned this order (deduplicate)
+            if rec.broker_order_id and rec.broker_order_id in broker_ids:
+                continue
+            orders.append(_normalize_db_order(rec, len(orders) + i))
+    except Exception as e:
+        logger.warning("Dashboard: failed to merge DB orders: %s", e)
 
     # Normalize holdings
     holdings = []
