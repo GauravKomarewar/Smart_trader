@@ -175,6 +175,116 @@ async def place_order(
     return response
 
 
+class SquareOffRequest(BaseModel):
+    symbol: str
+    exchange: str = "NSE"
+    product: str = "MIS"
+    quantity: int = Field(ge=1)
+    side: str            # "BUY" or "SELL" — the CURRENT position side to close
+    accountId: str       # config_id of the broker account
+
+class SquareOffAllRequest(BaseModel):
+    accountId: str       # config_id of the broker account
+
+
+@router.post("/squareoff")
+async def squareoff_position(
+    req: SquareOffRequest,
+    payload: dict = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Square off a single position by placing a MARKET order in the opposite direction.
+    """
+    from trading.order_intent import OrderIntentPayload, LegPayload, process_order_intent
+    user_id = payload["sub"]
+    exit_direction = "SELL" if req.side.upper() in ("BUY", "B", "LONG") else "BUY"
+    prd_map = {"MIS": "MIS", "NRML": "NRML", "CNC": "CNC",
+               "M": "MIS", "C": "CNC", "I": "NRML", "D": "NRML"}
+    product = prd_map.get(req.product.upper(), req.product.upper())
+    intent = OrderIntentPayload(
+        execution_type="EXIT",
+        strategy_name="manual_squareoff",
+        exchange=req.exchange,
+        broker_accounts=[req.accountId],
+        legs=[LegPayload(
+            tradingsymbol=req.symbol,
+            direction=exit_direction,
+            qty=req.quantity,
+            order_type="MARKET",
+            price=0.0,
+            trigger_price=0.0,
+            product_type=product,
+        )],
+        remarks="EXIT:manual_squareoff",
+    )
+    result = process_order_intent(user_id=user_id, intent=intent, db_session=db)
+    if not result.success:
+        detail = "; ".join(result.errors) if result.errors else "Squareoff failed"
+        raise HTTPException(status_code=400, detail=detail)
+    return {"success": True, "symbol": req.symbol}
+
+
+@router.post("/squareoff-all")
+async def squareoff_all(
+    req: SquareOffAllRequest,
+    payload: dict = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Square off all open positions for a specific broker account.
+    Fetches open positions from DB cache and places MARKET exit orders.
+    """
+    from trading.order_intent import OrderIntentPayload, LegPayload, process_order_intent
+    from managers.supreme_manager import supreme
+    user_id = payload["sub"]
+
+    rows = supreme.get_positions(user_id, config_id=req.accountId)
+    raw_positions = [r["data"] if "data" in r else r for r in rows]
+
+    errors = []
+    success_count = 0
+    for i, p in enumerate(raw_positions):
+        qty = float(p.get("netqty") or p.get("net_quantity") or p.get("qty", 0))
+        if qty == 0:
+            continue  # already flat
+        norm = _normalize_position(p, i)
+        exit_direction = "SELL" if qty > 0 else "BUY"
+        prd = norm.get("product", "MIS")
+        prd_map = {"MIS": "MIS", "NRML": "NRML", "CNC": "CNC"}
+        product = prd_map.get(prd, prd)
+        try:
+            intent = OrderIntentPayload(
+                execution_type="EXIT",
+                strategy_name="manual_squareoff_all",
+                exchange=norm["exchange"],
+                broker_accounts=[req.accountId],
+                legs=[LegPayload(
+                    tradingsymbol=norm["tradingsymbol"],
+                    direction=exit_direction,
+                    qty=abs(int(qty)),
+                    order_type="MARKET",
+                    price=0.0,
+                    trigger_price=0.0,
+                    product_type=product,
+                )],
+                remarks="EXIT:manual_squareoff_all",
+            )
+            result = process_order_intent(user_id=user_id, intent=intent, db_session=db)
+            if result.success:
+                success_count += 1
+            else:
+                errors.append(f"{norm['tradingsymbol']}: {'; '.join(result.errors or [])}")
+        except Exception as e:
+            errors.append(f"{norm.get('tradingsymbol', '?')}: {e}")
+
+    return {
+        "success": len(errors) == 0,
+        "placed": success_count,
+        "errors": errors,
+    }
+
+
 @router.get("/book")
 async def get_order_book(
     account_id: Optional[str] = None,

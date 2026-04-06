@@ -135,8 +135,9 @@ export const api = {
 
   // ── Positions ──
   positions:      (accountId: string) => api.get(`/positions?account=${accountId}`),
-  squareOff:      (positionId: string) => api.post(`/positions/${positionId}/squareoff`, {}),
-  squareOffAll:   (accountId: string)  => api.post(`/positions/squareoff-all`, { accountId }),
+  squareOff:      (data: { symbol: string; exchange: string; product: string; quantity: number; side: string; accountId: string }) =>
+    api.post('/orders/squareoff', data),
+  squareOffAll:   (accountId: string)  => api.post('/orders/squareoff-all', { accountId }),
 
   // ── Holdings ──
   holdings: (accountId: string) => api.get(`/holdings?account=${accountId}`),
