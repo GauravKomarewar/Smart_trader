@@ -307,9 +307,19 @@ class SupremeManager:
                 # Calculate P&L from positions
                 day_pnl = unrealized = realized = 0.0
                 for p in positions:
-                    u = float(p.get("unrealised_pnl") or p.get("pnl") or
-                              p.get("urmtom", 0) or 0)
-                    r = float(p.get("realised_pnl") or p.get("rpnl", 0) or 0)
+                    # Use key-presence instead of `or` chains (0.0 is falsy!)
+                    if "unrealised_pnl" in p:
+                        u = float(p["unrealised_pnl"])
+                    elif "urmtom" in p:
+                        u = float(p["urmtom"])
+                    else:
+                        u = 0.0
+                    if "realised_pnl" in p:
+                        r = float(p["realised_pnl"])
+                    elif "rpnl" in p:
+                        r = float(p["rpnl"])
+                    else:
+                        r = 0.0
                     unrealized += u
                     realized += r
                     day_pnl += u + r
@@ -465,25 +475,42 @@ class SupremeManager:
         finally:
             conn.close()
 
-        # Filter closed positions (qty=0)
-        active_raw = [
-            p for p in all_positions
-            if float(p.get("netqty") or p.get("net_quantity") or
-                     p.get("qty", 0)) != 0
-        ]
+        # Separate active (qty!=0) from closed (qty==0) positions
+        active_raw = []
+        closed_raw = []
+        for p in all_positions:
+            qty = float(p.get("netqty") or p.get("net_quantity") or
+                        p.get("qty", 0))
+            if qty != 0:
+                active_raw.append(p)
+            else:
+                closed_raw.append(p)
+
         positions = [_normalize_position(p, i) for i, p in enumerate(active_raw)]
         orders = [_normalize_order(o, i) for i, o in enumerate(all_orders)]
 
-        # Calculate summary
+        # Calculate summary — include P&L from BOTH active AND closed positions
         total_equity = sum(
             f.get("available_cash", 0) + f.get("used_margin", 0) for f in funds
         )
-        day_pnl = unrealized = realized = used_margin = avail_margin = cash = 0.0
+        unrealized = realized = used_margin = avail_margin = cash = 0.0
+
+        # Active positions: unrealized + realized P&L
         for p in positions:
             if isinstance(p, dict):
                 unrealized += float(p.get("dayPnl") or p.get("unrealised_pnl") or 0)
                 realized += float(p.get("pnl", 0)) - float(
                     p.get("dayPnl") or p.get("unrealised_pnl") or 0)
+
+        # Closed positions: realized P&L only (qty=0 means fully squared off)
+        for p in closed_raw:
+            if "realised_pnl" in p:
+                realized += float(p["realised_pnl"])
+            elif "rpnl" in p:
+                realized += float(p["rpnl"])
+            else:
+                realized += float(p.get("pnl", 0))
+
         day_pnl = unrealized + realized
         for f in funds:
             used_margin += float(f.get("used_margin") or 0)

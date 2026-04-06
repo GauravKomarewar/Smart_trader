@@ -234,7 +234,28 @@ def _order_type_map(prctyp: str) -> str:
     return {
         "LMT": "LIMIT", "MKT": "MARKET",
         "SL-LMT": "SL", "SL-MKT": "SL-M",
+        "LIMIT": "LIMIT", "MARKET": "MARKET", "SL": "SL", "SL-M": "SL-M",
     }.get(str(prctyp).upper(), "LIMIT")
+
+# Fyers returns exchange as int (10=NSE, 11=MCX, 12=BSE)
+_NUMERIC_EXCH_MAP = {10: "NSE", 11: "MCX", 12: "BSE"}
+
+def _resolve_exchange(raw_exch, symbol: str = "") -> str:
+    """Convert raw exchange value (possibly numeric from Fyers) to string."""
+    if isinstance(raw_exch, int):
+        exch = _NUMERIC_EXCH_MAP.get(raw_exch, "NSE")
+    elif isinstance(raw_exch, str) and raw_exch.isdigit():
+        exch = _NUMERIC_EXCH_MAP.get(int(raw_exch), raw_exch)
+    else:
+        exch = str(raw_exch) if raw_exch else "NSE"
+    sym_up = symbol.upper()
+    is_deriv = sym_up.endswith("CE") or sym_up.endswith("PE") or "FUT" in sym_up
+    if is_deriv:
+        if exch == "NSE":
+            return "NFO"
+        if exch == "BSE":
+            return "BFO"
+    return exch
 
 def _normalize_position(p: dict, idx: int) -> dict:
     """Map raw Shoonya position fields to frontend Position schema.
@@ -250,7 +271,7 @@ def _normalize_position(p: dict, idx: int) -> dict:
     avgprc = float(p.get("avgprc") or p.get("average_price") or p.get("avg_price", 0))
     rpnl   = float(p.get("rpnl")  or p.get("realised_pnl") or p.get("realized_pnl", 0))
     urmtom = float(p.get("urmtom") or p.get("unrealised_pnl") or p.get("pnl", 0))
-    exch   = p.get("exch") or p.get("exchange", "NSE")
+    exch   = _resolve_exchange(p.get("exch") or p.get("exchange", "NSE"), clean_sym)
     prd    = _prd_map(p.get("prd") or p.get("product", "MIS"))
     abs_qty = abs(int(netqty))
     pnl = rpnl + urmtom
@@ -268,7 +289,7 @@ def _normalize_position(p: dict, idx: int) -> dict:
     )
     return {
         "id": p.get("token") or p.get("symboltoken") or f"pos-{idx}",
-        "accountId": p.get("actid") or "live",
+        "accountId": p.get("actid") or p.get("account_id") or "live",
         "symbol": clean_sym,
         "trading_symbol": clean_sym,
         "tradingsymbol": clean_sym,
@@ -336,24 +357,27 @@ def _normalize_db_order(rec, idx: int) -> dict:
 
 
 def _normalize_order(o: dict, idx: int) -> dict:
-    """Map raw Shoonya order fields to frontend Order schema."""
+    """Map raw broker order fields to frontend Order schema (Shoonya + Fyers)."""
     tsym    = o.get("tsym") or o.get("tradingsymbol") or o.get("symbol", f"UNKNOWN{idx}")
-    exch    = o.get("exch") or o.get("exchange", "NSE")
-    trantype = o.get("trantype") or o.get("transaction_type", "B")
-    txn = "BUY" if str(trantype).upper() in ("B", "BUY") else "SELL"
+    exch    = _resolve_exchange(o.get("exch") or o.get("exchange", "NSE"), tsym)
+    trantype = o.get("trantype") or o.get("transaction_type") or o.get("side", "B")
+    txn = "BUY" if str(trantype).upper() in ("B", "BUY", "1") else "SELL"
     qty     = int(float(o.get("qty") or o.get("quantity", 0)))
-    filled  = int(float(o.get("fillshares") or o.get("filled_quantity", 0)))
+    filled  = int(float(o.get("fillshares") or o.get("filled_quantity")
+                        or o.get("filled_qty", 0)))
     prc     = float(o.get("prc") or o.get("price", 0))
-    avgprc  = float(o.get("avgprc") or o.get("average_price", 0))
+    avgprc  = float(o.get("avgprc") or o.get("average_price")
+                    or o.get("avg_price", 0))
     trgprc  = float(o.get("trgprc") or o.get("trigger_price") or 0)
     status  = _order_status(o.get("status") or o.get("order_status", "OPEN"))
     prctyp  = _order_type_map(o.get("prctyp") or o.get("price_type") or o.get("order_type", "LMT"))
     prd     = _prd_map(o.get("prd") or o.get("product", "MIS"))
     order_id = o.get("norenordno") or o.get("order_id") or o.get("orderId", f"ord-{idx}")
-    placed_at = o.get("ordertime") or o.get("placed_at") or datetime.now().isoformat()
+    placed_at = (o.get("ordertime") or o.get("placed_at")
+                 or o.get("timestamp") or datetime.now().isoformat())
     return {
         "id": order_id,
-        "accountId": o.get("actid") or "live",
+        "accountId": o.get("actid") or o.get("account_id") or "live",
         "orderId": order_id,
         "symbol": tsym,
         "tradingsymbol": tsym,

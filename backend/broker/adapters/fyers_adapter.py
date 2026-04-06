@@ -30,6 +30,31 @@ logger = logging.getLogger("smart_trader.broker.fyers")
 _FYERS_STATUS_MAP = {1: "PENDING", 2: "COMPLETE", 4: "CANCELLED",
                      5: "CANCELLED", 6: "PENDING", 7: "REJECTED"}
 
+# Fyers returns exchange as integer: 10=NSE, 11=MCX, 12=BSE
+_FYERS_EXCH_CODE = {10: "NSE", 11: "MCX", 12: "BSE"}
+
+
+def _fyers_exchange(raw_exchange, symbol: str = "") -> str:
+    """Convert Fyers numeric exchange code to canonical string.
+
+    Also promotes NSE → NFO / BSE → BFO when the symbol is a derivative.
+    """
+    if isinstance(raw_exchange, int):
+        exch = _FYERS_EXCH_CODE.get(raw_exchange, "NSE")
+    elif isinstance(raw_exchange, str) and raw_exchange.isdigit():
+        exch = _FYERS_EXCH_CODE.get(int(raw_exchange), raw_exchange)
+    else:
+        exch = str(raw_exchange) if raw_exchange else "NSE"
+    # Detect derivatives from symbol suffix
+    sym_up = symbol.upper()
+    is_deriv = sym_up.endswith("CE") or sym_up.endswith("PE") or "FUT" in sym_up
+    if is_deriv:
+        if exch == "NSE":
+            return "NFO"
+        if exch == "BSE":
+            return "BFO"
+    return exch
+
 
 class FyersAdapter(BrokerAdapter):
     """
@@ -128,7 +153,8 @@ class FyersAdapter(BrokerAdapter):
         symbol    = raw.get("symbol", "")
         # Strip exchange prefix if present
         clean_sym = symbol.split(":", 1)[-1] if ":" in symbol else symbol
-        exchange  = raw.get("exchange") or raw.get("exch") or (symbol.split(":")[0] if ":" in symbol else "NSE")
+        raw_exch  = raw.get("exchange") or raw.get("exch") or (symbol.split(":")[0] if ":" in symbol else "NSE")
+        exchange  = _fyers_exchange(raw_exch, clean_sym)
         prd_raw   = (raw.get("prd") or raw.get("productType") or "").upper()
         prod_map  = {"INTRADAY": "MIS", "MARGIN": "NRML", "CNC": "CNC", "MIS": "MIS", "NRML": "NRML"}
         product   = prod_map.get(prd_raw, "MIS")
@@ -178,7 +204,8 @@ class FyersAdapter(BrokerAdapter):
         order_id   = str(raw.get("id") or raw.get("norenordno") or raw.get("order_id") or "")
         symbol_raw = raw.get("tsym") or raw.get("symbol") or ""
         symbol     = symbol_raw.split(":", 1)[-1] if ":" in symbol_raw else symbol_raw
-        exchange   = raw.get("exch") or raw.get("exchange") or ""
+        raw_exch   = raw.get("exch") or raw.get("exchange") or ""
+        exchange   = _fyers_exchange(raw_exch, symbol)
         trantype   = raw.get("transactiontype") or ("B" if raw.get("side", 1) == 1 else "S")
         side       = "BUY" if str(trantype).upper() in ("B", "BUY", "1") else "SELL"
         prd_raw    = (raw.get("prd") or raw.get("productType") or "").upper()
