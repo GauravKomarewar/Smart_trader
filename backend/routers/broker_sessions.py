@@ -796,53 +796,28 @@ def _connect_shoonya(
 
     token = None
     try:
-        # ── Step 3a: Try direct API login first (no browser, fast) ────────────
-        log.info("Attempting direct API login (NorenApi.login) for client=%s", client_id)
+        # ── Step 3: OAuth browser login (SEBI mandate from April 2026) ────────
+        # Direct API login (NorenApi.login) is no longer permitted by SEBI.
+        # All Shoonya sessions must use the OAuth flow via headless Firefox.
+        log.info("Launching headless Firefox for Shoonya OAuth (TOTP auto-fill)...")
         try:
-            import pyotp
-            from NorenRestApiPy.NorenApi import NorenApi
-
-            _api = NorenApi(
-                host="https://api.shoonya.com/NorenWClientTP/",
-                websocket="wss://api.shoonya.com/NorenWSTP/",
+            from broker.oauth_login import run_oauth_login
+        except ImportError as ie:
+            log.error("OAuth login module not available: %s", ie)
+            raise HTTPException(
+                503,
+                "OAuth login module is not available on this server."
             )
-            otp = pyotp.TOTP(creds.get("TOKEN", "")).now()
-            resp = _api.login(
-                userid=creds.get("USER_ID", ""),
-                password=creds.get("PASSWORD", ""),
-                twoFA=otp,
-                vendor_code=creds.get("VC", ""),
-                api_secret=creds.get("APP_KEY", ""),
-                imei=creds.get("IMEI", "abc1234"),
-            )
-            if resp and resp.get("stat") == "Ok":
-                token = resp.get("susertoken", "")
-                if token:
-                    log.info("Direct API login succeeded — token length=%d", len(token))
-        except Exception as api_err:
-            log.warning("Direct API login failed: %s — will try OAuth browser fallback", api_err)
 
-        # ── Step 3b: Fallback to headless Firefox OAuth login ─────────────────
-        if not token:
-            log.info("Launching headless Firefox for Shoonya OAuth (TOTP auto-fill)...")
-            try:
-                from broker.oauth_login import run_oauth_login
-            except ImportError as ie:
-                log.error("OAuth login module not available: %s", ie)
-                raise HTTPException(
-                    503,
-                    "OAuth login module is not available on this server."
-                )
-
-            try:
-                token = run_oauth_login()
-            except RuntimeError as rte:
-                msg = str(rte)
-                log.error("OAuth runtime error: %s", msg)
-                raise HTTPException(502, f"Shoonya login failed: {msg}")
-            except Exception as e:
-                log.exception("Unexpected error during OAuth login: %s", e)
-                raise HTTPException(502, f"Shoonya login error: {type(e).__name__}: {e}")
+        try:
+            token = run_oauth_login()
+        except RuntimeError as rte:
+            msg = str(rte)
+            log.error("OAuth runtime error: %s", msg)
+            raise HTTPException(502, f"Shoonya login failed: {msg}")
+        except Exception as e:
+            log.exception("Unexpected error during OAuth login: %s", e)
+            raise HTTPException(502, f"Shoonya login error: {type(e).__name__}: {e}")
 
         # ── Step 4: Validate token ────────────────────────────────────────────
         if not token:

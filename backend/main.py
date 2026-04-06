@@ -222,6 +222,14 @@ async def on_startup():
     except Exception as exc:
         logger.warning("PositionWatcher start failed (non-fatal): %s", exc)
 
+    # ── Start SessionScheduler (SEBI daily login/logout) ─────────────────────
+    try:
+        from trading.session_scheduler import session_scheduler
+        session_scheduler.start()
+        logger.info("SessionScheduler started — auto-login@08:45 IST, auto-logout@23:55 IST")
+    except Exception as exc:
+        logger.warning("SessionScheduler start failed (non-fatal): %s", exc)
+
 
 def _restore_broker_sessions():
     """

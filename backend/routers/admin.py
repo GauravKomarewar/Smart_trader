@@ -11,6 +11,9 @@ Endpoints:
   GET  /admin/audit-log      — audit log
   GET  /admin/broker-sessions— all active broker sessions
   POST /admin/users/{id}/reset-password — reset password
+  POST /admin/session-scheduler/login   — trigger auto-login now
+  POST /admin/session-scheduler/logout  — trigger auto-logout now
+  GET  /admin/session-scheduler/status  — scheduler status
 """
 import logging
 import secrets
@@ -242,4 +245,45 @@ def _user_out(user: User, db: Session) -> dict:
         "broker_count": broker_count,
         "created_at":   user.created_at.isoformat() if user.created_at else None,
         "last_login":   user.last_login.isoformat() if user.last_login else None,
+    }
+
+
+# ── Session Scheduler admin endpoints ─────────────────────────────────────────
+
+@router.post("/session-scheduler/login")
+def admin_trigger_login(payload: dict = Depends(require_admin)):
+    """Manually trigger daily auto-login for all broker configs."""
+    import threading
+    from trading.session_scheduler import session_scheduler
+
+    def _run():
+        try:
+            session_scheduler.trigger_login()
+        except Exception as e:
+            logging.getLogger("smart_trader.admin").error("Manual login trigger failed: %s", e)
+
+    threading.Thread(target=_run, daemon=True, name="ManualLogin").start()
+    return {"success": True, "message": "Auto-login triggered in background. Check logs for progress."}
+
+
+@router.post("/session-scheduler/logout")
+def admin_trigger_logout(payload: dict = Depends(require_admin)):
+    """Manually trigger daily auto-logout for all sessions."""
+    from trading.session_scheduler import session_scheduler
+
+    session_scheduler.trigger_logout()
+    return {"success": True, "message": "All sessions logged out."}
+
+
+@router.get("/session-scheduler/status")
+def admin_scheduler_status(payload: dict = Depends(require_admin)):
+    """Get session scheduler status."""
+    from trading.session_scheduler import session_scheduler, _LOGIN_HOUR, _LOGIN_MIN, _LOGOUT_HOUR, _LOGOUT_MIN
+
+    return {
+        "running":          session_scheduler._running,
+        "login_schedule":   f"{_LOGIN_HOUR:02d}:{_LOGIN_MIN:02d} IST",
+        "logout_schedule":  f"{_LOGOUT_HOUR:02d}:{_LOGOUT_MIN:02d} IST",
+        "last_login_date":  str(session_scheduler._last_login_date) if session_scheduler._last_login_date else None,
+        "last_logout_date": str(session_scheduler._last_logout_date) if session_scheduler._last_logout_date else None,
     }
