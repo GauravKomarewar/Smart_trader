@@ -64,6 +64,14 @@ export function useLiveData() {
     if (!token) return
     if (connectedRef.current) return
 
+    // Initial REST fetch so broker account cards show immediately (WS has up to 4s delay)
+    api.get<any>('/orders/broker-accounts')
+      .then((d: any) => {
+        const accs = Array.isArray(d) ? d : (d?.accounts ?? [])
+        if (accs.length > 0) setAccounts(accs)
+      })
+      .catch(() => {})
+
     // Handlers
     const onDashboard = (data: any) => {
       if (!data) return

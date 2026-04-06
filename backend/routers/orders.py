@@ -269,8 +269,14 @@ def _normalize_position(p: dict, idx: int) -> dict:
     netqty = float(p.get("netqty") or p.get("net_quantity") or p.get("qty", 0))
     lp     = float(p.get("lp")    or p.get("last_price") or p.get("ltp", 0))
     avgprc = float(p.get("avgprc") or p.get("average_price") or p.get("avg_price", 0))
-    rpnl   = float(p.get("rpnl")  or p.get("realised_pnl") or p.get("realized_pnl", 0))
-    urmtom = float(p.get("urmtom") or p.get("unrealised_pnl") or p.get("pnl", 0))
+    # Use key-presence checks to avoid 0.0 falsiness bug
+    def _first_present(d, *keys, default=0.0):
+        for k in keys:
+            if k in d and d[k] is not None:
+                return d[k]
+        return default
+    rpnl   = float(_first_present(p, "rpnl", "realised_pnl", "realized_pnl"))
+    urmtom = float(_first_present(p, "urmtom", "unrealised_pnl", "unrealized_pnl"))
     exch   = _resolve_exchange(p.get("exch") or p.get("exchange", "NSE"), clean_sym)
     prd    = _prd_map(p.get("prd") or p.get("product", "MIS"))
     abs_qty = abs(int(netqty))
