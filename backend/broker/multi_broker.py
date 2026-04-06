@@ -92,6 +92,8 @@ class BrokerAccountSession:
         self._client  = None        # ShoonyaClient | None
         self._adapter = None        # BrokerAdapter instance (normalised API)
         self._log     = _make_log(user_id, broker_id, client_id)
+        self._last_relogin_at: Optional[datetime] = None
+        self._relogin_in_progress = False
 
     # ── Connection ────────────────────────────────────────────────────────────
 
@@ -340,7 +342,7 @@ class BrokerAccountSession:
         return self.mode == "demo"
 
     def heartbeat(self) -> bool:
-        """Ping broker to confirm session is alive. Returns False if stale."""
+        """Ping broker to confirm session is alive. If stale, attempt relogin."""
         if self.is_demo:
             return True
         if self.is_paper:
@@ -355,9 +357,18 @@ class BrokerAccountSession:
                 alive = bool(result)
                 if alive:
                     self.last_heartbeat = datetime.now(timezone.utc)
+                else:
+                    # Token missing — attempt relogin
+                    self._log.warning("Heartbeat: token missing — triggering relogin")
+                    if self._relogin():
+                        self.last_heartbeat = datetime.now(timezone.utc)
+                        return True
                 return alive
             except Exception as e:
-                self._log.warning("Heartbeat failed: %s", e)
+                self._log.warning("Heartbeat failed: %s — triggering relogin", e)
+                if self._relogin():
+                    self.last_heartbeat = datetime.now(timezone.utc)
+                    return True
                 return False
 
     def to_dict(self) -> dict:
@@ -373,19 +384,233 @@ class BrokerAccountSession:
             "error":         self.error,
         }
 
-    # ── Data Methods ──────────────────────────────────────────────────────────
+    # ── Ensure-Login (Auto-Reconnect) ────────────────────────────────────────
+
+    _RELOGIN_COOLDOWN_SECS = 60
+    _SESSION_ERROR_PATTERNS = [
+        "session expired", "token expired", "invalid token",
+        "unauthorized", "not logged in", "session not found",
+        "invalid session", "please login", "authentication failed",
+        "session is expired", "token is invalid", "access denied",
+        "not authorized", "login required", "not_ok", "request token",
+        "invalid_token", "token_expired", "ag8001", "ab1010",
+        "expecting value",  # JSON parse fail = empty response = session gone
+    ]
+
+    def _is_session_error(self, exc: Exception) -> bool:
+        """Check if an exception indicates broker session expiry."""
+        if self.mode != "live":
+            return False
+        err_text = str(exc).lower()
+        return any(pat in err_text for pat in self._SESSION_ERROR_PATTERNS)
+
+    def _is_session_error_response(self, result) -> bool:
+        """Check if a broker API response indicates session expiry."""
+        if self.mode != "live":
+            return False
+        if result is None and self.broker_id == "shoonya":
+            return True
+        if isinstance(result, dict):
+            # Shoonya: stat != "Ok" with session-related emsg
+            emsg = str(result.get("emsg", "")).lower()
+            if emsg and any(pat in emsg for pat in self._SESSION_ERROR_PATTERNS):
+                return True
+            # Fyers: s != "ok" with session-related message
+            msg = str(result.get("message", "")).lower()
+            if msg and any(pat in msg for pat in self._SESSION_ERROR_PATTERNS):
+                return True
+            # Angel One: status == False with session-related message
+            if result.get("status") is False:
+                msg2 = str(result.get("message", "")).lower()
+                if any(pat in msg2 for pat in self._SESSION_ERROR_PATTERNS):
+                    return True
+        return False
+
+    def _relogin(self) -> bool:
+        """
+        Re-authenticate this broker session using stored credentials.
+        Returns True if relogin succeeded and adapter was refreshed.
+        Enforces a cooldown to prevent relogin storms.
+        """
+        now = datetime.now(timezone.utc)
+
+        # Cooldown: don't retry relogin within _RELOGIN_COOLDOWN_SECS
+        if self._last_relogin_at and (now - self._last_relogin_at).total_seconds() < self._RELOGIN_COOLDOWN_SECS:
+            self._log.warning("Relogin skipped — cooldown active (last attempt %ss ago)",
+                              int((now - self._last_relogin_at).total_seconds()))
+            return False
+
+        # Prevent concurrent relogin attempts
+        with self._lock:
+            if self._relogin_in_progress:
+                self._log.warning("Relogin already in progress — skipping")
+                return False
+            self._relogin_in_progress = True
+
+        self._last_relogin_at = now
+        self._log.info("ENSURE_LOGIN: attempting relogin for broker=%s", self.broker_id)
+
+        try:
+            from db.database import SessionLocal, BrokerConfig
+            from core.security import decrypt_credentials
+
+            db = SessionLocal()
+            try:
+                cfg = db.query(BrokerConfig).filter(BrokerConfig.id == self.config_id).first()
+                if not cfg:
+                    self._log.error("Relogin: BrokerConfig not found for config_id=%s", self.config_id)
+                    return False
+
+                try:
+                    creds = decrypt_credentials(str(cfg.credentials))
+                except Exception as e:
+                    self._log.error("Relogin: cannot decrypt credentials: %s", e)
+                    return False
+
+                if self.broker_id == "shoonya":
+                    return self._relogin_shoonya(creds, cfg, db)
+                elif self.broker_id == "fyers":
+                    return self._relogin_fyers(creds, cfg, db)
+                elif self.broker_id == "angel":
+                    return self._relogin_angelone(creds, cfg, db)
+                else:
+                    self._log.warning("Relogin: no auto-relogin for broker_id=%s", self.broker_id)
+                    return False
+            finally:
+                db.close()
+        except Exception as e:
+            self._log.error("Relogin failed: %s", e, exc_info=True)
+            return False
+        finally:
+            with self._lock:
+                self._relogin_in_progress = False
+
+    def _relogin_shoonya(self, creds: dict, cfg, db) -> bool:
+        """Re-authenticate Shoonya via OAuth (headless Firefox)."""
+        import os as _os
+
+        required = ["USER_ID", "PASSWORD", "TOKEN", "VC", "APP_KEY", "OAUTH_SECRET"]
+        missing = [f for f in required if not creds.get(f)]
+        if missing:
+            self._log.error("Relogin shoonya: missing fields %s", missing)
+            return False
+
+        env_map = {
+            "USER_ID":      creds.get("USER_ID", ""),
+            "PASSWORD":     creds.get("PASSWORD", ""),
+            "TOKEN":        creds.get("TOKEN", ""),
+            "VC":           creds.get("VC", ""),
+            "APP_KEY":      creds.get("APP_KEY", ""),
+            "OAUTH_SECRET": creds.get("OAUTH_SECRET", ""),
+            "IMEI":         creds.get("IMEI", "abc1234"),
+        }
+        old_env = {k: _os.environ.get(k) for k in env_map}
+        for k, v in env_map.items():
+            _os.environ[k] = v
+
+        try:
+            from broker.oauth_login import run_oauth_login
+            token = run_oauth_login()
+        finally:
+            for k, old_v in old_env.items():
+                if old_v is None:
+                    _os.environ.pop(k, None)
+                else:
+                    _os.environ[k] = old_v
+
+        if not token:
+            self._log.error("Relogin shoonya: OAuth returned empty token")
+            return False
+
+        ok = self.inject_shoonya_token(creds, token)
+        if ok:
+            self._log.info("ENSURE_LOGIN: Shoonya relogin SUCCESS — token length=%d", len(token))
+            self._persist_token(cfg, db, token)
+        return ok
+
+    def _relogin_fyers(self, creds: dict, cfg, db) -> bool:
+        """Re-authenticate Fyers via direct API login."""
+        required = ["CLIENT_ID", "APP_ID", "SECRET_KEY", "TOTP_KEY", "PIN"]
+        missing = [f for f in required if not creds.get(f)]
+        if missing:
+            self._log.error("Relogin fyers: missing fields %s", missing)
+            return False
+
+        from routers.broker_sessions import _fyers_direct_login
+        token = _fyers_direct_login(creds, self._log)
+        if not token or len(token) < 10:
+            self._log.error("Relogin fyers: login returned empty token")
+            return False
+
+        ok = self.inject_fyers_token(creds, token)
+        if ok:
+            self._log.info("ENSURE_LOGIN: Fyers relogin SUCCESS — token length=%d", len(token))
+            self._persist_token(cfg, db, token)
+        return ok
+
+    def _relogin_angelone(self, creds: dict, cfg, db) -> bool:
+        """Re-authenticate Angel One via SmartAPI."""
+        required = ["CLIENT_ID", "PIN", "API_KEY", "TOTP_SECRET"]
+        missing = [f for f in required if not creds.get(f)]
+        if missing:
+            self._log.error("Relogin angel: missing fields %s", missing)
+            return False
+
+        from routers.broker_sessions import _angelone_direct_login
+        jwt_token = _angelone_direct_login(
+            creds["CLIENT_ID"], creds["PIN"], creds["API_KEY"], creds["TOTP_SECRET"], self._log,
+        )
+        if not jwt_token or len(jwt_token) < 10:
+            self._log.error("Relogin angel: login returned empty token")
+            return False
+
+        ok = self.inject_angelone_token(creds, jwt_token)
+        if ok:
+            self._log.info("ENSURE_LOGIN: Angel One relogin SUCCESS — token length=%d", len(jwt_token))
+            self._persist_token(cfg, db, jwt_token)
+        return ok
+
+    def _persist_token(self, cfg, db, token: str):
+        """Save the refreshed token to the DB session row."""
+        try:
+            from routers.broker_sessions import _upsert_session
+            _upsert_session(db, cfg, self.user_id, mode="live", token=token, logged_in=True)
+        except Exception as e:
+            self._log.warning("Failed to persist relogin token to DB: %s", e)
+
+    def _call_with_relogin(self, fn, *args, **kwargs):
+        """
+        Call fn(*args, **kwargs).
+        If it raises a session-expired error, relogin and retry once.
+        """
+        try:
+            result = fn(*args, **kwargs)
+            return result
+        except Exception as first_err:
+            if not self._is_session_error(first_err):
+                raise
+            self._log.warning(
+                "ENSURE_LOGIN: session error in %s: %s — attempting relogin",
+                getattr(fn, '__name__', str(fn)), first_err,
+            )
+            if not self._relogin():
+                raise
+            self._log.info("ENSURE_LOGIN: relogin OK — retrying %s", getattr(fn, '__name__', str(fn)))
+            return fn(*args, **kwargs)
+
+    # ── Data Methods (with ensure_login auto-reconnect) ─────────────────────
 
     def get_positions(self) -> list:
         if self._adapter is not None:
             try:
-                return [p.to_dict() for p in self._adapter.get_positions()]
+                return [p.to_dict() for p in self._call_with_relogin(self._adapter.get_positions)]
             except Exception as e:
                 self._log.error("get_positions (adapter) error: %s", e)
                 return []
         if not self.is_live or self._client is None:
             return []
         try:
-            result = self._client.get_positions()
+            result = self._call_with_relogin(self._client.get_positions)
             if isinstance(result, list):
                 return result
             if isinstance(result, dict):
@@ -398,14 +623,14 @@ class BrokerAccountSession:
     def get_order_book(self) -> list:
         if self._adapter is not None:
             try:
-                return [o.to_dict() for o in self._adapter.get_order_book()]
+                return [o.to_dict() for o in self._call_with_relogin(self._adapter.get_order_book)]
             except Exception as e:
                 self._log.error("get_order_book (adapter) error: %s", e)
                 return []
         if not self.is_live or self._client is None:
             return []
         try:
-            result = self._client.get_order_book()
+            result = self._call_with_relogin(self._client.get_order_book)
             if isinstance(result, list):
                 return result
             if isinstance(result, dict):
@@ -418,14 +643,14 @@ class BrokerAccountSession:
     def get_limits(self) -> dict:
         if self._adapter is not None:
             try:
-                return self._adapter.get_funds().to_dict()
+                return self._call_with_relogin(self._adapter.get_funds).to_dict()
             except Exception as e:
                 self._log.error("get_limits (adapter) error: %s", e)
                 return {}
         if not self.is_live or self._client is None:
             return {}
         try:
-            result = self._client.get_limits()
+            result = self._call_with_relogin(self._client.get_limits)
             if isinstance(result, dict):
                 return result
             return {}
@@ -436,14 +661,14 @@ class BrokerAccountSession:
     def get_holdings(self) -> list:
         if self._adapter is not None:
             try:
-                return [h.to_dict() for h in self._adapter.get_holdings()]
+                return [h.to_dict() for h in self._call_with_relogin(self._adapter.get_holdings)]
             except Exception as e:
                 self._log.error("get_holdings (adapter) error: %s", e)
                 return []
         if not self.is_live or self._client is None:
             return []
         try:
-            result = self._client.get_holdings()
+            result = self._call_with_relogin(self._client.get_holdings)
             if isinstance(result, list):
                 return result
             if isinstance(result, dict):
@@ -456,7 +681,7 @@ class BrokerAccountSession:
     def get_tradebook(self) -> list:
         if self._adapter is not None:
             try:
-                return [t.to_dict() for t in self._adapter.get_tradebook()]
+                return [t.to_dict() for t in self._call_with_relogin(self._adapter.get_tradebook)]
             except Exception as e:
                 self._log.error("get_tradebook (adapter) error: %s", e)
                 return []
@@ -469,6 +694,7 @@ class BrokerAccountSession:
             symbol, exchange, side (BUY/SELL), product (MIS/NRML/CNC),
             order_type (MARKET/LIMIT/SL/SL-M), qty, price, trigger_price
         Also accepts legacy Shoonya-format keys for backward compat.
+        Uses ensure_login: if session expired, relogin and retry once.
         """
         if self._adapter is not None:
             # ── Normalise to canonical keys ───────────────────────────────────
@@ -495,7 +721,20 @@ class BrokerAccountSession:
                 "tag":           order.get("tag") or order.get("remarks") or "smart_trader",
                 "retention":     order.get("retention") or "DAY",
             }
-            return self._adapter.place_order(normalised)
+
+            # Attempt via adapter with ensure_login
+            try:
+                result = self._call_with_relogin(self._adapter.place_order, normalised)
+                # Check if response itself indicates session expiry
+                if self._is_session_error_response(result):
+                    self._log.warning("ENSURE_LOGIN: place_order response indicates session error — attempting relogin")
+                    if self._relogin():
+                        self._log.info("ENSURE_LOGIN: relogin OK — retrying place_order")
+                        result = self._adapter.place_order(normalised)
+                return result
+            except Exception as e:
+                self._log.error("place_order (adapter) error: %s", e, exc_info=True)
+                return {"success": False, "message": str(e)}
 
         if self.is_paper:
             return self._paper_order(order)
@@ -524,7 +763,12 @@ class BrokerAccountSession:
                 order_params["quantity"],
                 order_params["price"],
             )
-            result = self._client.place_order(order_params)
+            result = self._call_with_relogin(self._client.place_order, order_params)
+            # Check response for session expiry
+            if self._is_session_error_response(result):
+                self._log.warning("ENSURE_LOGIN: legacy place_order response indicates session error — attempting relogin")
+                if self._relogin():
+                    result = self._client.place_order(order_params)
             # result may be an OrderResult dataclass or dict
             if hasattr(result, "order_id"):
                 return {"success": True, "order_id": result.order_id, "message": "Order placed"}
@@ -554,7 +798,9 @@ class BrokerAccountSession:
         if not self.is_live or self._client is None:
             return {"success": False, "message": "Not connected"}
         try:
-            result = self._client.modify_order({**params, "norenordno": order_id})
+            result = self._call_with_relogin(
+                self._client.modify_order, {**params, "norenordno": order_id}
+            )
             return result if isinstance(result, dict) else {"success": True}
         except Exception as e:
             self._log.error("modify_order error: %s", e)
@@ -564,7 +810,7 @@ class BrokerAccountSession:
         if not self.is_live or self._client is None:
             return {"success": False, "message": "Not connected"}
         try:
-            result = self._client.cancel_order(order_id)
+            result = self._call_with_relogin(self._client.cancel_order, order_id)
             return result if isinstance(result, dict) else {"success": True}
         except Exception as e:
             self._log.error("cancel_order error: %s", e)

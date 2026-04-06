@@ -67,7 +67,7 @@ class TradingBot:
 
     def __init__(
         self,
-        user_id: int,
+        user_id,
         client_id: str,
         api,
         execution_guard=None,
@@ -276,7 +276,7 @@ def get_bot(user_id, client_id: str = "", api=None, execution_guard=None) -> Opt
             if api is None:
                 return None
             bot = TradingBot(
-                user_id=int(user_id),
+                user_id=user_id,
                 client_id=client_id,
                 api=api,
                 execution_guard=execution_guard,

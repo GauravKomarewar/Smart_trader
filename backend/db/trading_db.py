@@ -35,7 +35,7 @@ _DB_DSN = os.environ.get(
 _CREATE_ORDERS = """
 CREATE TABLE IF NOT EXISTS orders (
     id              BIGSERIAL PRIMARY KEY,
-    user_id         INTEGER NOT NULL,
+    user_id         TEXT NOT NULL,
     client_id       TEXT NOT NULL,
 
     command_id      TEXT NOT NULL,
@@ -81,7 +81,7 @@ _CREATE_AUDIT = """
 CREATE TABLE IF NOT EXISTS audit_log (
     id          BIGSERIAL PRIMARY KEY,
     ts          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    user_id     INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
     client_id   TEXT NOT NULL,
     command_id  TEXT,
     action      TEXT NOT NULL,
@@ -97,7 +97,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_user_ts ON audit_log(user_id, ts DESC);
 _CREATE_PNL_HISTORY = """
 CREATE TABLE IF NOT EXISTS pnl_history (
     id            BIGSERIAL PRIMARY KEY,
-    user_id       INTEGER NOT NULL,
+    user_id       TEXT NOT NULL,
     client_id     TEXT NOT NULL,
     trade_date    DATE NOT NULL,
     strategy_name TEXT NOT NULL DEFAULT '',
@@ -118,7 +118,7 @@ CREATE INDEX IF NOT EXISTS idx_pnl_user_date ON pnl_history(user_id, trade_date 
 _CREATE_PNL_OHLC = """
 CREATE TABLE IF NOT EXISTS pnl_ohlc (
     id          BIGSERIAL PRIMARY KEY,
-    user_id     INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
     client_id   TEXT NOT NULL,
     bar_time    TIMESTAMPTZ NOT NULL,
     timeframe   TEXT NOT NULL,

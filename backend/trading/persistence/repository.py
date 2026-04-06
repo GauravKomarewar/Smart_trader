@@ -90,7 +90,7 @@ class OrderRepository:
     PostgreSQL-backed order repository, scoped to (user_id, client_id).
     """
 
-    def __init__(self, user_id: int, client_id: str):
+    def __init__(self, user_id, client_id: str):
         self.user_id = user_id
         self.client_id = client_id
 

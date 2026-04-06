@@ -95,6 +95,11 @@ class OrderWatcherEngine(threading.Thread):
 
         self._ob_fail_count = 0
         for bo in broker_orders:
+            # Adapters may return Order dataclass objects — convert to dict
+            if hasattr(bo, "to_dict"):
+                bo = bo.to_dict()
+            elif not isinstance(bo, dict):
+                continue
             bid = bo.get("norenordno") or bo.get("order_id") or bo.get("orderid")
             status = (bo.get("status") or bo.get("order_status") or "").upper()
 
