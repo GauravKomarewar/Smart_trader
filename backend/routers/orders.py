@@ -411,22 +411,7 @@ async def get_dashboard(payload: dict = Depends(current_user), db: Session = Dep
 
     dashboard = supreme.get_dashboard(user_id)
 
-    # ── Merge DB orders (always show Smart Trader orders from PostgreSQL) ──
-    try:
-        from trading.persistence.repository import OrderRepository
-        db_repo = OrderRepository(user_id, "__all__")
-        db_records = db_repo.get_all(limit=200)
-        broker_ids = {o.get("orderId") for o in dashboard.get("orders", []) if o.get("orderId")}
-        extra_orders = []
-        for i, rec in enumerate(db_records):
-            if rec.broker_order_id and rec.broker_order_id in broker_ids:
-                continue
-            extra_orders.append(_normalize_db_order(rec, len(dashboard.get("orders", [])) + i))
-        if extra_orders:
-            dashboard["orders"] = dashboard.get("orders", []) + extra_orders
-    except Exception as e:
-        logger.warning("Dashboard: failed to merge DB orders: %s", e)
-
+    # DB orders are already merged inside supreme.get_dashboard()
     dashboard["source"] = "live"
     return dashboard
 
@@ -435,13 +420,13 @@ async def get_dashboard(payload: dict = Depends(current_user), db: Session = Dep
 async def get_account_info(payload: dict = Depends(current_user), db: Session = Depends(get_db)):
     """Return broker account details: client ID, limits and connection info."""
     from db.database import BrokerSession as DBSession, BrokerConfig
+    from managers.supreme_manager import supreme
     user_id = payload["sub"]
-    session = _resolve_session(user_id, db)
 
-    limits = {}
     client_id = None
     broker_name = None
     login_at = None
+    limits = {}
 
     # Get client_id from DB session
     try:
@@ -460,11 +445,15 @@ async def get_account_info(payload: dict = Depends(current_user), db: Session = 
     except Exception as exc:
         logger.debug("account-info DB lookup failed: %s", exc)
 
-    if not session.is_demo:
-        limits = session.get_limits()
+    # Get limits from SupremeManager (reads from DB, no broker API calls)
+    fund_rows = supreme.get_funds(user_id)
+    if fund_rows:
+        lim = fund_rows[0].get("data", fund_rows[0])
+        limits = lim
+    is_live = bool(supreme.get_sessions(user_id))
 
     return {
-        "isLive":     not session.is_demo,
+        "isLive":     is_live,
         "clientId":   client_id,
         "brokerName": broker_name,
         "loginAt":    login_at,
@@ -543,60 +532,37 @@ async def get_account_summary(
     Empty list when no brokers are connected.
     """
     user_id = payload["sub"]
-    from broker.multi_broker import registry as mb
+    from managers.supreme_manager import supreme
     from db.database import BrokerConfig as DBConfig
 
-    live_sessions = mb.list_live_sessions(user_id)
+    # Get enriched accounts from SupremeManager (reads from DB, no broker API calls)
+    accounts = supreme.get_broker_accounts(user_id)
+    summaries = []
+    seen_ids = set()
 
-    # Also include every DB broker config so disconnected accounts show up
+    for a in accounts:
+        seen_ids.add(a["config_id"])
+        summaries.append({
+            "config_id":  a["config_id"],
+            "broker_id":  a["broker_id"],
+            "broker_name": a.get("broker_name", a["broker_id"]).title(),
+            "client_id":  a["client_id"],
+            "mode":       a.get("mode", "live"),
+            "is_live":    a.get("is_live", True),
+            "connected_at": a.get("connected_at"),
+            "available":  float(a.get("available_margin", 0)),
+            "used":       float(a.get("used_margin", 0)),
+            "total":      float(a.get("total_balance", 0)),
+            "positions_count": a.get("positions_count", 0),
+            "error":      a.get("error"),
+        })
+
+    # Include offline / disconnected configs from SQLite
     db_configs = (
         db.query(DBConfig)
         .filter(DBConfig.user_id == user_id, DBConfig.is_active == True)
         .all()
     )
-    db_by_id = {str(c.id): c for c in db_configs}
-
-    summaries = []
-    seen_ids = set()
-
-    # First: all live sessions
-    for sess in live_sessions:
-        seen_ids.add(sess.config_id)
-        limits = {}
-        positions_count = 0
-        try:
-            limits = sess.get_limits() or {}
-        except Exception:
-            pass
-        try:
-            positions_count = len(sess.get_positions())
-        except Exception:
-            pass
-
-        available  = (limits.get("marginAvailable") or limits.get("cash") or
-                      limits.get("net") or limits.get("availablecash") or 0.0)
-        used       = (limits.get("marginUsed") or limits.get("utilizedDebits") or
-                      limits.get("debits") or 0.0)
-        total      = (limits.get("totalBalance") or limits.get("grossAvailableMargin") or
-                      (available + used) or 0.0)
-
-        db_cfg = db_by_id.get(sess.config_id)
-        summaries.append({
-            "config_id":  sess.config_id,
-            "broker_id":  sess.broker_id,
-            "broker_name": (db_cfg.broker_name if db_cfg else sess.broker_id).title(),
-            "client_id":  sess.client_id,
-            "mode":       sess.mode,
-            "is_live":    sess.is_live,
-            "connected_at": sess.connected_at.isoformat() if sess.connected_at else None,
-            "available":  float(available),
-            "used":       float(used),
-            "total":      float(total),
-            "positions_count": positions_count,
-            "error":      sess.error,
-        })
-
-    # Then: DB configs that are NOT in-memory (disconnected / never connected)
     for cfg in db_configs:
         if cfg.id in seen_ids:
             continue

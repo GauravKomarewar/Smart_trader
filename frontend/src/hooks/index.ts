@@ -67,25 +67,19 @@ export function useLiveData() {
     // Handlers
     const onDashboard = (data: any) => {
       if (!data) return
-      // Skip empty pushes when we already have data (prevents flicker from stale sessions)
-      const cur = useDashboardStore.getState().data
-      const incoming = data as DashboardData
-      const hasPositions = incoming.positions && incoming.positions.length > 0
-      const hasOrders = incoming.orders && incoming.orders.length > 0
-      const hasSummary = incoming.accountSummary && Object.values(incoming.accountSummary).some((v: any) => v !== 0)
-      if (!hasPositions && !hasOrders && !hasSummary && cur?.positions?.length) return
-      setData(incoming)
+      // Always accept — backend guarantees consistent data from SupremeManager  
+      setData(data as DashboardData)
     }
     const onBrokerAccounts = (data: any) => {
       if (!Array.isArray(data)) return
       // Anti-flicker: skip all-zero pushes when we already have meaningful data
       const cur = useBrokerAccountsStore.getState().accounts
       const hasExisting = cur && cur.length > 0 && cur.some(
-        (a: any) => a.cash || a.day_pnl || a.positions_count || a.orders_count
+        (a: any) => a.is_live
       )
       if (hasExisting) {
         const hasIncoming = (data as any[]).some(
-          (a: any) => a.cash || a.day_pnl || a.positions_count || a.orders_count
+          (a: any) => a.is_live
         )
         if (!hasIncoming) return
       }
@@ -210,27 +204,25 @@ export function useDashboardData() {
 
   const fetch = useCallback(async () => {
     if (!isAuthenticated) {
-      // Not logged in — show empty dashboard (not fake demo data)
       setData(EMPTY_DASHBOARD)
       return
     }
     if (!isBrokerLive) {
-      // Logged in but no broker connected — show empty dashboard with clear state
       setData(EMPTY_DASHBOARD)
       return
     }
+    // Skip REST poll if WS pushed recently (< 10s) — avoid overwrite race
+    const lastWs = useDashboardStore.getState().lastUpdate
+    if (lastWs && Date.now() - lastWs < 10_000) return
     try {
       const data = await api.liveDashboard() as DashboardData
-      // Only use empty data if source explicitly says demo AND we have no real data
       if ((data as any).source === 'demo' && !(data as any).positions?.length) {
-        // Broker connected but no positions yet — show empty dashboard, not fake demo
         setData({ ...data, positions: [], orders: [], holdings: [], trades: [] } as DashboardData)
       } else {
         setData(data)
       }
     } catch {
-      // Don't show fake demo data when broker is connected but API fails
-      // Just keep last known state
+      // Keep last known state
     }
   }, [isAuthenticated, isBrokerLive])
 

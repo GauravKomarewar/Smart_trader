@@ -407,8 +407,10 @@ class SupremeManager:
         """
         Build the combined dashboard snapshot from PostgreSQL.
         This replaces _build_dashboard_cached — all data from DB, no broker calls.
+        Includes BOTH active and closed positions (closed marked with status='CLOSED').
+        Also merges Smart Trader DB orders so WS and REST return identical data.
         """
-        from routers.orders import _normalize_position, _normalize_order
+        from routers.orders import _normalize_position, _normalize_order, _normalize_db_order
 
         conn = get_trading_conn()
         try:
@@ -475,43 +477,73 @@ class SupremeManager:
         finally:
             conn.close()
 
-        # Separate active (qty!=0) from closed (qty==0) positions
-        active_raw = []
-        closed_raw = []
-        for p in all_positions:
+        # Normalize ALL positions — active + closed (with status flag)
+        positions = []
+        unrealized = realized = 0.0
+        for i, p in enumerate(all_positions):
             qty = float(p.get("netqty") or p.get("net_quantity") or
                         p.get("qty", 0))
-            if qty != 0:
-                active_raw.append(p)
+            norm = _normalize_position(p, i)
+            if qty == 0:
+                norm["status"] = "CLOSED"
+                # Closed position PnL goes to realized
+                if "realised_pnl" in p:
+                    realized += float(p["realised_pnl"])
+                elif "rpnl" in p:
+                    realized += float(p["rpnl"])
+                else:
+                    realized += float(p.get("pnl", 0))
             else:
-                closed_raw.append(p)
+                norm["status"] = "OPEN"
+                # Active position P&L
+                unrealized += float(norm.get("dayPnl", 0))
+                realized += float(norm.get("pnl", 0)) - float(norm.get("dayPnl", 0))
+            positions.append(norm)
 
-        positions = [_normalize_position(p, i) for i, p in enumerate(active_raw)]
+        # Sort positions: OPEN first, then by P&L descending
+        positions.sort(key=lambda p: (0 if p.get("status") == "OPEN" else 1,
+                                       -(p.get("pnl") or 0)))
+
+        # Normalize broker orders
         orders = [_normalize_order(o, i) for i, o in enumerate(all_orders)]
 
-        # Calculate summary — include P&L from BOTH active AND closed positions
+        # ── Merge Smart Trader DB orders (same for WS and REST) ──
+        try:
+            from trading.persistence.repository import OrderRepository
+            db_repo = OrderRepository(user_id, "__all__")
+            db_records = db_repo.get_all(limit=200)
+            broker_ids = {o.get("orderId") for o in orders if o.get("orderId")}
+            for i, rec in enumerate(db_records):
+                if rec.broker_order_id and rec.broker_order_id in broker_ids:
+                    continue
+                orders.append(_normalize_db_order(rec, len(orders) + i))
+        except Exception as e:
+            logger.warning("get_dashboard: DB order merge failed: %s", e)
+
+        # Sort orders by placedAt descending (newest first) — stable sort
+        def _parse_order_time(o):
+            """Extract sortable timestamp from placedAt string."""
+            pa = o.get("placedAt", "")
+            if not pa:
+                return 0
+            try:
+                from datetime import datetime as _dt
+                # ISO format
+                if "T" in str(pa):
+                    return _dt.fromisoformat(str(pa).replace("Z", "+00:00")).timestamp()
+                # Fyers format: "06-Apr-2026 09:56:24"
+                return _dt.strptime(str(pa), "%d-%b-%Y %H:%M:%S").timestamp()
+            except Exception:
+                return 0
+        orders.sort(key=_parse_order_time, reverse=True)
+
+        day_pnl = unrealized + realized
+
+        # Calculate summary
         total_equity = sum(
             f.get("available_cash", 0) + f.get("used_margin", 0) for f in funds
         )
-        unrealized = realized = used_margin = avail_margin = cash = 0.0
-
-        # Active positions: unrealized + realized P&L
-        for p in positions:
-            if isinstance(p, dict):
-                unrealized += float(p.get("dayPnl") or p.get("unrealised_pnl") or 0)
-                realized += float(p.get("pnl", 0)) - float(
-                    p.get("dayPnl") or p.get("unrealised_pnl") or 0)
-
-        # Closed positions: realized P&L only (qty=0 means fully squared off)
-        for p in closed_raw:
-            if "realised_pnl" in p:
-                realized += float(p["realised_pnl"])
-            elif "rpnl" in p:
-                realized += float(p["rpnl"])
-            else:
-                realized += float(p.get("pnl", 0))
-
-        day_pnl = unrealized + realized
+        used_margin = avail_margin = cash = 0.0
         for f in funds:
             used_margin += float(f.get("used_margin") or 0)
             avail_margin += float(f.get("available_cash") or 0)
@@ -585,12 +617,16 @@ class SupremeManager:
         finally:
             conn.close()
 
-        active_raw = [
-            p for p in raw_positions
-            if float(p.get("netqty") or p.get("net_quantity") or
-                     p.get("qty", 0)) != 0
-        ]
-        positions = [_normalize_position(p, i) for i, p in enumerate(active_raw)]
+        # Normalize ALL positions with status flag (consistent with dashboard)
+        positions = []
+        for i, p in enumerate(raw_positions):
+            qty = float(p.get("netqty") or p.get("net_quantity") or
+                        p.get("qty", 0))
+            norm = _normalize_position(p, i)
+            norm["status"] = "CLOSED" if qty == 0 else "OPEN"
+            positions.append(norm)
+        positions.sort(key=lambda p: (0 if p.get("status") == "OPEN" else 1,
+                                       -(p.get("pnl") or 0)))
         orders = [_normalize_order(o, i) for i, o in enumerate(raw_orders)]
 
         return {

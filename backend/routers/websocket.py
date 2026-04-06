@@ -209,7 +209,7 @@ async def live_feed_websocket(websocket: WebSocket):
                     has_data = (
                         dashboard.get("positions")
                         or dashboard.get("orders")
-                        or any(v for v in dashboard.get("accountSummary", {}).values() if v)
+                        or any(v != 0 for v in dashboard.get("accountSummary", {}).values())
                     )
                     if has_data:
                         _last_good_dashboard = dashboard
@@ -250,8 +250,7 @@ async def live_feed_websocket(websocket: WebSocket):
                             None, supreme.get_broker_accounts, user_id
                         )
                         has_account_data = any(
-                            a.get("cash") or a.get("day_pnl") or a.get("positions_count")
-                            or a.get("orders_count")
+                            a.get("is_live")
                             for a in accounts
                         )
                         if has_account_data:
