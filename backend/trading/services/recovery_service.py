@@ -55,27 +55,49 @@ class RecoveryBootstrap:
         # Build broker position map {symbol: {qty, side, product, avg_price}}
         broker_pos_map: Dict[str, Dict] = {}
         for p in broker_positions:
-            symbol = p.get("tsym") or p.get("symbol", "")
-            try:
-                netqty = int(p.get("netqty", 0) or 0)
-            except Exception:
-                netqty = 0
+            # Support both dict (legacy) and Position dataclass (adapter)
+            if isinstance(p, dict):
+                symbol = p.get("tsym") or p.get("symbol", "")
+                try:
+                    netqty = int(p.get("netqty", 0) or 0)
+                except Exception:
+                    netqty = 0
+            else:
+                symbol = getattr(p, "symbol", "")
+                try:
+                    netqty = int(getattr(p, "net_qty", 0) or 0)
+                except Exception:
+                    netqty = 0
             if netqty == 0:
                 continue
-            broker_pos_map[symbol] = {
-                "exchange":  p.get("exch", ""),
-                "qty":       abs(netqty),
-                "side":      "BUY" if netqty > 0 else "SELL",
-                "product":   p.get("prd", ""),
-                "avg_price": float(p.get("avgprc", 0) or 0),
-            }
+            if isinstance(p, dict):
+                broker_pos_map[symbol] = {
+                    "exchange":  p.get("exch", ""),
+                    "qty":       abs(netqty),
+                    "side":      "BUY" if netqty > 0 else "SELL",
+                    "product":   p.get("prd", ""),
+                    "avg_price": float(p.get("avgprc", 0) or 0),
+                }
+            else:
+                broker_pos_map[symbol] = {
+                    "exchange":  getattr(p, "exchange", ""),
+                    "qty":       abs(netqty),
+                    "side":      "BUY" if netqty > 0 else "SELL",
+                    "product":   getattr(p, "product", ""),
+                    "avg_price": float(getattr(p, "avg_price", 0) or 0),
+                }
         self._log["broker_positions"] = list(broker_pos_map.keys())
         logger.info("Broker truth: %d open positions", len(broker_pos_map))
 
         # 2. Reconcile DB orders against broker order book
         for o in broker_orders:
-            order_id = o.get("norenordno") or o.get("orderid", "")
-            status   = (o.get("status") or "").upper()
+            # Support both dict (legacy) and Order dataclass (adapter)
+            if isinstance(o, dict):
+                order_id = o.get("norenordno") or o.get("orderid", "")
+                status   = (o.get("status") or "").upper()
+            else:
+                order_id = getattr(o, "order_id", "") or ""
+                status   = (getattr(o, "status", "") or "").upper()
             if not order_id:
                 continue
             db_rec = self.repo.get_by_broker_id(order_id)

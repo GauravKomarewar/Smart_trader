@@ -156,14 +156,43 @@ class TradingBot:
 
         # Map UniversalOrderCommand → broker-specific place_order dict
         try:
+            order_type = command.order_type or "MARKET"
+            price = command.price or 0.0
+
+            # ── Smart MKT → LIMIT conversion (SEBI compliance) ────────────
+            if order_type == "MARKET" and hasattr(self.api, "get_ltp"):
+                try:
+                    ltp = self.api.get_ltp(command.exchange, command.symbol)
+                    if ltp and ltp > 0:
+                        buffer = 1.005 if command.side == "BUY" else 0.995
+                        smart_price = round(ltp * buffer, 2)
+                        smart_price = round(round(smart_price / 0.05) * 0.05, 2)
+                        order_type = "LIMIT"
+                        price = smart_price
+                        logger.info(
+                            "SMART_LIMIT: MKT→LIMIT %s %s @ %.2f (LTP=%.2f, buffer=%.1f%%)",
+                            command.side, command.symbol, smart_price, ltp,
+                            (buffer - 1) * 100,
+                        )
+                    else:
+                        logger.warning(
+                            "SMART_LIMIT: LTP unavailable for %s:%s — falling back to MARKET",
+                            command.exchange, command.symbol,
+                        )
+                except Exception as ltp_err:
+                    logger.warning(
+                        "SMART_LIMIT: LTP fetch failed for %s — falling back to MARKET: %s",
+                        command.symbol, ltp_err,
+                    )
+
             resp = self.api.place_order({
                 "symbol":        command.symbol,
                 "exchange":      command.exchange,
                 "side":          command.side,
-                "order_type":    command.order_type or "MARKET",
+                "order_type":    order_type,
                 "product":       command.product,
                 "qty":           command.quantity,
-                "price":         command.price or 0.0,
+                "price":         price,
                 "trigger_price": getattr(command, "trigger_price", 0.0) or 0.0,
                 "remarks":       getattr(command, "comment", "") or "",
             })
@@ -183,7 +212,7 @@ class TradingBot:
 
             logger.info("EXECUTED | %s %s x%d @ %s | broker_id=%s",
                         command.side, command.symbol, command.quantity,
-                        command.price or "MKT", broker_order_id)
+                        price if price else "MKT", broker_order_id)
             return _ExecuteResult(True, broker_order_id)
 
         except Exception as e:
