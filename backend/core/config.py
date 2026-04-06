@@ -31,11 +31,11 @@ class Config:
     SHOONYA_OAUTH_SECRET: str  = os.getenv("SHOONYA_OAUTH_SECRET", "")
     SHOONYA_HOST: str          = os.getenv(
         "SHOONYA_HOST",
-        "https://trade.shoonya.com/NorenWClientAPI"
+        "https://api.shoonya.com/NorenWClientAPI"
     )
     SHOONYA_WEBSOCKET: str     = os.getenv(
         "SHOONYA_WEBSOCKET",
-        "wss://trade.shoonya.com/NorenWSTP"
+        "wss://api.shoonya.com/NorenWS"
     )
 
     # ── Fyers Data API Credentials ───────────────────────

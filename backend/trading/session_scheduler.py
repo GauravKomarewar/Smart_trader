@@ -35,6 +35,117 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 _LOGIN_HOUR, _LOGIN_MIN = 8, 45
 _LOGOUT_HOUR, _LOGOUT_MIN = 23, 55
 
+# ── Standalone helpers for 3-tier Shoonya login ───────────────────────────────
+
+_TOKEN_CACHE_FILE = "/home/ubuntu/.shoonya_token.json"
+_TOKEN_MAX_AGE_HOURS = 10
+
+
+def _load_shoonya_cached_token(user_id: str) -> str | None:
+    """Load a previously-saved Shoonya token from the shared cache file."""
+    import json as _json
+    try:
+        if not os.path.exists(_TOKEN_CACHE_FILE):
+            return None
+        with open(_TOKEN_CACHE_FILE) as f:
+            data = _json.load(f)
+        if data.get("user_id") != user_id:
+            return None
+        saved_at = datetime.fromisoformat(data["timestamp"])
+        age = datetime.now() - saved_at
+        if age > timedelta(hours=_TOKEN_MAX_AGE_HOURS):
+            logger.info("Cached Shoonya token expired (%.1fh old)", age.total_seconds() / 3600)
+            return None
+        token = data.get("token", "")
+        if not token:
+            return None
+        # Validate with lightweight API call
+        if _validate_shoonya_token(user_id, token):
+            logger.info("Cached Shoonya token is VALID (%.1fh old, source=%s)",
+                        age.total_seconds() / 3600, data.get("source", "unknown"))
+            return token
+        logger.info("Cached Shoonya token INVALID (session expired)")
+        return None
+    except Exception as e:
+        logger.debug("Could not load cached Shoonya token: %s", e)
+        return None
+
+
+def _validate_shoonya_token(user_id: str, token: str) -> bool:
+    """Quick call to Limits endpoint to check if session token is alive."""
+    import json as _json, requests
+    try:
+        payload = _json.dumps({"uid": user_id, "actid": user_id})
+        for host in ["https://api.shoonya.com/NorenWClientAPI", "https://trade.shoonya.com/NorenWClientAPI"]:
+            try:
+                resp = requests.post(
+                    f"{host}/Limits",
+                    data="jData=" + payload + f"&jKey={token}",
+                    timeout=8,
+                )
+                if resp.status_code == 200:
+                    result = _json.loads(resp.text)
+                    if result.get("stat") == "Ok":
+                        return True
+                    if "session" in str(result.get("emsg", "")).lower():
+                        return False
+                    return result.get("stat") != "Not_Ok"
+            except Exception:
+                continue
+        return False
+    except Exception:
+        return False
+
+
+def _shoonya_quick_auth(creds: dict, log) -> str | None:
+    """Direct REST API login via QuickAuth (no browser needed)."""
+    import hashlib, json as _json, requests, pyotp
+
+    user_id   = creds["USER_ID"]
+    password  = creds["PASSWORD"]
+    totp_key  = creds["TOKEN"]
+    vc        = creds["VC"]
+    app_key   = creds["APP_KEY"]
+    imei      = creds.get("IMEI", "abc1234")
+
+    pwd_hash  = hashlib.sha256(password.encode()).hexdigest()
+    appkey_hash = hashlib.sha256(f"{user_id}|{app_key}".encode()).hexdigest()
+
+    hosts = [
+        "https://api.shoonya.com/NorenWClientAPI",
+        "https://trade.shoonya.com/NorenWClientAPI",
+    ]
+
+    for attempt in range(1, 3):
+        otp_val = pyotp.TOTP(totp_key).now()
+        payload = {
+            "source": "API",
+            "apkversion": "1.0.0",
+            "uid": user_id,
+            "pwd": pwd_hash,
+            "factor2": otp_val,
+            "vc": vc,
+            "appkey": appkey_hash,
+            "imei": imei,
+        }
+        for host in hosts:
+            url = f"{host}/QuickAuth"
+            try:
+                resp = requests.post(url, data="jData=" + _json.dumps(payload), timeout=15)
+                if resp.status_code == 200:
+                    result = _json.loads(resp.text)
+                    if result.get("stat") == "Ok":
+                        return result.get("susertoken", "")
+                    emsg = result.get("emsg", "")
+                    if any(k in emsg.lower() for k in ["invalid", "credential", "blocked"]):
+                        log.warning("QuickAuth rejected: %s", emsg)
+                        return None
+            except Exception:
+                continue
+        if attempt < 2:
+            time.sleep(5)
+    return None
+
 
 class SessionScheduler:
     """
@@ -80,11 +191,19 @@ class SessionScheduler:
         now = self._now_ist()
         today = now.date()
 
-        # Auto-login at 08:45 IST
+        # Auto-login at 08:45 IST (or catch-up if restarted after 08:45)
+        login_time_passed = (
+            now.hour > _LOGIN_HOUR
+            or (now.hour == _LOGIN_HOUR and now.minute >= _LOGIN_MIN)
+        )
+        logout_time_passed = (
+            now.hour > _LOGOUT_HOUR
+            or (now.hour == _LOGOUT_HOUR and now.minute >= _LOGOUT_MIN)
+        )
         if (
             self._last_login_date != today
-            and now.hour == _LOGIN_HOUR
-            and now.minute >= _LOGIN_MIN
+            and login_time_passed
+            and not logout_time_passed
         ):
             logger.info("DAILY AUTO-LOGIN triggered at %s IST", now.strftime("%H:%M:%S"))
             try:
@@ -173,7 +292,7 @@ class SessionScheduler:
             db.close()
 
     def _login_shoonya(self, cfg, creds: dict, user_id: str, db, log):
-        """Shoonya: OAuth browser login (SEBI mandate)."""
+        """Shoonya: 3-tier login — cached token → direct API → OAuth browser."""
         import os as _os
 
         client_id = creds.get("USER_ID", cfg.client_id or "")
@@ -183,32 +302,54 @@ class SessionScheduler:
         if missing:
             raise RuntimeError(f"Missing Shoonya fields: {', '.join(missing)}")
 
-        # Export env vars for run_oauth_login
-        env_map = {
-            "USER_ID":      creds.get("USER_ID", ""),
-            "PASSWORD":     creds.get("PASSWORD", ""),
-            "TOKEN":        creds.get("TOKEN", ""),
-            "VC":           creds.get("VC", ""),
-            "APP_KEY":      creds.get("APP_KEY", ""),
-            "OAUTH_SECRET": creds.get("OAUTH_SECRET", ""),
-            "IMEI":         creds.get("IMEI", "abc1234"),
-        }
-        old_env = {k: _os.environ.get(k) for k in env_map}
-        for k, v in env_map.items():
-            _os.environ[k] = v
+        token = None
 
+        # ── Tier 0: Try cached token from shared file ────────────────────────
         try:
-            from broker.oauth_login import run_oauth_login
-            token = run_oauth_login()
-        finally:
-            for k, old_v in old_env.items():
-                if old_v is None:
-                    _os.environ.pop(k, None)
-                else:
-                    _os.environ[k] = old_v
+            cached = _load_shoonya_cached_token(creds["USER_ID"])
+            if cached:
+                log.info("Using cached Shoonya token from shared file")
+                token = cached
+        except Exception as e:
+            log.debug("Cached token not available: %s", e)
+
+        # ── Tier 1: Try direct QuickAuth API ─────────────────────────────────
+        if not token:
+            try:
+                direct = _shoonya_quick_auth(creds, log)
+                if direct:
+                    log.info("Shoonya direct API login OK")
+                    token = direct
+            except Exception as e:
+                log.warning("Direct API login failed: %s — falling back to OAuth", e)
+
+        # ── Tier 2: Full OAuth browser login (last resort) ───────────────────
+        if not token:
+            env_map = {
+                "USER_ID":      creds.get("USER_ID", ""),
+                "PASSWORD":     creds.get("PASSWORD", ""),
+                "TOKEN":        creds.get("TOKEN", ""),
+                "VC":           creds.get("VC", ""),
+                "APP_KEY":      creds.get("APP_KEY", ""),
+                "OAUTH_SECRET": creds.get("OAUTH_SECRET", ""),
+                "IMEI":         creds.get("IMEI", "abc1234"),
+            }
+            old_env = {k: _os.environ.get(k) for k in env_map}
+            for k, v in env_map.items():
+                _os.environ[k] = v
+
+            try:
+                from broker.oauth_login import run_oauth_login
+                token = run_oauth_login()
+            finally:
+                for k, old_v in old_env.items():
+                    if old_v is None:
+                        _os.environ.pop(k, None)
+                    else:
+                        _os.environ[k] = old_v
 
         if not token:
-            raise RuntimeError("Shoonya OAuth returned empty token")
+            raise RuntimeError("Shoonya login failed — all 3 methods exhausted")
 
         log.info("Shoonya auto-login OK — token length=%d", len(token))
         self._register_and_persist(

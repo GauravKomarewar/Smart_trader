@@ -533,7 +533,7 @@ class BrokerAccountSession:
                 self._relogin_in_progress = False
 
     def _relogin_shoonya(self, creds: dict, cfg, db) -> bool:
-        """Re-authenticate Shoonya via direct API login, falling back to OAuth."""
+        """Re-authenticate Shoonya via cached token, direct API, or OAuth fallback."""
         import os as _os
 
         required = ["USER_ID", "PASSWORD", "TOKEN", "VC", "APP_KEY", "OAUTH_SECRET"]
@@ -542,12 +542,18 @@ class BrokerAccountSession:
             self._log.error("Relogin shoonya: missing fields %s", missing)
             return False
 
-        # ── Attempt 1: Direct REST API login (fast, no browser) ──────────
-        token = self._shoonya_direct_login(creds)
+        token = None
 
-        # ── Attempt 2: OAuth headless browser (fallback) ─────────────────
+        # ── Attempt 0: Load cached token from shared file ────────────────
+        token = self._load_cached_shoonya_token(creds["USER_ID"])
+
+        # ── Attempt 1: Direct REST API login (fast, no browser) ──────────
         if not token:
-            self._log.info("Direct API login failed/unavailable — trying OAuth (headless browser)")
+            token = self._shoonya_direct_login(creds)
+
+        # ── Attempt 2: OAuth headless browser (last resort) ──────────────
+        if not token:
+            self._log.info("Direct API login failed — trying OAuth (headless browser)")
             env_map = {
                 "USER_ID":      creds.get("USER_ID", ""),
                 "PASSWORD":     creds.get("PASSWORD", ""),
@@ -571,31 +577,123 @@ class BrokerAccountSession:
                         _os.environ[k] = old_v
 
         if not token:
-            self._log.error("Relogin shoonya: both direct API and OAuth failed")
+            self._log.error("Relogin shoonya: all methods failed (cached/direct/OAuth)")
             return False
 
         ok = self.inject_shoonya_token(creds, token)
         if ok:
             self._log.info("ENSURE_LOGIN: Shoonya relogin SUCCESS — token length=%d", len(token))
             self._persist_token(cfg, db, token)
+            self._save_cached_shoonya_token(creds["USER_ID"], token)
         return ok
 
-    def _shoonya_direct_login(self, creds: dict) -> str | None:
-        """Direct REST API login to Shoonya (no browser needed)."""
+    # ── Shared token cache (cross-platform: shoonya_platform ↔ Smart Trader) ─
+
+    _TOKEN_CACHE_FILE = "/home/ubuntu/.shoonya_token.json"
+    _TOKEN_MAX_AGE_HOURS = 10  # Shoonya tokens valid ~12h; use within 10h
+
+    def _load_cached_shoonya_token(self, user_id: str) -> str | None:
+        """Load a previously-saved Shoonya token from the shared cache file."""
+        import json as _json, os as _os
+        from datetime import datetime, timedelta
         try:
-            import hashlib, json as _json, requests, pyotp
+            if not _os.path.exists(self._TOKEN_CACHE_FILE):
+                return None
+            with open(self._TOKEN_CACHE_FILE) as f:
+                data = _json.load(f)
+            if data.get("user_id") != user_id:
+                return None
+            saved_at = datetime.fromisoformat(data["timestamp"])
+            age = datetime.now() - saved_at
+            if age > timedelta(hours=self._TOKEN_MAX_AGE_HOURS):
+                self._log.info("Cached Shoonya token expired (%.1fh old)", age.total_seconds() / 3600)
+                return None
+            token = data.get("token", "")
+            if not token:
+                return None
+            # Validate the token with a lightweight API call
+            if self._validate_shoonya_token(user_id, token):
+                self._log.info("Cached Shoonya token is VALID (%.1fh old, source=%s)",
+                               age.total_seconds() / 3600, data.get("source", "unknown"))
+                return token
+            self._log.info("Cached Shoonya token INVALID (session expired)")
+            return None
+        except Exception as e:
+            self._log.debug("Could not load cached Shoonya token: %s", e)
+            return None
 
-            user_id   = creds["USER_ID"]
-            password  = creds["PASSWORD"]
-            totp_key  = creds["TOKEN"]
-            vc        = creds["VC"]
-            app_key   = creds["APP_KEY"]
-            imei      = creds.get("IMEI", "abc1234")
+    def _validate_shoonya_token(self, user_id: str, token: str) -> bool:
+        """Quick validation — call Limits endpoint to check if token is alive."""
+        import json as _json, requests
+        try:
+            payload = _json.dumps({"uid": user_id, "actid": user_id})
+            for host in ["https://api.shoonya.com/NorenWClientAPI", "https://trade.shoonya.com/NorenWClientAPI"]:
+                try:
+                    resp = requests.post(
+                        f"{host}/Limits",
+                        data="jData=" + payload + f"&jKey={token}",
+                        timeout=8,
+                    )
+                    if resp.status_code == 200:
+                        result = _json.loads(resp.text)
+                        if result.get("stat") == "Ok":
+                            return True
+                        if "session" in str(result.get("emsg", "")).lower():
+                            return False
+                        # Non-session error (e.g. market closed) — token might still be valid
+                        return result.get("stat") != "Not_Ok"
+                except Exception:
+                    continue
+            return False
+        except Exception:
+            return False
 
-            pwd_hash  = hashlib.sha256(password.encode()).hexdigest()
-            appkey_hash = hashlib.sha256(f"{vc}|{app_key}".encode()).hexdigest()
-            otp_val   = pyotp.TOTP(totp_key).now()
+    def _save_cached_shoonya_token(self, user_id: str, token: str, source: str = "direct_api"):
+        """Save token to shared cache file for cross-platform reuse."""
+        import json as _json
+        from datetime import datetime
+        try:
+            data = {
+                "user_id": user_id,
+                "token": token,
+                "timestamp": datetime.now().isoformat(),
+                "source": source,
+            }
+            with open(self._TOKEN_CACHE_FILE, "w") as f:
+                _json.dump(data, f)
+            self._log.info("Saved Shoonya token to cache file (source=%s)", source)
+        except Exception as e:
+            self._log.debug("Could not save Shoonya token cache: %s", e)
 
+    def _shoonya_direct_login(self, creds: dict) -> str | None:
+        """
+        Direct REST API login to Shoonya (no browser needed).
+        Uses the QuickAuth endpoint per official NorenApi spec.
+        Tries multiple hosts with retry logic.
+        """
+        import hashlib, json as _json, time as _time, requests, pyotp
+
+        user_id   = creds["USER_ID"]
+        password  = creds["PASSWORD"]
+        totp_key  = creds["TOKEN"]
+        vc        = creds["VC"]
+        app_key   = creds["APP_KEY"]
+        imei      = creds.get("IMEI", "abc1234")
+
+        pwd_hash  = hashlib.sha256(password.encode()).hexdigest()
+        # Official NorenApi: appkey = sha256(userid|api_secret)
+        appkey_hash = hashlib.sha256(f"{user_id}|{app_key}".encode()).hexdigest()
+
+        # Try multiple API hosts (Shoonya has both api.shoonya.com and trade.shoonya.com)
+        hosts = [
+            "https://api.shoonya.com/NorenWClientAPI",
+            "https://trade.shoonya.com/NorenWClientAPI",
+        ]
+
+        self._log.info("Shoonya direct API login (QuickAuth) for %s...", user_id)
+
+        for attempt in range(1, 4):  # 3 attempts
+            otp_val = pyotp.TOTP(totp_key).now()
             payload = {
                 "source": "API",
                 "apkversion": "1.0.0",
@@ -607,28 +705,51 @@ class BrokerAccountSession:
                 "imei": imei,
             }
 
-            self._log.info("Shoonya direct API login for %s...", user_id)
-            resp = requests.post(
-                "https://api.shoonya.com/NorenWClientTP/QuickAuth",
-                data="jData=" + _json.dumps(payload),
-                timeout=15,
-            )
+            for host in hosts:
+                url = f"{host}/QuickAuth"
+                try:
+                    resp = requests.post(
+                        url,
+                        data="jData=" + _json.dumps(payload),
+                        timeout=15,
+                    )
 
-            if resp.status_code != 200:
-                self._log.warning("Shoonya API returned HTTP %d", resp.status_code)
-                return None
+                    if resp.status_code == 502:
+                        self._log.debug("QuickAuth %s: HTTP 502 (server down)", host.split("//")[1].split("/")[0])
+                        continue
 
-            result = _json.loads(resp.text)
-            if result.get("stat") == "Ok":
-                token = result.get("susertoken", "")
-                if token:
-                    self._log.info("Shoonya direct login SUCCESS — token length=%d", len(token))
-                    return token
-            self._log.warning("Shoonya direct login failed: %s", result.get("emsg", "unknown"))
-            return None
-        except Exception as e:
-            self._log.warning("Shoonya direct login error: %s", e)
-            return None
+                    if resp.status_code != 200 and resp.status_code != 400:
+                        self._log.debug("QuickAuth %s: HTTP %d", host.split("//")[1].split("/")[0], resp.status_code)
+                        continue
+
+                    result = _json.loads(resp.text)
+                    if result.get("stat") == "Ok":
+                        token = result.get("susertoken", "")
+                        if token:
+                            self._log.info("Shoonya direct login SUCCESS via %s (attempt %d)",
+                                           host.split("//")[1].split("/")[0], attempt)
+                            return token
+                    else:
+                        emsg = result.get("emsg", "unknown")
+                        self._log.warning("QuickAuth %s: %s", host.split("//")[1].split("/")[0], emsg)
+                        # If it's a credential error (not server issue), don't retry
+                        if any(kw in emsg.lower() for kw in ["invalid", "password", "blocked"]):
+                            self._log.error("Shoonya direct login: credential error — aborting retries")
+                            return None
+
+                except requests.exceptions.Timeout:
+                    self._log.debug("QuickAuth %s: timeout", host.split("//")[1].split("/")[0])
+                except Exception as e:
+                    self._log.debug("QuickAuth %s: %s", host.split("//")[1].split("/")[0], e)
+
+            # Backoff between retry attempts (wait for new TOTP cycle if needed)
+            if attempt < 3:
+                wait = 5 * attempt
+                self._log.info("QuickAuth attempt %d failed — retrying in %ds", attempt, wait)
+                _time.sleep(wait)
+
+        self._log.warning("Shoonya direct login failed after 3 attempts (both hosts)")
+        return None
 
     def _relogin_fyers(self, creds: dict, cfg, db) -> bool:
         """Re-authenticate Fyers via direct API login."""

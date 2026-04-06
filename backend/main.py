@@ -267,14 +267,31 @@ def _restore_broker_sessions():
             client_id = cfg.client_id or creds.get("USER_ID") or creds.get("CLIENT_ID") or "?"
             token = db_sess.session_token
 
-            if db_sess.broker_id == "shoonya" and token:
+            if db_sess.broker_id == "shoonya":
+                # Try DB token first, then cached token file
+                shoonya_token = token
+                if not shoonya_token:
+                    try:
+                        from trading.session_scheduler import _load_shoonya_cached_token
+                        shoonya_token = _load_shoonya_cached_token(
+                            creds.get("USER_ID", client_id)
+                        )
+                        if shoonya_token:
+                            logger.info("Using cached Shoonya token from shared file for user=%s", db_sess.user_id[:8])
+                    except Exception:
+                        pass
+
+                if not shoonya_token:
+                    logger.warning("No Shoonya token available for user=%s — skipping restore", db_sess.user_id[:8])
+                    continue
+
                 try:
                     sess = registry.register_shoonya(
                         user_id=db_sess.user_id,
                         config_id=cfg.id,
                         client_id=client_id,
                         creds=creds,
-                        token=token,
+                        token=shoonya_token,
                     )
                     if sess.is_live:
                         restored += 1
@@ -282,12 +299,15 @@ def _restore_broker_sessions():
                             "Restored Shoonya session: user=%s client=%s",
                             db_sess.user_id[:8], client_id,
                         )
+                        # Update DB with fresh token if it came from cache
+                        if shoonya_token != token:
+                            db_sess.session_token = shoonya_token
+                            db.commit()
                     else:
                         logger.warning(
                             "Shoonya session restore failed (token may be expired): user=%s client=%s",
                             db_sess.user_id[:8], client_id,
                         )
-                        # Mark as logged out in DB since token is stale
                         db_sess.is_logged_in = False
                         db.commit()
                 except Exception as e:
