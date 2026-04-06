@@ -77,7 +77,19 @@ export function useLiveData() {
       setData(incoming)
     }
     const onBrokerAccounts = (data: any) => {
-      if (Array.isArray(data)) setAccounts(data as BrokerAccountWS[])
+      if (!Array.isArray(data)) return
+      // Anti-flicker: skip all-zero pushes when we already have meaningful data
+      const cur = useBrokerAccountsStore.getState().accounts
+      const hasExisting = cur && cur.length > 0 && cur.some(
+        (a: any) => a.cash || a.day_pnl || a.positions_count || a.orders_count
+      )
+      if (hasExisting) {
+        const hasIncoming = (data as any[]).some(
+          (a: any) => a.cash || a.day_pnl || a.positions_count || a.orders_count
+        )
+        if (!hasIncoming) return
+      }
+      setAccounts(data as BrokerAccountWS[])
     }
     const onBrokerData = (data: any) => {
       if (data) setBrokerData(data)

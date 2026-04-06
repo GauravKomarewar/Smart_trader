@@ -78,6 +78,10 @@ class ShoonyaAdapter(BrokerAdapter):
 
     def get_positions(self) -> List[Position]:
         raw = self._session.get_positions()
+        if raw is None:
+            raise RuntimeError("Session Expired: get_positions returned None")
+        if isinstance(raw, dict) and raw.get("stat") == "Not_Ok":
+            raise RuntimeError(f"Session Expired: {raw.get('emsg', 'unknown')}")
         return [self._enrich(self._map_position(p)) for p in (raw or [])]
 
     @staticmethod
@@ -125,6 +129,10 @@ class ShoonyaAdapter(BrokerAdapter):
 
     def get_order_book(self) -> List[Order]:
         raw = self._session.get_order_book()
+        if raw is None:
+            raise RuntimeError("Session Expired: get_order_book returned None")
+        if isinstance(raw, dict) and raw.get("stat") == "Not_Ok":
+            raise RuntimeError(f"Session Expired: {raw.get('emsg', 'unknown')}")
         return [self._enrich(self._map_order(o)) for o in (raw or [])]
 
     @staticmethod
@@ -163,6 +171,10 @@ class ShoonyaAdapter(BrokerAdapter):
 
     def get_funds(self) -> Funds:
         raw = self._session.get_limits()
+        if raw is None:
+            raise RuntimeError("Session Expired: get_funds returned None")
+        if isinstance(raw, dict) and raw.get("stat") == "Not_Ok":
+            raise RuntimeError(f"Session Expired: {raw.get('emsg', 'unknown')}")
         if not raw:
             return self._enrich(Funds(available_cash=0.0))
         return self._enrich(Funds(
@@ -181,9 +193,15 @@ class ShoonyaAdapter(BrokerAdapter):
             return []
         try:
             raw_list = client.get_holdings()
+            if isinstance(raw_list, dict) and raw_list.get("stat") == "Not_Ok":
+                emsg = str(raw_list.get("emsg", "")).lower()
+                if "session" in emsg or "expired" in emsg or "invalid" in emsg:
+                    raise RuntimeError(f"Session Expired: {raw_list.get('emsg', 'unknown')}")
             return [self._enrich(self._map_holding(h)) for h in (raw_list or [])]
         except json.JSONDecodeError:
             raise  # Empty response = session expired — let auto-relogin handle
+        except RuntimeError:
+            raise  # Session expired — let auto-relogin handle
         except Exception as e:
             logger.warning("get_holdings error: %s", e)
             return []
@@ -216,10 +234,16 @@ class ShoonyaAdapter(BrokerAdapter):
             raw_fn = getattr(client, "get_trade_book", None) or getattr(client, "tradebook", None)
             if raw_fn is None:
                 return []
-            raw_list = raw_fn() or []
-            return [self._enrich(self._map_trade(t)) for t in raw_list]
+            raw_list = raw_fn()
+            if isinstance(raw_list, dict) and raw_list.get("stat") == "Not_Ok":
+                emsg = str(raw_list.get("emsg", "")).lower()
+                if "session" in emsg or "expired" in emsg or "invalid" in emsg:
+                    raise RuntimeError(f"Session Expired: {raw_list.get('emsg', 'unknown')}")
+            return [self._enrich(self._map_trade(t)) for t in (raw_list or [])]
         except json.JSONDecodeError:
             raise  # Empty response = session expired — let auto-relogin handle
+        except RuntimeError:
+            raise  # Session expired — let auto-relogin handle
         except Exception as e:
             logger.warning("get_tradebook error: %s", e)
             return []

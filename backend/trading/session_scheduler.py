@@ -38,7 +38,7 @@ _LOGOUT_HOUR, _LOGOUT_MIN = 23, 55
 # ── Standalone helpers for 3-tier Shoonya login ───────────────────────────────
 
 _TOKEN_CACHE_FILE = "/home/ubuntu/.shoonya_token.json"
-_TOKEN_MAX_AGE_HOURS = 10
+_TOKEN_MAX_AGE_HOURS = 5
 
 
 def _load_shoonya_cached_token(user_id: str) -> str | None:
@@ -95,6 +95,19 @@ def _validate_shoonya_token(user_id: str, token: str) -> bool:
         return False
     except Exception:
         return False
+
+
+def _save_shoonya_cached_token(user_id: str, token: str, source: str = "unknown"):
+    """Save a Shoonya token to shared cache file for cross-platform use."""
+    import json as _json
+    data = {
+        "user_id": user_id,
+        "token": token,
+        "timestamp": datetime.now().isoformat(),
+        "source": source,
+    }
+    with open(_TOKEN_CACHE_FILE, "w") as f:
+        _json.dump(data, f)
 
 
 def _shoonya_quick_auth(creds: dict, log) -> str | None:
@@ -356,6 +369,12 @@ class SessionScheduler:
             cfg, creds, user_id, db, log,
             broker_id="shoonya", client_id=client_id, token=token,
         )
+        # Save to shared cache file for cross-platform token sharing
+        try:
+            _save_shoonya_cached_token(client_id, token, source="session_scheduler")
+            log.info("Saved Shoonya token to shared cache file")
+        except Exception as e:
+            log.debug("Could not save Shoonya token to cache: %s", e)
 
     def _login_fyers(self, cfg, creds: dict, user_id: str, db, log):
         """Fyers: Direct API TOTP login."""

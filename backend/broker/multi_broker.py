@@ -590,7 +590,7 @@ class BrokerAccountSession:
     # ── Shared token cache (cross-platform: shoonya_platform ↔ Smart Trader) ─
 
     _TOKEN_CACHE_FILE = "/home/ubuntu/.shoonya_token.json"
-    _TOKEN_MAX_AGE_HOURS = 10  # Shoonya tokens valid ~12h; use within 10h
+    _TOKEN_MAX_AGE_HOURS = 5  # Shoonya tokens valid ~6h; use within 5h
 
     def _load_cached_shoonya_token(self, user_id: str) -> str | None:
         """Load a previously-saved Shoonya token from the shared cache file."""

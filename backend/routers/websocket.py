@@ -155,32 +155,98 @@ def _ws_authenticate(token: str) -> dict | None:
         return None
 
 
-def _build_broker_accounts(user_id: str) -> list:
-    """Build enriched broker account cards. Lightweight version for WS push."""
-    from broker.multi_broker import registry as mb
-    live_sessions = mb.list_live_sessions(user_id)
+# ── Per-session data cache (prevents redundant API calls + anti-flicker) ──────
+
+import threading as _threading
+
+class _SessionDataCache:
+    """Cache of last-good data per broker session.
+    
+    Fetched once per cycle; both _build_dashboard and _build_broker_accounts
+    read from here instead of making separate API calls.
+    """
+
+    def __init__(self):
+        self._lock = _threading.Lock()
+        # config_id → {limits, positions, orders, trades, holdings}
+        self._data: dict[str, dict] = {}
+
+    def refresh(self, user_id: str):
+        """Fetch fresh data from all live sessions. Cache last-good per session."""
+        from broker.multi_broker import registry as mb
+        sessions = mb.list_live_sessions(user_id)
+        for sess in sessions:
+            cid = sess.config_id
+            old = self._data.get(cid, {})
+            new_entry: dict = {}
+
+            # Limits
+            try:
+                lim = sess.get_limits()
+                new_entry["limits"] = lim if lim else old.get("limits", {})
+            except Exception:
+                new_entry["limits"] = old.get("limits", {})
+
+            # Positions
+            try:
+                pos = sess.get_positions()
+                new_entry["positions"] = pos if pos is not None else old.get("positions", [])
+            except Exception:
+                new_entry["positions"] = old.get("positions", [])
+
+            # Orders
+            try:
+                ords = sess.get_order_book()
+                new_entry["orders"] = ords if ords is not None else old.get("orders", [])
+            except Exception:
+                new_entry["orders"] = old.get("orders", [])
+
+            # Trades
+            try:
+                trd = sess.get_tradebook()
+                new_entry["trades"] = trd if trd is not None else old.get("trades", [])
+            except Exception:
+                new_entry["trades"] = old.get("trades", [])
+
+            # Holdings
+            try:
+                hold = sess.get_holdings()
+                new_entry["holdings"] = hold if hold is not None else old.get("holdings", [])
+            except Exception:
+                new_entry["holdings"] = old.get("holdings", [])
+
+            # Session metadata
+            new_entry["sess"] = sess
+
+            with self._lock:
+                self._data[cid] = new_entry
+
+    def get_session_data(self, config_id: str) -> dict:
+        with self._lock:
+            return self._data.get(config_id, {})
+
+    def get_all_sessions(self) -> list[dict]:
+        with self._lock:
+            return list(self._data.values())
+
+    def clear(self):
+        with self._lock:
+            self._data.clear()
+
+
+def _build_broker_accounts_cached(cache: _SessionDataCache, user_id: str) -> list:
+    """Build enriched broker account cards from cached data (no extra API calls)."""
+    entries = cache.get_all_sessions()
     accounts = []
-    for sess in live_sessions:
-        limits = {}
-        positions = []
-        orders = []
-        trades = []
-        try:
-            limits = sess.get_limits() or {}
-        except Exception:
-            pass
-        try:
-            positions = sess.get_positions() or []
-        except Exception:
-            pass
-        try:
-            orders = sess.get_order_book() or []
-        except Exception:
-            pass
-        try:
-            trades = sess.get_tradebook() or []
-        except Exception:
-            pass
+    for entry in entries:
+        sess = entry.get("sess")
+        if not sess or not sess.is_live:
+            continue
+
+        limits = entry.get("limits", {})
+        positions = entry.get("positions", [])
+        orders = entry.get("orders", [])
+        trades = entry.get("trades", [])
 
         # P&L from positions
         day_pnl = unrealized = realized = 0.0
@@ -259,24 +325,45 @@ def _build_broker_accounts(user_id: str) -> list:
     return accounts
 
 
-def _build_dashboard(user_id: str) -> dict:
-    """Build combined dashboard snapshot across all brokers."""
-    from broker.multi_broker import registry as mb
+def _build_dashboard_cached(cache: _SessionDataCache, user_id: str) -> dict:
+    """Build combined dashboard snapshot from cached data (no extra API calls)."""
     from routers.orders import _normalize_position, _normalize_order
 
-    raw_positions = mb.get_positions(user_id)
-    raw_orders = mb.get_order_book(user_id)
-    holdings = mb.get_holdings(user_id)
-    trades = mb.get_tradebook(user_id)
-    funds = mb.get_funds(user_id)
+    all_positions = []
+    all_orders = []
+    all_holdings = []
+    all_trades = []
+    funds = []
+
+    for entry in cache.get_all_sessions():
+        sess = entry.get("sess")
+        if not sess or not sess.is_live:
+            continue
+        cid = sess.config_id
+        bid = sess.broker_id
+        clid = sess.client_id
+
+        for p in entry.get("positions", []):
+            all_positions.append(dict(p, account_id=cid, broker_id=bid, client_id=clid))
+        for o in entry.get("orders", []):
+            all_orders.append(dict(o, account_id=cid, broker_id=bid, client_id=clid))
+        all_holdings.extend(entry.get("holdings", []))
+        all_trades.extend(entry.get("trades", []))
+
+        lim = entry.get("limits", {})
+        if lim:
+            funds.append({
+                "available_cash": float(lim.get("available_cash") or lim.get("marginAvailable") or lim.get("cash") or 0),
+                "used_margin": float(lim.get("used_margin") or lim.get("marginUsed") or 0),
+            })
 
     # Filter out closed positions (qty=0) before normalizing
     active_raw = [
-        p for p in raw_positions
+        p for p in all_positions
         if float(p.get("netqty") or p.get("net_quantity") or p.get("qty", 0)) != 0
     ]
     positions = [_normalize_position(p, i) for i, p in enumerate(active_raw)]
-    orders = [_normalize_order(o, i) for i, o in enumerate(raw_orders)]
+    orders = [_normalize_order(o, i) for i, o in enumerate(all_orders)]
 
     total_equity = sum(f.get("available_cash", 0) + f.get("used_margin", 0) for f in funds)
     day_pnl = unrealized = realized = used_margin = avail_margin = cash = 0.0
@@ -292,9 +379,9 @@ def _build_dashboard(user_id: str) -> dict:
 
     return {
         "positions": positions,
-        "holdings": holdings,
+        "holdings": all_holdings,
         "orders": orders,
-        "trades": trades,
+        "trades": all_trades,
         "riskMetrics": {
             "accountId": "",
             "dailyPnl": round(day_pnl, 2),
@@ -321,35 +408,17 @@ def _build_dashboard(user_id: str) -> dict:
     }
 
 
-def _build_broker_data(user_id: str, config_id: str) -> dict | None:
-    """Build per-broker filtered data."""
-    from broker.multi_broker import registry as mb
-    sess = mb.get_session(user_id, config_id)
-    if not sess:
-        return None
-    raw_positions = []
-    holdings = []
-    raw_orders = []
-    trades = []
-    try:
-        raw_positions = sess.get_positions() or []
-    except Exception:
-        pass
-    try:
-        holdings = sess.get_holdings() or []
-    except Exception:
-        pass
-    try:
-        raw_orders = sess.get_order_book() or []
-    except Exception:
-        pass
-    try:
-        trades = sess.get_tradebook() or []
-    except Exception:
-        pass
-
+def _build_broker_data_cached(cache: _SessionDataCache, config_id: str) -> dict | None:
+    """Build per-broker filtered data from cached data."""
     from routers.orders import _normalize_position, _normalize_order
-    # Filter out closed positions (qty=0)
+    entry = cache.get_session_data(config_id)
+    if not entry:
+        return None
+    raw_positions = entry.get("positions", [])
+    holdings = entry.get("holdings", [])
+    raw_orders = entry.get("orders", [])
+    trades = entry.get("trades", [])
+
     active_raw = [
         p for p in raw_positions
         if float(p.get("netqty") or p.get("net_quantity") or p.get("qty", 0)) != 0
@@ -399,23 +468,30 @@ async def live_feed_websocket(websocket: WebSocket):
     subscribed_broker: str | None = None  # config_id of broker to get filtered data for
     stop_event = asyncio.Event()
 
+    data_cache = _SessionDataCache()
     _last_good_dashboard: dict | None = None
+    _last_good_accounts: list | None = None
 
     async def _push_loop():
-        """Background task: push data every second."""
-        nonlocal _last_good_dashboard
+        """Background task: refresh cache once, then build all views from it."""
+        nonlocal _last_good_dashboard, _last_good_accounts
         cycle = 0
         while not stop_event.is_set():
             try:
                 cycle += 1
                 ts = int(time.time())
 
-                # Dashboard data — every cycle (1s)
+                # ── Step 1: Refresh data cache (ONE set of API calls) ─────
                 try:
-                    dashboard = await asyncio.get_event_loop().run_in_executor(
-                        None, _build_dashboard, user_id
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, data_cache.refresh, user_id
                     )
-                    # Skip pushing empty data when we had good data before (prevents flicker)
+                except Exception as e:
+                    logger.debug("WS feed cache refresh error: %s", e)
+
+                # ── Step 2: Dashboard (every cycle, ~2s) ──────────────────
+                try:
+                    dashboard = _build_dashboard_cached(data_cache, user_id)
                     has_data = (
                         dashboard.get("positions")
                         or dashboard.get("orders")
@@ -433,7 +509,7 @@ async def live_feed_websocket(websocket: WebSocket):
                 except Exception as e:
                     logger.debug("WS feed dashboard error: %s", e)
 
-                # Risk alerts — every cycle (1s), drain from PositionWatcher
+                # ── Step 3: Risk alerts (every cycle) ─────────────────────
                 try:
                     from trading.position_watcher import position_watcher as pw
                     alerts = pw.drain_alerts(user_id)
@@ -443,7 +519,6 @@ async def live_feed_websocket(websocket: WebSocket):
                             "data": alerts,
                             "ts": ts,
                         }))
-                    # Push risk snapshots alongside dashboard
                     risk_snapshot = pw.get_latest_snapshot(user_id)
                     if risk_snapshot:
                         await websocket.send_text(json.dumps({
@@ -454,12 +529,20 @@ async def live_feed_websocket(websocket: WebSocket):
                 except Exception as e:
                     logger.debug("WS feed risk_alerts error: %s", e)
 
-                # Broker accounts — every 2 cycles (2s)
+                # ── Step 4: Broker accounts (every 2 cycles) ──────────────
                 if cycle % 2 == 0:
                     try:
-                        accounts = await asyncio.get_event_loop().run_in_executor(
-                            None, _build_broker_accounts, user_id
+                        accounts = _build_broker_accounts_cached(data_cache, user_id)
+                        # Anti-flicker: only push if accounts have data
+                        has_account_data = any(
+                            a.get("cash") or a.get("day_pnl") or a.get("positions_count")
+                            or a.get("orders_count")
+                            for a in accounts
                         )
+                        if has_account_data:
+                            _last_good_accounts = accounts
+                        elif _last_good_accounts:
+                            accounts = _last_good_accounts
                         await websocket.send_text(json.dumps({
                             "type": "broker_accounts",
                             "data": accounts,
@@ -468,12 +551,10 @@ async def live_feed_websocket(websocket: WebSocket):
                     except Exception as e:
                         logger.debug("WS feed accounts error: %s", e)
 
-                # Per-broker data — every cycle (1s), only if subscribed
+                # ── Step 5: Per-broker data (if subscribed) ───────────────
                 if subscribed_broker:
                     try:
-                        bdata = await asyncio.get_event_loop().run_in_executor(
-                            None, _build_broker_data, user_id, subscribed_broker
-                        )
+                        bdata = _build_broker_data_cached(data_cache, subscribed_broker)
                         if bdata:
                             await websocket.send_text(json.dumps({
                                 "type": "broker_data",
@@ -490,7 +571,7 @@ async def live_feed_websocket(websocket: WebSocket):
                 stop_event.set()
                 return
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
     push_task = asyncio.create_task(_push_loop())
 
