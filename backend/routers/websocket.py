@@ -262,18 +262,23 @@ def _build_broker_accounts(user_id: str) -> list:
 def _build_dashboard(user_id: str) -> dict:
     """Build combined dashboard snapshot across all brokers."""
     from broker.multi_broker import registry as mb
-    positions = mb.get_positions(user_id)
-    orders = mb.get_order_book(user_id)
+    from routers.orders import _normalize_position, _normalize_order
+
+    raw_positions = mb.get_positions(user_id)
+    raw_orders = mb.get_order_book(user_id)
     holdings = mb.get_holdings(user_id)
     trades = mb.get_tradebook(user_id)
     funds = mb.get_funds(user_id)
+
+    positions = [_normalize_position(p, i) for i, p in enumerate(raw_positions)]
+    orders = [_normalize_order(o, i) for i, o in enumerate(raw_orders)]
 
     total_equity = sum(f.get("available_cash", 0) + f.get("used_margin", 0) for f in funds)
     day_pnl = unrealized = realized = used_margin = avail_margin = cash = 0.0
     for p in positions:
         if isinstance(p, dict):
-            unrealized += float(p.get("unrealised_pnl") or p.get("pnl") or 0)
-            realized += float(p.get("realised_pnl") or p.get("rpnl") or 0)
+            unrealized += float(p.get("dayPnl") or p.get("unrealised_pnl") or 0)
+            realized += float(p.get("pnl", 0)) - float(p.get("dayPnl") or p.get("unrealised_pnl") or 0)
     day_pnl = unrealized + realized
     for f in funds:
         used_margin += float(f.get("used_margin") or 0)
@@ -317,12 +322,12 @@ def _build_broker_data(user_id: str, config_id: str) -> dict | None:
     sess = mb.get_session(user_id, config_id)
     if not sess:
         return None
-    positions = []
+    raw_positions = []
     holdings = []
-    orders = []
+    raw_orders = []
     trades = []
     try:
-        positions = sess.get_positions() or []
+        raw_positions = sess.get_positions() or []
     except Exception:
         pass
     try:
@@ -330,13 +335,18 @@ def _build_broker_data(user_id: str, config_id: str) -> dict | None:
     except Exception:
         pass
     try:
-        orders = sess.get_order_book() or []
+        raw_orders = sess.get_order_book() or []
     except Exception:
         pass
     try:
         trades = sess.get_tradebook() or []
     except Exception:
         pass
+
+    from routers.orders import _normalize_position, _normalize_order
+    positions = [_normalize_position(p, i) for i, p in enumerate(raw_positions)]
+    orders = [_normalize_order(o, i) for i, o in enumerate(raw_orders)]
+
     return {
         "positions": positions,
         "holdings": holdings,

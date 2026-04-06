@@ -93,11 +93,11 @@ export default function HoldingsTable() {
                   <td className={cn('px-3 py-2 text-[12px] font-mono font-semibold text-right', pnlClass(h.pnl))}>
                     {h.pnl >= 0 ? '+' : ''}{fmtINR(h.pnl)}
                   </td>
-                  <td className={cn('px-3 py-2 text-[11px] font-mono text-right', pnlClass(h.pnlPct))}>
-                    {h.pnlPct >= 0 ? '+' : ''}{h.pnlPct.toFixed(2)}%
+                  <td className={cn('px-3 py-2 text-[11px] font-mono text-right', pnlClass(h.pnlPct ?? 0))}>
+                    {(h.pnlPct ?? 0) >= 0 ? '+' : ''}{(h.pnlPct ?? 0).toFixed(2)}%
                   </td>
-                  <td className={cn('px-3 py-2 text-[11px] font-mono text-right', pnlClass(h.dayChange))}>
-                    {h.dayChange >= 0 ? '+' : ''}{h.dayChangePct.toFixed(2)}%
+                  <td className={cn('px-3 py-2 text-[11px] font-mono text-right', pnlClass(h.dayChange ?? 0))}>
+                    {(h.dayChange ?? 0) >= 0 ? '+' : ''}{(h.dayChangePct ?? 0).toFixed(2)}%
                   </td>
                   <td className="px-3 py-2">
                     <button

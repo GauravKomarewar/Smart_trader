@@ -138,10 +138,10 @@ export default function PositionManager() {
                   <td className={cn('px-3 py-2 text-[12px] font-mono font-semibold', pnlClass(p.pnl))}>
                     {p.pnl >= 0 ? '+' : ''}{fmtINR(p.pnl)}
                   </td>
-                  <td className={cn('px-3 py-2 text-[11px] font-mono', pnlClass(p.pnlPct))}>
-                    {p.pnlPct >= 0 ? '+' : ''}{p.pnlPct.toFixed(2)}%
+                  <td className={cn('px-3 py-2 text-[11px] font-mono', pnlClass(p.pnlPct ?? 0))}>
+                    {(p.pnlPct ?? 0) >= 0 ? '+' : ''}{(p.pnlPct ?? 0).toFixed(2)}%
                   </td>
-                  <td className="px-3 py-2 text-[11px] font-mono text-right text-text-sec">{fmtINR(Math.abs(p.value))}</td>
+                  <td className="px-3 py-2 text-[11px] font-mono text-right text-text-sec">{fmtINR(Math.abs(p.value ?? 0))}</td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button
