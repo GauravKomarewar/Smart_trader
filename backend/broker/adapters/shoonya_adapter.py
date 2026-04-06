@@ -18,6 +18,7 @@ Holdings: tsym, exch, holdqty, dpqty, t1qty, avgprc, upldprc
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -181,6 +182,8 @@ class ShoonyaAdapter(BrokerAdapter):
         try:
             raw_list = client.get_holdings()
             return [self._enrich(self._map_holding(h)) for h in (raw_list or [])]
+        except json.JSONDecodeError:
+            raise  # Empty response = session expired — let auto-relogin handle
         except Exception as e:
             logger.warning("get_holdings error: %s", e)
             return []
@@ -215,6 +218,8 @@ class ShoonyaAdapter(BrokerAdapter):
                 return []
             raw_list = raw_fn() or []
             return [self._enrich(self._map_trade(t)) for t in raw_list]
+        except json.JSONDecodeError:
+            raise  # Empty response = session expired — let auto-relogin handle
         except Exception as e:
             logger.warning("get_tradebook error: %s", e)
             return []

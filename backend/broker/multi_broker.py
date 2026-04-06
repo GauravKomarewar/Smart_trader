@@ -95,6 +95,10 @@ class BrokerAccountSession:
         self._last_relogin_at: Optional[datetime] = None
         self._relogin_in_progress = False
 
+        # Session health tracking — circuit breaker for dead sessions
+        self._consecutive_data_failures = 0
+        self._stale_since: Optional[datetime] = None
+
     # ── Connection ────────────────────────────────────────────────────────────
 
     def inject_shoonya_token(self, creds: dict, token: str) -> bool:
@@ -387,6 +391,8 @@ class BrokerAccountSession:
     # ── Ensure-Login (Auto-Reconnect) ────────────────────────────────────────
 
     _RELOGIN_COOLDOWN_SECS = 60
+    _MAX_DATA_FAILURES_BEFORE_STALE = 5   # Mark session stale after N consecutive data failures
+    _STALE_HEALTH_CHECK_SECS = 300        # Re-attempt one data call every 5 min when stale
     _SESSION_ERROR_PATTERNS = [
         "session expired", "token expired", "invalid token",
         "unauthorized", "not logged in", "session not found",
@@ -425,6 +431,47 @@ class BrokerAccountSession:
                 if any(pat in msg2 for pat in self._SESSION_ERROR_PATTERNS):
                     return True
         return False
+
+    # ── Session health tracking (circuit breaker) ────────────────────────────
+
+    def _is_data_stale(self) -> bool:
+        """Return True if session is stale — skip data calls to prevent log flood."""
+        if self._stale_since is None:
+            return False
+        elapsed = (datetime.now(timezone.utc) - self._stale_since).total_seconds()
+        if elapsed >= self._STALE_HEALTH_CHECK_SECS:
+            self._log.info("HEALTH_CHECK: stale session — allowing one data call to probe health")
+            self._stale_since = datetime.now(timezone.utc)  # reset timer for next probe
+            return False
+        return True
+
+    def _record_data_success(self):
+        """Reset failure counter on successful data fetch."""
+        if self._stale_since is not None:
+            self._log.info("Session recovered — data fetch OK after %d failures",
+                           self._consecutive_data_failures)
+        self._consecutive_data_failures = 0
+        self._stale_since = None
+
+    def _record_data_failure(self):
+        """Increment failure counter; mark session stale after threshold."""
+        self._consecutive_data_failures += 1
+        if (self._consecutive_data_failures >= self._MAX_DATA_FAILURES_BEFORE_STALE
+                and self._stale_since is None):
+            self._stale_since = datetime.now(timezone.utc)
+            self._log.warning(
+                "SESSION_STALE: %d consecutive data failures for %s/%s "
+                "— pausing data polling for %ds (health-check every %ds)",
+                self._consecutive_data_failures, self.broker_id, self.client_id,
+                self._STALE_HEALTH_CHECK_SECS, self._STALE_HEALTH_CHECK_SECS,
+            )
+
+    def _should_log_data_error(self) -> bool:
+        """Rate-limit data error logging: first failure, then every 10th."""
+        n = self._consecutive_data_failures
+        return n <= 1 or n % 10 == 0
+
+    # ── Relogin ──────────────────────────────────────────────────────────────
 
     def _relogin(self) -> bool:
         """
@@ -598,14 +645,20 @@ class BrokerAccountSession:
             self._log.info("ENSURE_LOGIN: relogin OK — retrying %s", getattr(fn, '__name__', str(fn)))
             return fn(*args, **kwargs)
 
-    # ── Data Methods (with ensure_login auto-reconnect) ─────────────────────
+    # ── Data Methods (with ensure_login auto-reconnect + circuit breaker) ──
 
     def get_positions(self) -> list:
         if self._adapter is not None:
+            if self._is_data_stale():
+                return []
             try:
-                return [p.to_dict() for p in self._call_with_relogin(self._adapter.get_positions)]
+                result = [p.to_dict() for p in self._call_with_relogin(self._adapter.get_positions)]
+                self._record_data_success()
+                return result
             except Exception as e:
-                self._log.error("get_positions (adapter) error: %s", e)
+                self._record_data_failure()
+                if self._should_log_data_error():
+                    self._log.error("get_positions (adapter) error: %s", e)
                 return []
         if not self.is_live or self._client is None:
             return []
@@ -622,10 +675,16 @@ class BrokerAccountSession:
 
     def get_order_book(self) -> list:
         if self._adapter is not None:
+            if self._is_data_stale():
+                return []
             try:
-                return [o.to_dict() for o in self._call_with_relogin(self._adapter.get_order_book)]
+                result = [o.to_dict() for o in self._call_with_relogin(self._adapter.get_order_book)]
+                self._record_data_success()
+                return result
             except Exception as e:
-                self._log.error("get_order_book (adapter) error: %s", e)
+                self._record_data_failure()
+                if self._should_log_data_error():
+                    self._log.error("get_order_book (adapter) error: %s", e)
                 return []
         if not self.is_live or self._client is None:
             return []
@@ -642,10 +701,16 @@ class BrokerAccountSession:
 
     def get_limits(self) -> dict:
         if self._adapter is not None:
+            if self._is_data_stale():
+                return {}
             try:
-                return self._call_with_relogin(self._adapter.get_funds).to_dict()
+                result = self._call_with_relogin(self._adapter.get_funds).to_dict()
+                self._record_data_success()
+                return result
             except Exception as e:
-                self._log.error("get_limits (adapter) error: %s", e)
+                self._record_data_failure()
+                if self._should_log_data_error():
+                    self._log.error("get_limits (adapter) error: %s", e)
                 return {}
         if not self.is_live or self._client is None:
             return {}
@@ -660,10 +725,16 @@ class BrokerAccountSession:
 
     def get_holdings(self) -> list:
         if self._adapter is not None:
+            if self._is_data_stale():
+                return []
             try:
-                return [h.to_dict() for h in self._call_with_relogin(self._adapter.get_holdings)]
+                result = [h.to_dict() for h in self._call_with_relogin(self._adapter.get_holdings)]
+                self._record_data_success()
+                return result
             except Exception as e:
-                self._log.error("get_holdings (adapter) error: %s", e)
+                self._record_data_failure()
+                if self._should_log_data_error():
+                    self._log.error("get_holdings (adapter) error: %s", e)
                 return []
         if not self.is_live or self._client is None:
             return []
@@ -680,10 +751,16 @@ class BrokerAccountSession:
 
     def get_tradebook(self) -> list:
         if self._adapter is not None:
+            if self._is_data_stale():
+                return []
             try:
-                return [t.to_dict() for t in self._call_with_relogin(self._adapter.get_tradebook)]
+                result = [t.to_dict() for t in self._call_with_relogin(self._adapter.get_tradebook)]
+                self._record_data_success()
+                return result
             except Exception as e:
-                self._log.error("get_tradebook (adapter) error: %s", e)
+                self._record_data_failure()
+                if self._should_log_data_error():
+                    self._log.error("get_tradebook (adapter) error: %s", e)
                 return []
         return []  # No tradebook without adapter
 

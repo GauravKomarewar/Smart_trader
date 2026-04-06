@@ -13,6 +13,7 @@ Architecture:
 """
 
 import os
+import json
 import logging
 import threading
 import time
@@ -305,6 +306,8 @@ class BrokerSession:
 
         try:
             return self._client.get_positions() or []
+        except json.JSONDecodeError:
+            raise  # Empty response = session expired — let auto-relogin handle
         except Exception as e:
             logger.error("get_positions error: %s", e)
             return []
@@ -319,6 +322,8 @@ class BrokerSession:
 
         try:
             return self._client.get_order_book() or []
+        except json.JSONDecodeError:
+            raise  # Empty response = session expired — let auto-relogin handle
         except Exception as e:
             logger.error("get_order_book error: %s", e)
             return []
@@ -343,6 +348,8 @@ class BrokerSession:
                 "totalBalance":     float(raw.get("collateral") or raw.get("brkcsh") or raw.get("cash") or 0),
                 "raw":              raw,
             }
+        except json.JSONDecodeError:
+            raise  # Empty response = session expired — let auto-relogin handle
         except Exception as e:
             logger.error("get_limits error: %s", e)
             return {}
