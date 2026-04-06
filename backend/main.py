@@ -229,7 +229,13 @@ async def on_startup():
         logger.info("SessionScheduler started — auto-login@08:45 IST, auto-logout@23:55 IST")
     except Exception as exc:
         logger.warning("SessionScheduler start failed (non-fatal): %s", exc)
-
+    # ── Start SupremeManager (DB-backed data managers) ───────────────────
+    try:
+        from managers.supreme_manager import supreme
+        supreme.start()
+        logger.info("SupremeManager started — all data managers active")
+    except Exception as exc:
+        logger.warning("SupremeManager start failed (non-fatal): %s", exc)
 
 def _restore_broker_sessions():
     """
@@ -350,7 +356,14 @@ def _restore_broker_sessions():
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    # Stop PositionWatcher first
+    # Stop SupremeManager first (stops all data managers)
+    try:
+        from managers.supreme_manager import supreme
+        supreme.stop()
+    except Exception:
+        pass
+
+    # Stop PositionWatcher
     try:
         from trading.position_watcher import position_watcher
         position_watcher.stop()

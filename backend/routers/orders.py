@@ -182,24 +182,14 @@ async def get_order_book(
     db: Session = Depends(get_db),
 ):
     """
-    Return today's order book.
+    Return today's order book from PostgreSQL (via SupremeManager).
     If account_id is provided → single account.
     Otherwise → aggregated across all live accounts.
     """
     user_id = payload["sub"]
-    from broker.multi_broker import registry as mb
-    live_sessions = mb.list_live_sessions(user_id)
-
-    if live_sessions:
-        orders = mb.get_order_book(user_id, config_id=account_id)
-        if not orders and not account_id:
-            # Fall back to legacy session
-            session = _resolve_session(user_id, db)
-            orders = session.get_order_book()
-    else:
-        session = _resolve_session(user_id, db)
-        orders = session.get_order_book()
-
+    from managers.supreme_manager import supreme
+    rows = supreme.get_orders(user_id, config_id=account_id)
+    orders = [r["data"] if "data" in r else r for r in rows]
     return {"data": orders, "count": len(orders)}
 
 
@@ -210,23 +200,14 @@ async def get_positions(
     db: Session = Depends(get_db),
 ):
     """
-    Return open positions.
+    Return open positions from PostgreSQL (via SupremeManager).
     If account_id is provided → single account.
     Otherwise → aggregated across all live accounts.
     """
     user_id = payload["sub"]
-    from broker.multi_broker import registry as mb
-    live_sessions = mb.list_live_sessions(user_id)
-
-    if live_sessions:
-        positions = mb.get_positions(user_id, config_id=account_id)
-        if not positions and not account_id:
-            session = _resolve_session(user_id, db)
-            positions = session.get_positions()
-    else:
-        session = _resolve_session(user_id, db)
-        positions = session.get_positions()
-
+    from managers.supreme_manager import supreme
+    rows = supreme.get_positions(user_id, config_id=account_id)
+    positions = [r["data"] if "data" in r else r for r in rows]
     return {"data": positions, "count": len(positions)}
 
 
@@ -398,125 +379,32 @@ def _normalize_order(o: dict, idx: int) -> dict:
 @router.get("/dashboard")
 async def get_dashboard(payload: dict = Depends(current_user), db: Session = Depends(get_db)):
     """
-    Return normalized live dashboard data: positions, orders, holdings, trades, account summary.
-    Aggregates across all connected broker accounts (multi-broker aware).
-    Falls back to legacy single session if no multi-broker sessions exist.
+    Return normalized live dashboard data from PostgreSQL (via SupremeManager).
+    Positions, orders, holdings, trades, account summary — all from DB.
     """
     user_id = payload["sub"]
-    from broker.multi_broker import registry as mb
+    from managers.supreme_manager import supreme
 
-    live_sessions = mb.list_live_sessions(user_id)
-    all_raw_positions = []
-    all_raw_orders = []
-    all_raw_holdings = []
-    all_raw_trades = []
-    all_limits = {}
-    is_live = False
-
-    if live_sessions:
-        is_live = True
-        for sess in live_sessions:
-            try:
-                raw_pos = sess.get_positions() or []
-                all_raw_positions.extend(raw_pos)
-            except Exception as e:
-                logger.warning("Dashboard: get_positions failed for %s: %s", sess.client_id, e)
-            try:
-                raw_ord = sess.get_order_book() or []
-                all_raw_orders.extend(raw_ord)
-            except Exception as e:
-                logger.warning("Dashboard: get_order_book failed for %s: %s", sess.client_id, e)
-            try:
-                raw_hold = sess.get_holdings() or []
-                all_raw_holdings.extend(raw_hold)
-            except Exception as e:
-                logger.debug("Dashboard: get_holdings failed for %s: %s", sess.client_id, e)
-            try:
-                raw_trades = sess.get_tradebook() or []
-                all_raw_trades.extend(raw_trades)
-            except Exception as e:
-                logger.debug("Dashboard: get_tradebook failed for %s: %s", sess.client_id, e)
-        # Aggregate limits from first live session (primary account)
-        try:
-            all_limits = live_sessions[0].get_limits() or {}
-        except Exception:
-            pass
-    else:
-        # Legacy single-session fallback
-        session = _resolve_session(user_id, db)
-        is_live = not session.is_demo
-        all_raw_positions = session.get_positions() or []
-        all_raw_orders = session.get_order_book() or []
-        if is_live:
-            all_limits = session.get_limits() or {}
-
-    positions = [_normalize_position(p, i) for i, p in enumerate(all_raw_positions)]
-    orders = [_normalize_order(o, i) for i, o in enumerate(all_raw_orders)]
+    dashboard = supreme.get_dashboard(user_id)
 
     # ── Merge DB orders (always show Smart Trader orders from PostgreSQL) ──
     try:
         from trading.persistence.repository import OrderRepository
         db_repo = OrderRepository(user_id, "__all__")
         db_records = db_repo.get_all(limit=200)
-        # Build set of broker_order_ids already in broker orders
-        broker_ids = {o.get("orderId") for o in orders if o.get("orderId")}
+        broker_ids = {o.get("orderId") for o in dashboard.get("orders", []) if o.get("orderId")}
+        extra_orders = []
         for i, rec in enumerate(db_records):
-            # Skip if broker already returned this order (deduplicate)
             if rec.broker_order_id and rec.broker_order_id in broker_ids:
                 continue
-            orders.append(_normalize_db_order(rec, len(orders) + i))
+            extra_orders.append(_normalize_db_order(rec, len(dashboard.get("orders", [])) + i))
+        if extra_orders:
+            dashboard["orders"] = dashboard.get("orders", []) + extra_orders
     except Exception as e:
         logger.warning("Dashboard: failed to merge DB orders: %s", e)
 
-    # Normalize holdings
-    holdings = []
-    for i, h in enumerate(all_raw_holdings):
-        if isinstance(h, dict):
-            holdings.append(h)
-        else:
-            try:
-                holdings.append(h.to_dict() if hasattr(h, 'to_dict') else vars(h))
-            except Exception:
-                pass
-
-    # Normalize trades
-    trades = []
-    for i, t in enumerate(all_raw_trades):
-        if isinstance(t, dict):
-            trades.append(t)
-        else:
-            try:
-                trades.append(t.to_dict() if hasattr(t, 'to_dict') else vars(t))
-            except Exception:
-                pass
-
-    # Account summary — aggregate P&L from positions
-    total_pnl = sum(p["pnl"] for p in positions)
-    realized_pnl = 0.0
-    for rp in all_raw_positions:
-        if isinstance(rp, dict):
-            realized_pnl += float(rp.get("rpnl") or rp.get("realised_pnl") or rp.get("realized_pnl") or 0)
-    unrealized = total_pnl - realized_pnl
-
-    return {
-        "positions": positions,
-        "holdings": holdings,
-        "orders": orders,
-        "trades": trades,
-        "riskMetrics": None,
-        "accountSummary": {
-            "totalEquity": all_limits.get("totalBalance") or all_limits.get("grossAvailableMargin", 0.0),
-            "dayPnl": total_pnl,
-            "dayPnlPct": 0.0,
-            "unrealizedPnl": unrealized,
-            "realizedPnl": realized_pnl,
-            "usedMargin": all_limits.get("marginUsed") or all_limits.get("utilizedDebits", 0.0),
-            "availableMargin": all_limits.get("marginAvailable") or all_limits.get("cash", 0.0),
-            "cash": all_limits.get("cash", 0.0),
-            "payin": all_limits.get("payin", 0.0),
-        },
-        "source": "live" if is_live else "demo",
-    }
+    dashboard["source"] = "live"
+    return dashboard
 
 
 @router.get("/account-info")
@@ -569,12 +457,13 @@ async def get_holdings(
     db: Session = Depends(get_db),
 ):
     """
-    Return equity holdings (long-term demat positions).
+    Return equity holdings from PostgreSQL (via SupremeManager).
     If account_id is provided → single account; otherwise all live accounts.
     """
     user_id = payload["sub"]
-    from broker.multi_broker import registry as mb
-    holdings = mb.get_holdings(user_id, config_id=account_id)
+    from managers.supreme_manager import supreme
+    rows = supreme.get_holdings(user_id, config_id=account_id)
+    holdings = [r["data"] if "data" in r else r for r in rows]
     return {"data": holdings, "count": len(holdings)}
 
 
@@ -587,21 +476,13 @@ async def get_funds(
     db: Session = Depends(get_db),
 ):
     """
-    Return available funds and margin utilisation.
+    Return available funds and margin utilisation from PostgreSQL (via SupremeManager).
     If account_id is provided → single account; otherwise all live accounts.
     """
     user_id = payload["sub"]
-    from broker.multi_broker import registry as mb
-    live_sessions = mb.list_live_sessions(user_id)
-
-    if live_sessions:
-        funds = mb.get_funds(user_id, config_id=account_id)
-    else:
-        # Legacy fallback
-        session = _resolve_session(user_id, db)
-        raw = session.get_limits()
-        funds = [raw] if raw else []
-
+    from managers.supreme_manager import supreme
+    rows = supreme.get_funds(user_id, config_id=account_id)
+    funds = [r["data"] if "data" in r else r for r in rows]
     return {"data": funds, "count": len(funds)}
 
 
@@ -614,12 +495,13 @@ async def get_tradebook(
     db: Session = Depends(get_db),
 ):
     """
-    Return today's executed trades (fills).
+    Return today's executed trades (fills) from PostgreSQL (via SupremeManager).
     If account_id is provided → single account; otherwise all live accounts.
     """
     user_id = payload["sub"]
-    from broker.multi_broker import registry as mb
-    trades = mb.get_tradebook(user_id, config_id=account_id)
+    from managers.supreme_manager import supreme
+    rows = supreme.get_tradebook(user_id, config_id=account_id)
+    trades = [r["data"] if "data" in r else r for r in rows]
     return {"data": trades, "count": len(trades)}
 
 
@@ -720,165 +602,24 @@ async def get_broker_accounts(
     db: Session = Depends(get_db),
 ):
     """
-    Return enriched per-broker account cards for the dashboard.
-    Each card includes: cash, collateral, client_id, email, margin used,
+    Return enriched per-broker account cards from PostgreSQL (via SupremeManager).
+    Each card includes: cash, collateral, client_id, margin used,
     day P&L, connection status, risk manager status, trades today, orders today.
+    Also includes disconnected / offline configs from SQLite.
     """
     user_id = payload["sub"]
-    from broker.multi_broker import registry as mb
+    from managers.supreme_manager import supreme
     from db.database import BrokerConfig as DBConfig, BrokerSession as DBSess
 
-    live_sessions = mb.list_live_sessions(user_id)
+    accounts = supreme.get_broker_accounts(user_id)
+    seen_ids = {a["config_id"] for a in accounts}
 
-    # All DB broker configs for this user
+    # Add disconnected / offline configs from SQLite
     db_configs = (
         db.query(DBConfig)
         .filter(DBConfig.user_id == user_id, DBConfig.is_active == True)
         .all()
     )
-    db_by_id = {str(c.id): c for c in db_configs}
-
-    accounts = []
-    seen_ids = set()
-
-    for sess in live_sessions:
-        seen_ids.add(sess.config_id)
-        limits = {}
-        positions = []
-        orders = []
-        trades = []
-
-        try:
-            limits = sess.get_limits() or {}
-        except Exception:
-            pass
-        try:
-            positions = sess.get_positions() or []
-        except Exception:
-            pass
-        try:
-            orders = sess.get_order_book() or []
-        except Exception:
-            pass
-        try:
-            trades = sess.get_tradebook() or []
-        except Exception:
-            pass
-
-        # Calculate P&L from positions
-        day_pnl = 0.0
-        unrealized_pnl = 0.0
-        realized_pnl = 0.0
-        for p in positions:
-            if isinstance(p, dict):
-                u = float(p.get("unrealised_pnl") or p.get("pnl") or p.get("urmtom", 0) or 0)
-                r = float(p.get("realised_pnl") or p.get("rpnl", 0) or 0)
-                unrealized_pnl += u
-                realized_pnl += r
-                day_pnl += u + r
-            elif hasattr(p, "pnl"):
-                u = float(getattr(p, "unrealised_pnl", 0) or getattr(p, "pnl", 0) or 0)
-                r = float(getattr(p, "realised_pnl", 0) or 0)
-                unrealized_pnl += u
-                realized_pnl += r
-                day_pnl += u + r
-
-        # Funds: handle both adapter format (Funds.to_dict()) and raw client format
-        # Adapter keys: available_cash, used_margin, total_balance, realised_pnl, unrealised_pnl, collateral
-        # Legacy keys: cash, marginUsed, marginAvailable, totalBalance, raw
-        cash = float(
-            limits.get("available_cash")
-            or limits.get("cash")
-            or limits.get("marginAvailable")
-            or limits.get("net")
-            or 0
-        )
-        collateral = float(limits.get("collateral") or limits.get("collateralvalue") or 0)
-        available = float(
-            limits.get("available_cash")
-            or limits.get("marginAvailable")
-            or limits.get("cash")
-            or limits.get("net")
-            or 0
-        )
-        used = float(
-            limits.get("used_margin")
-            or limits.get("marginUsed")
-            or limits.get("utilizedDebits")
-            or 0
-        )
-        total = float(
-            limits.get("total_balance")
-            or limits.get("totalBalance")
-            or limits.get("grossAvailableMargin")
-            or (available + used)
-            or 0
-        )
-        # Use fund-level PnL if positions didn't provide any
-        if day_pnl == 0 and unrealized_pnl == 0:
-            unrealized_pnl = float(limits.get("unrealised_pnl") or limits.get("unrealizedPnl") or 0)
-            realized_pnl = float(limits.get("realised_pnl") or limits.get("realizedPnl") or 0)
-            day_pnl = unrealized_pnl + realized_pnl
-        payin = float(limits.get("payin") or 0)
-        payout = float(limits.get("payout") or 0)
-
-        # Count completed orders and trades
-        orders_count = len(orders)
-        trades_count = len(trades)
-        completed_orders = sum(1 for o in orders if _get_order_status(o) == "COMPLETE")
-        open_orders = sum(1 for o in orders if _get_order_status(o) in ("OPEN", "PENDING", "TRIGGER_PENDING"))
-
-        # Risk manager status
-        risk_info = _get_risk_status(user_id, sess.config_id, sess.broker_id, sess.client_id)
-
-        # DB session info
-        db_sess = (
-            db.query(DBSess)
-            .filter(DBSess.config_id == sess.config_id, DBSess.user_id == user_id)
-            .order_by(DBSess.login_at.desc())
-            .first()
-        )
-        login_at = db_sess.login_at.isoformat() if db_sess and db_sess.login_at else None
-
-        db_cfg = db_by_id.get(sess.config_id)
-
-        accounts.append({
-            "config_id":      sess.config_id,
-            "broker_id":      sess.broker_id,
-            "broker_name":    (db_cfg.broker_name if db_cfg else sess.broker_id).title(),
-            "client_id":      sess.client_id,
-            "is_live":        True,
-            "mode":           sess.mode,
-            "connected_at":   sess.connected_at.isoformat() if sess.connected_at else None,
-            "login_at":       login_at,
-            # Financials — from broker API
-            "cash":           cash,
-            "collateral":     collateral,
-            "available_margin": available,
-            "used_margin":    used,
-            "total_balance":  total,
-            "payin":          payin,
-            "payout":         payout,
-            "day_pnl":        round(day_pnl, 2),
-            "unrealized_pnl": round(unrealized_pnl, 2),
-            "realized_pnl":   round(realized_pnl, 2),
-            # Activity
-            "positions_count":  len(positions),
-            "orders_count":     orders_count,
-            "open_orders":      open_orders,
-            "completed_orders": completed_orders,
-            "trades_count":     trades_count,
-            # Risk
-            "risk_status":    risk_info.get("trading_allowed", True),
-            "risk_daily_pnl": risk_info.get("daily_pnl", 0),
-            "risk_halt_reason": risk_info.get("halt_reason"),
-            "risk_force_exit": risk_info.get("force_exit_triggered", False),
-            "error":          sess.error,
-            # Raw broker limits for transparency
-            "raw_limits":     {k: v for k, v in limits.items() if k not in ("raw",)},
-        })
-
-    # Disconnected / offline configs
     for cfg in db_configs:
         if cfg.id in seen_ids:
             continue
@@ -941,85 +682,12 @@ async def get_broker_data(
 ):
     """
     Return positions/holdings/orders/tradebook for a specific broker account.
-    Uses the same normalization as /dashboard but filtered to ONE config_id.
+    Reads from PostgreSQL via SupremeManager — no direct broker API calls.
     """
     user_id = payload["sub"]
-    from broker.multi_broker import registry as mb
+    from managers.supreme_manager import supreme
 
-    sess = mb.get_session(user_id, config_id)
-    if not sess or sess.is_demo:
-        raise HTTPException(404, "Broker account not connected or not found")
-
-    raw_positions = []
-    raw_orders = []
-    raw_holdings = []
-    raw_trades = []
-    limits = {}
-
-    try:
-        raw_positions = sess.get_positions() or []
-    except Exception as e:
-        logger.warning("broker-data: positions failed for %s: %s", config_id[:8], e)
-    try:
-        raw_orders = sess.get_order_book() or []
-    except Exception as e:
-        logger.warning("broker-data: orders failed for %s: %s", config_id[:8], e)
-    try:
-        raw_holdings = sess.get_holdings() or []
-    except Exception as e:
-        logger.debug("broker-data: holdings failed for %s: %s", config_id[:8], e)
-    try:
-        raw_trades = sess.get_tradebook() or []
-    except Exception as e:
-        logger.debug("broker-data: trades failed for %s: %s", config_id[:8], e)
-    try:
-        limits = sess.get_limits() or {}
-    except Exception:
-        pass
-
-    positions = [_normalize_position(p, i) for i, p in enumerate(raw_positions)]
-    orders = [_normalize_order(o, i) for i, o in enumerate(raw_orders)]
-
-    holdings = []
-    for h in raw_holdings:
-        if isinstance(h, dict):
-            holdings.append(h)
-        else:
-            try:
-                holdings.append(h.to_dict() if hasattr(h, 'to_dict') else vars(h))
-            except Exception:
-                pass
-
-    trades = []
-    for t in raw_trades:
-        if isinstance(t, dict):
-            trades.append(t)
-        else:
-            try:
-                trades.append(t.to_dict() if hasattr(t, 'to_dict') else vars(t))
-            except Exception:
-                pass
-
-    total_pnl = sum(p["pnl"] for p in positions)
-    realized_pnl = 0.0
-    for rp in raw_positions:
-        if isinstance(rp, dict):
-            realized_pnl += float(rp.get("rpnl") or rp.get("realised_pnl") or rp.get("realized_pnl") or 0)
-
-    return {
-        "config_id": config_id,
-        "broker_id": sess.broker_id,
-        "client_id": sess.client_id,
-        "positions": positions,
-        "holdings": holdings,
-        "orders": orders,
-        "trades": trades,
-        "accountSummary": {
-            "totalEquity": limits.get("totalBalance") or limits.get("grossAvailableMargin", 0.0),
-            "dayPnl": total_pnl,
-            "unrealizedPnl": total_pnl - realized_pnl,
-            "realizedPnl": realized_pnl,
-            "usedMargin": limits.get("marginUsed") or limits.get("utilizedDebits", 0.0),
-            "availableMargin": limits.get("marginAvailable") or limits.get("cash", 0.0),
-        },
-    }
+    bdata = supreme.get_broker_data(user_id, config_id)
+    if not bdata:
+        raise HTTPException(404, "Broker account not connected or no data available")
+    return bdata
