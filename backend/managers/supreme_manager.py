@@ -448,17 +448,48 @@ class SupremeManager:
 
             # Holdings
             cur.execute(
-                "SELECT data FROM mgr_holdings WHERE user_id = %s",
+                "SELECT data, config_id, broker_id, client_id "
+                "FROM mgr_holdings WHERE user_id = %s",
                 (user_id,),
             )
-            all_holdings = [r["data"] for r in cur.fetchall()]
+            all_holdings = []
+            for r in cur.fetchall():
+                items = r["data"]
+                # data can be a list of holdings or a single holding dict
+                if isinstance(items, list):
+                    for h in items:
+                        hh = dict(h) if isinstance(h, dict) else {"raw": h}
+                        hh["account_id"] = r["config_id"]
+                        hh["broker_id"] = r["broker_id"]
+                        hh["client_id"] = r["client_id"]
+                        all_holdings.append(hh)
+                elif isinstance(items, dict):
+                    items["account_id"] = r["config_id"]
+                    items["broker_id"] = r["broker_id"]
+                    items["client_id"] = r["client_id"]
+                    all_holdings.append(items)
 
             # Trades
             cur.execute(
-                "SELECT data FROM mgr_tradebook WHERE user_id = %s",
+                "SELECT data, config_id, broker_id, client_id "
+                "FROM mgr_tradebook WHERE user_id = %s",
                 (user_id,),
             )
-            all_trades = [r["data"] for r in cur.fetchall()]
+            all_trades = []
+            for r in cur.fetchall():
+                items = r["data"]
+                if isinstance(items, list):
+                    for t in items:
+                        tt = dict(t) if isinstance(t, dict) else {"raw": t}
+                        tt["account_id"] = r["config_id"]
+                        tt["broker_id"] = r["broker_id"]
+                        tt["client_id"] = r["client_id"]
+                        all_trades.append(tt)
+                elif isinstance(items, dict):
+                    items["account_id"] = r["config_id"]
+                    items["broker_id"] = r["broker_id"]
+                    items["client_id"] = r["client_id"]
+                    all_trades.append(items)
 
             # Funds
             cur.execute(

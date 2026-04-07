@@ -195,6 +195,8 @@ CREATE TABLE IF NOT EXISTS position_sl_settings (
     trailing_value  DOUBLE PRECISION,
     trail_when      DOUBLE PRECISION,
     trail_stop      DOUBLE PRECISION,
+    initial_ltp     DOUBLE PRECISION,
+    base_stop_loss  DOUBLE PRECISION,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (user_id, config_id, pos_key)

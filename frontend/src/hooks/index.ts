@@ -319,19 +319,18 @@ const _UL_EXCHANGE: Record<string, string> = {
 }
 
 export function useOptionChain() {
-  const { selectedUnderlying, selectedExpiry, setData, setLoading } = useOptionChainStore()
+  const { selectedUnderlying, selectedExpiry, data: existingData, setData, setLoading } = useOptionChainStore()
 
   useEffect(() => {
     let cancelled = false
     const load = async () => {
-      setLoading(true)
+      // Only show loading overlay on initial load (no data yet), not on polls
+      if (!existingData) setLoading(true)
       const exchange = _UL_EXCHANGE[selectedUnderlying] || 'NSE'
       try {
         const data = await api.optionChain(selectedUnderlying, selectedExpiry || undefined, exchange) as any
         if (cancelled) return
         if (data) {
-          // Always use backend response — it includes ScriptMaster expiries and
-          // chain structure even when market is closed (source="scriptmaster")
           setData(data)
           return
         }

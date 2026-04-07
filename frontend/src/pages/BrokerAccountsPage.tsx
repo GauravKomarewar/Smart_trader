@@ -204,9 +204,9 @@ export default function BrokerAccountsPage() {
                   toast={toast}
                 />
               )}
-              {activeTab === 'holdings'  && <BrokerHoldingsTable  data={brokerData?.holdings ?? []} accountId={selectedId ?? ''} toast={toast} />}
-              {activeTab === 'orders'    && <BrokerOrdersTable    data={brokerData?.orders ?? []} accountId={selectedId ?? ''} toast={toast} />}
-              {activeTab === 'trades'    && <BrokerTradesTable    data={brokerData?.trades ?? []} />}
+              {activeTab === 'holdings'  && <BrokerHoldingsTable  data={brokerData?.holdings ?? []} accountId={selectedId ?? ''} account={selected} brokerIdx={selectedIdx} toast={toast} />}
+              {activeTab === 'orders'    && <BrokerOrdersTable    data={brokerData?.orders ?? []} accountId={selectedId ?? ''} account={selected} brokerIdx={selectedIdx} toast={toast} />}
+              {activeTab === 'trades'    && <BrokerTradesTable    data={brokerData?.trades ?? []} account={selected} brokerIdx={selectedIdx} />}
               {activeTab === 'diagnostics' && <DiagnosticsSection toast={toast} accounts={accounts} selectedConfigId={selectedId} />}
             </div>
           </div>
@@ -348,7 +348,7 @@ function BrokerPositionsTable({
   )
 }
 
-function BrokerHoldingsTable({ data, accountId, toast }: { data: any[]; accountId: string; toast: (m: string, t: 'success'|'error'|'warning'|'info') => void }) {
+function BrokerHoldingsTable({ data, accountId, account, brokerIdx, toast }: { data: any[]; accountId: string; account: BrokerAccountWS | null; brokerIdx: number; toast: (m: string, t: 'success'|'error'|'warning'|'info') => void }) {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [edits, setEdits] = useState<Record<string, Record<string, string>>>({})
   const [managed, setManaged] = useState<Record<string, Record<string, any>>>({})
@@ -386,12 +386,16 @@ function BrokerHoldingsTable({ data, accountId, toast }: { data: any[]; accountI
       <table className="data-table">
         <thead className="sticky top-0 bg-bg-card z-10">
           <tr>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Broker</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Symbol</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Exchange</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Qty</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Avg Price</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">LTP</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Curr. Value</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Invested</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">P&L</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">%</th>
             <th className="px-3 py-2 w-10"></th>
           </tr>
         </thead>
@@ -401,7 +405,10 @@ function BrokerHoldingsTable({ data, accountId, toast }: { data: any[]; accountI
             const qty  = parseFloat(h.quantity ?? h.holdingQty ?? h.hldqty ?? 0)
             const avg  = parseFloat(h.avgPrice ?? h.average_price ?? h.upldprc ?? 0)
             const ltp  = parseFloat(h.ltp ?? h.last_price ?? h.lp ?? 0)
+            const exch = h.exchange ?? h.exch ?? 'NSE'
             const pnl  = parseFloat(h.pnl ?? h.profitAndLoss ?? 0) || (ltp - avg) * qty
+            const pnlPct = avg > 0 ? ((ltp - avg) / avg) * 100 : 0
+            const curVal = ltp * qty
             const isMgd    = !!managed[sym]
             const isExpanded = expanded === sym
             const e    = edits[sym] ?? {}
@@ -409,15 +416,26 @@ function BrokerHoldingsTable({ data, accountId, toast }: { data: any[]; accountI
               <>
               <tr key={`${sym}-${i}`} className="group hover:bg-bg-hover">
                 <td className="px-3 py-2">
+                  <span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-sm uppercase tracking-wide', BROKER_BADGES[brokerIdx % BROKER_BADGES.length])}>
+                    {account?.broker_name ?? '—'}
+                  </span>
+                  <div className="text-[9px] text-text-muted mt-0.5">{account?.client_id ?? ''}</div>
+                </td>
+                <td className="px-3 py-2">
                   <div className="font-medium text-[12px] text-text-bright">{sym}</div>
                   {isMgd && <span className="text-[9px] text-profit font-bold">● SL/TG</span>}
                 </td>
+                <td className="px-3 py-2 text-[11px] text-text-muted">{exch}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px]">{qty}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px] text-text-sec">{fmtINR(avg)}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px] text-text-bright">{fmtINR(ltp)}</td>
+                <td className="px-3 py-2 text-right font-mono text-[11px] text-text-sec">{fmtINR(curVal)}</td>
                 <td className="px-3 py-2 text-right font-mono text-[11px] text-text-sec">{fmtINR(avg * qty)}</td>
                 <td className={cn('px-3 py-2 text-right font-mono font-semibold text-[12px]', pnlClass(pnl))}>
                   {pnlSign(pnl)}{fmtINR(Math.abs(pnl))}
+                </td>
+                <td className={cn('px-3 py-2 text-right font-mono text-[11px]', pnlClass(pnlPct))}>
+                  {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
                 </td>
                 <td className="px-3 py-2">
                   <button onClick={() => setExpanded(isExpanded ? null : sym)}
@@ -429,7 +447,7 @@ function BrokerHoldingsTable({ data, accountId, toast }: { data: any[]; accountI
               </tr>
               {isExpanded && (
                 <tr key={`${sym}-sl`} className="bg-bg-elevated/40 border-t border-brand/20">
-                  <td colSpan={7} className="px-3 py-2">
+                  <td colSpan={11} className="px-3 py-2">
                     <div className="flex items-center gap-3 flex-wrap">
                       <span className="text-[10px] font-semibold text-text-muted uppercase">SL/TG/Trail</span>
                       {(['stop_loss', 'target', 'trailing_value', 'trail_when'] as const).map(field => (
@@ -471,10 +489,10 @@ function BrokerHoldingsTable({ data, accountId, toast }: { data: any[]; accountI
 
 const OPEN_STATUSES_STR = ['OPEN', 'PENDING', 'AMO', 'TRIGGER_PENDING']
 
-function BrokerOrdersTable({ data, accountId, toast }: { data: any[]; accountId: string; toast: (m: string, t: 'success'|'error'|'warning'|'info') => void }) {
+function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { data: any[]; accountId: string; account: BrokerAccountWS | null; brokerIdx: number; toast: (m: string, t: 'success'|'error'|'warning'|'info') => void }) {
   const [cancelling, setCancelling] = useState<string | null>(null)
   const [cancellingAll, setCancellingAll] = useState(false)
-  const [modify, setModify] = useState<{ order: any; price: string; qty: string; orderType: string } | null>(null)
+  const [modify, setModify] = useState<{ order: any; price: string; qty: string; orderType: string; triggerPrice: string; validity: string } | null>(null)
   const [modifying, setModifying] = useState(false)
   const [showOpenOnly, setShowOpenOnly] = useState(false)
 
@@ -507,7 +525,10 @@ function BrokerOrdersTable({ data, accountId, toast }: { data: any[]; accountId:
     setModifying(true)
     const oid = modify.order.id ?? modify.order.orderId ?? modify.order.order_id
     try {
-      await api.modifyOrder(oid, { accountId: accountId, price: parseFloat(modify.price), quantity: parseInt(modify.qty), orderType: modify.orderType })
+      const payload: any = { accountId: accountId, price: parseFloat(modify.price) || 0, quantity: parseInt(modify.qty) || 0, orderType: modify.orderType }
+      if (modify.triggerPrice) payload.triggerPrice = parseFloat(modify.triggerPrice)
+      if (modify.validity) payload.validity = modify.validity
+      await api.modifyOrder(oid, payload)
       toast(`Modified: ${modify.order.tradingsymbol ?? modify.order.symbol}`, 'success')
       setModify(null)
     } catch { toast('Failed to modify order', 'error') }
@@ -537,13 +558,18 @@ function BrokerOrdersTable({ data, accountId, toast }: { data: any[]; accountId:
       <table className="data-table">
         <thead className="sticky top-0 bg-bg-card z-10">
           <tr>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Broker</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Time</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Symbol</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Exchange</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Side</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Type</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Qty</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Price</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Trig Price</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Avg Fill</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Product</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Validity</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Status</th>
             <th className="px-3 py-2 w-24"></th>
           </tr>
@@ -557,13 +583,23 @@ function BrokerOrdersTable({ data, accountId, toast }: { data: any[]; accountId:
             const oid    = o.id ?? o.orderId ?? o.order_id ?? String(i)
             return (
               <tr key={oid} className="hover:bg-bg-hover">
+                <td className="px-3 py-2">
+                  <span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-sm uppercase tracking-wide', BROKER_BADGES[brokerIdx % BROKER_BADGES.length])}>
+                    {account?.broker_name ?? '—'}
+                  </span>
+                  <div className="text-[9px] text-text-muted mt-0.5">{account?.client_id ?? ''}</div>
+                </td>
                 <td className="px-3 py-2 text-text-muted text-[10px] whitespace-nowrap">{fmtTime(o.placedAt ?? o.orderTime ?? o.timestamp ?? '')}</td>
                 <td className="px-3 py-2 font-medium text-[12px] text-text-bright">{o.tradingsymbol ?? o.symbol ?? o.tsym ?? '—'}</td>
+                <td className="px-3 py-2 text-[11px] text-text-muted">{o.exchange ?? o.exch ?? '—'}</td>
                 <td className="px-3 py-2"><span className={cn('badge text-[9px]', isBuy ? 'badge-buy' : 'badge-sell')}>{isBuy ? 'BUY' : 'SELL'}</span></td>
                 <td className="px-3 py-2 text-[11px] text-text-sec">{o.orderType ?? o.order_type ?? o.prctyp ?? '—'}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px]">{o.quantity ?? o.qty ?? 0}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px] text-text-sec">{fmtINR(o.price ?? 0)}</td>
+                <td className="px-3 py-2 text-right font-mono text-[12px] text-text-muted">{fmtINR(o.triggerPrice ?? o.trigger_price ?? o.trgprc ?? 0)}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px]">{fmtINR(o.avgPrice ?? o.averagePrice ?? o.avgprc ?? 0)}</td>
+                <td className="px-3 py-2 text-[11px] text-text-muted">{o.product ?? o.prd ?? '—'}</td>
+                <td className="px-3 py-2 text-[11px] text-text-muted">{o.validity ?? o.ret ?? '—'}</td>
                 <td className="px-3 py-2">
                   <span className={cn('badge text-[9px]',
                     status.includes('COMPLETE') || status.includes('FILLED') ? 'badge-success' :
@@ -574,7 +610,14 @@ function BrokerOrdersTable({ data, accountId, toast }: { data: any[]; accountId:
                 <td className="px-3 py-2">
                   {isOpen && (
                     <div className="flex gap-1">
-                      <button onClick={() => setModify({ order: o, price: String(o.price ?? ''), qty: String(o.quantity ?? o.qty ?? ''), orderType: o.orderType ?? o.order_type ?? 'LMT' })}
+                      <button onClick={() => setModify({
+                        order: o,
+                        price: String(o.price ?? ''),
+                        qty: String(o.quantity ?? o.qty ?? ''),
+                        orderType: o.orderType ?? o.order_type ?? o.prctyp ?? 'LMT',
+                        triggerPrice: String(o.triggerPrice ?? o.trigger_price ?? o.trgprc ?? ''),
+                        validity: o.validity ?? o.ret ?? 'DAY',
+                      })}
                         className="btn-ghost btn-xs !px-1.5 !py-1 text-text-muted hover:text-brand" title="Modify">
                         <PenLine className="w-3 h-3" />
                       </button>
@@ -594,27 +637,56 @@ function BrokerOrdersTable({ data, accountId, toast }: { data: any[]; accountId:
 
     {modify && (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setModify(null)}>
-        <div className="bg-bg-card border border-border rounded-xl p-5 w-80 space-y-3 shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="bg-bg-card border border-border rounded-xl p-5 w-96 space-y-3 shadow-2xl" onClick={e => e.stopPropagation()}>
           <div className="flex items-center justify-between">
             <span className="text-[13px] font-semibold text-text-bright">Modify Order</span>
             <button onClick={() => setModify(null)} className="btn-ghost btn-xs"><X className="w-3.5 h-3.5" /></button>
           </div>
-          <div className="text-[11px] text-text-muted">{modify.order.tradingsymbol ?? modify.order.symbol} · {modify.order.transactionType ?? modify.order.side}</div>
-          {(['Price', 'Qty'] as const).map(label => (
-            <div key={label} className="flex flex-col gap-1">
-              <label className="text-[10px] text-text-muted uppercase">{label}</label>
+          <div className="flex items-center gap-2 bg-bg-elevated border border-border rounded px-3 py-2">
+            <span className="text-[12px] font-semibold text-text-bright">{modify.order.tradingsymbol ?? modify.order.symbol}</span>
+            <span className={cn('badge text-[9px]', (modify.order.transactionType ?? modify.order.side ?? '').toUpperCase().includes('B') ? 'badge-buy' : 'badge-sell')}>
+              {modify.order.transactionType ?? modify.order.side}
+            </span>
+            <span className="text-[10px] text-text-muted">{modify.order.exchange ?? modify.order.exch ?? ''}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] text-text-muted uppercase">Price</label>
               <input type="number" step="any"
-                value={label === 'Price' ? modify.price : modify.qty}
-                onChange={e => setModify(prev => prev ? { ...prev, [label === 'Price' ? 'price' : 'qty']: e.target.value } : null)}
+                value={modify.price}
+                onChange={e => setModify(prev => prev ? { ...prev, price: e.target.value } : null)}
                 className="bg-bg-surface border border-border rounded px-2 py-1.5 text-[12px] font-mono text-text-bright focus:outline-none focus:border-brand"
               />
             </div>
-          ))}
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] text-text-muted uppercase">Quantity</label>
+              <input type="number" step="1"
+                value={modify.qty}
+                onChange={e => setModify(prev => prev ? { ...prev, qty: e.target.value } : null)}
+                className="bg-bg-surface border border-border rounded px-2 py-1.5 text-[12px] font-mono text-text-bright focus:outline-none focus:border-brand"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] text-text-muted uppercase">Trigger Price</label>
+              <input type="number" step="any"
+                value={modify.triggerPrice}
+                onChange={e => setModify(prev => prev ? { ...prev, triggerPrice: e.target.value } : null)}
+                className="bg-bg-surface border border-border rounded px-2 py-1.5 text-[12px] font-mono text-text-bright focus:outline-none focus:border-brand"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] text-text-muted uppercase">Order Type</label>
+              <select value={modify.orderType} onChange={e => setModify(prev => prev ? { ...prev, orderType: e.target.value } : null)}
+                className="bg-bg-surface border border-border rounded px-2 py-1.5 text-[12px] text-text-bright focus:outline-none focus:border-brand">
+                {['LMT', 'MKT', 'SL', 'SL-M'].map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+          </div>
           <div className="flex flex-col gap-1">
-            <label className="text-[10px] text-text-muted uppercase">Order Type</label>
-            <select value={modify.orderType} onChange={e => setModify(prev => prev ? { ...prev, orderType: e.target.value } : null)}
+            <label className="text-[10px] text-text-muted uppercase">Validity</label>
+            <select value={modify.validity} onChange={e => setModify(prev => prev ? { ...prev, validity: e.target.value } : null)}
               className="bg-bg-surface border border-border rounded px-2 py-1.5 text-[12px] text-text-bright focus:outline-none focus:border-brand">
-              {['LMT', 'MKT', 'SL', 'SL-M'].map(t => <option key={t} value={t}>{t}</option>)}
+              {['DAY', 'IOC', 'GTC'].map(t => <option key={t} value={t}>{t}</option>)}
             </select>
           </div>
           <button onClick={submitModify} disabled={modifying}
@@ -629,17 +701,21 @@ function BrokerOrdersTable({ data, accountId, toast }: { data: any[]; accountId:
   )
 }
 
-function BrokerTradesTable({ data }: { data: any[] }) {
+function BrokerTradesTable({ data, account, brokerIdx }: { data: any[]; account: BrokerAccountWS | null; brokerIdx: number }) {
   if (data.length === 0) return <EmptyState msg="No trades today for this broker" />
   return (
     <div className="overflow-auto max-h-[600px]">
       <table className="data-table">
         <thead className="sticky top-0 bg-bg-card z-10">
           <tr>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Broker</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Time</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Trade ID</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Order ID</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Symbol</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Exchange</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Side</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Product</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Qty</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Price</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Value</th>
@@ -654,13 +730,21 @@ function BrokerTradesTable({ data }: { data: any[] }) {
             const value = t.value != null ? t.value : qty * price
             return (
               <tr key={t.trade_id ?? t.tradeId ?? i} className="hover:bg-bg-hover">
+                <td className="px-3 py-2">
+                  <span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-sm uppercase tracking-wide', BROKER_BADGES[brokerIdx % BROKER_BADGES.length])}>
+                    {account?.broker_name ?? '—'}
+                  </span>
+                  <div className="text-[9px] text-text-muted mt-0.5">{account?.client_id ?? ''}</div>
+                </td>
                 <td className="px-3 py-2 text-text-muted text-[10px] whitespace-nowrap">{fmtTime(t.tradedAt ?? t.timestamp ?? t.fillTime ?? t.trade_timestamp ?? t.norentm ?? '')}</td>
+                <td className="px-3 py-2 text-[10px] text-text-muted font-mono">{t.trade_id ?? t.tradeId ?? t.flid ?? '—'}</td>
+                <td className="px-3 py-2 text-[10px] text-text-muted font-mono">{t.order_id ?? t.orderId ?? t.norenordno ?? '—'}</td>
                 <td className="px-3 py-2">
                   <div className="font-medium text-[12px] text-text-bright">{t.symbol ?? t.tradingSymbol ?? t.tsym ?? '—'}</div>
-                  {t.trade_id && <div className="text-[9px] text-text-muted font-mono">#{t.trade_id}</div>}
                 </td>
                 <td className="px-3 py-2 text-[11px] text-text-sec">{t.exchange ?? t.exch ?? '—'}</td>
                 <td className="px-3 py-2"><span className={cn('badge text-[9px]', isBuy ? 'badge-buy' : 'badge-sell')}>{isBuy ? 'BUY' : 'SELL'}</span></td>
+                <td className="px-3 py-2 text-[11px] text-text-muted">{t.product ?? t.prd ?? '—'}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px]">{qty}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px]">{fmtINR(price)}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px] text-text-sec">{fmtINR(value)}</td>

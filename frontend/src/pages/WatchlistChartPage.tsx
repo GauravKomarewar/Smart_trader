@@ -157,7 +157,7 @@ function WatchlistPanel({ selected, onSelect }: {
   useEffect(() => {
     const items = activeWL?.items ?? []
     if (items.length) {
-      marketWs.subscribe(items.map(i => i.symbol))
+      marketWs.subscribe(items.map(i => i.tradingsymbol || i.symbol))
     }
   }, [activeWL?.items?.length])
 

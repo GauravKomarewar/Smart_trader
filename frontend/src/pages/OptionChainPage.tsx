@@ -316,15 +316,6 @@ function OptionChainTable() {
 
   return (
     <div className="bg-bg-card border border-border rounded-lg overflow-hidden relative">
-      {/* Loading overlay during expiry switch */}
-      {isLoading && (
-        <div className="absolute inset-0 z-20 bg-bg-base/60 backdrop-blur-[1px] flex items-center justify-center">
-          <div className="flex items-center gap-2 px-4 py-2 bg-bg-card border border-border rounded-lg shadow-lg">
-            <RefreshCw className="w-4 h-4 text-brand animate-spin" />
-            <span className="text-[12px] text-text-sec">Loading option chain...</span>
-          </div>
-        </div>
-      )}
       <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border">
         <span className="text-[12px] text-text-sec">{data.rows.length} strikes</span>
         <label className="flex items-center gap-2 text-[11px] text-text-sec cursor-pointer">

@@ -359,6 +359,8 @@ class SLSettingsRequest(BaseModel):
     target: Optional[float] = None
     trailingValue: Optional[float] = None
     trailWhen: Optional[float] = None
+    initialLtp: Optional[float] = None
+    baseStopLoss: Optional[float] = None
 
 
 @router.put("/positions/sl-settings")
@@ -378,6 +380,8 @@ async def set_position_sl_settings(
         target=req.target,
         trailing_value=req.trailingValue,
         trail_when=req.trailWhen,
+        initial_ltp=req.initialLtp,
+        base_stop_loss=req.baseStopLoss,
     )
     return {"success": True, "settings": result}
 
@@ -487,7 +491,13 @@ def _normalize_position(p: dict, idx: int) -> dict:
     clean_sym = tsym.split(":", 1)[-1] if ":" in tsym else tsym
     netqty = float(p.get("netqty") or p.get("net_quantity") or p.get("qty", 0))
     lp     = float(p.get("lp")    or p.get("last_price") or p.get("ltp", 0))
-    avgprc = float(p.get("avgprc") or p.get("average_price") or p.get("avg_price", 0))
+    # Shoonya: avgprc can be 0 for sell-first positions; try multiple fields
+    avgprc = float(
+        p.get("netavgprc") or p.get("avgprc") or p.get("average_price") or p.get("avg_price") or
+        p.get("totbuyavgprc") or p.get("totsellavgprc") or
+        p.get("daybuyavgprc") or p.get("daysellavgprc") or
+        p.get("upldprc") or 0
+    )
     # Use key-presence checks to avoid 0.0 falsiness bug
     def _first_present(d, *keys, default=0.0):
         for k in keys:
@@ -512,6 +522,10 @@ def _normalize_position(p: dict, idx: int) -> dict:
         "OPT" if "CE" in clean_sym or "PE" in clean_sym else
         ("FUT" if "FUT" in clean_sym else "EQ")
     )
+    # For derivatives, notional value uses lot_size
+    notional = value * lot_size if lot_size > 1 else value
+    # pnlPct: broker pnl / cost-basis
+    cost_basis = avgprc * abs_qty * lot_size if lot_size > 1 else avgprc * abs_qty
     return {
         "id": p.get("token") or p.get("symboltoken") or f"pos-{idx}",
         "accountId": p.get("actid") or p.get("account_id") or "live",
@@ -525,9 +539,9 @@ def _normalize_position(p: dict, idx: int) -> dict:
         "avgPrice": avgprc,
         "ltp": lp,
         "pnl": pnl,
-        "pnlPct": (pnl / (avgprc * abs_qty) * 100) if avgprc and abs_qty else 0.0,
+        "pnlPct": (pnl / cost_basis * 100) if cost_basis else 0.0,
         "dayPnl": urmtom,
-        "value": value,
+        "value": notional,
         "multiplier": 1,
         "lot_size": lot_size,
         "side": _side_from_qty(netqty),

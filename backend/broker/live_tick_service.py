@@ -43,6 +43,40 @@ def _normalize_sym(s: str) -> str:
     return s.replace(" ", "")
 
 
+import re as _re
+
+# MCX commodity keywords for exchange detection
+_MCX_KEYWORDS = {"GOLD", "SILVER", "CRUDE", "NATURALGAS", "COPPER", "ZINC", "LEAD",
+                 "ALUMINIUM", "NICKEL", "GOLDPETAL", "SILVERMIC", "GOLDGUINEA",
+                 "CRUDEOIL", "NGAS", "COTTONCNDY", "MENTHAOIL"}
+
+
+def _detect_exchange_from_symbol(sym: str) -> str:
+    """Detect exchange from symbol pattern. Used as fallback when ScriptMaster lookup fails."""
+    upper = sym.upper().strip()
+    # Options: digits followed by CE or PE
+    if _re.search(r'\d{3,}(CE|PE)$', upper):
+        # MCX options
+        for kw in _MCX_KEYWORDS:
+            if upper.startswith(kw):
+                return "MCX"
+        return "NFO"
+    # Futures: end with FUT
+    if _re.search(r'\d+FUT$', upper):
+        for kw in _MCX_KEYWORDS:
+            if upper.startswith(kw):
+                return "MCX"
+        return "NFO"
+    # MCX commodity spot names
+    for kw in _MCX_KEYWORDS:
+        if upper.startswith(kw):
+            return "MCX"
+    # BSE instruments
+    if upper.startswith("SENSEX"):
+        return "BFO"
+    return "NSE"
+
+
 # ── Tick schema ────────────────────────────────────────────────────────────────
 
 def _norm_tick(
@@ -591,8 +625,9 @@ class LiveTickService:
     def _resolve_shoonya_tokens(symbols: List[str]) -> List[str]:
         """
         Map symbol names to Shoonya subscriber tokens ("EXCHANGE|TOKEN").
-        Falls back to "NSE|SYMBOL" if numeric token not found.
+        Falls back to detecting exchange from symbol pattern if lookup fails.
         """
+        import re
         tokens: List[str] = []
         try:
             from broker.symbol_normalizer import lookup_by_trading_symbol
@@ -602,13 +637,15 @@ class LiveTickService:
                 if inst and inst.token:
                     tokens.append(f"{inst.exchange}|{inst.token}")
                 else:
-                    tokens.append(f"NSE|{clean}")
+                    # Detect exchange from symbol pattern
+                    exch = _detect_exchange_from_symbol(clean)
+                    tokens.append(f"{exch}|{clean}")
         except Exception as e:
             logger.debug("Token resolution error: %s", e)
-            # Fallback
             for sym in symbols:
                 clean = sym.split(":")[-1].replace("-EQ", "").replace("-INDEX", "")
-                tokens.append(f"NSE|{clean}")
+                exch = _detect_exchange_from_symbol(clean)
+                tokens.append(f"{exch}|{clean}")
         return tokens
 
 

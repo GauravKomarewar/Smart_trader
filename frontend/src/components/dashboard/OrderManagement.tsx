@@ -3,7 +3,7 @@
    with open-only toggle, cancel-all, modify dialog
    ═══════════════════════════════ */
 import { useMemo, useState } from 'react'
-import { useDashboardStore, useToastStore } from '../../stores'
+import { useDashboardStore, useBrokerAccountsStore, useToastStore } from '../../stores'
 import { cn, fmtNum, fmtTime } from '../../lib/utils'
 import { api } from '../../lib/api'
 import { ShoppingCart, XCircle, RefreshCw, Eye, EyeOff, PenLine, Trash2 } from 'lucide-react'
@@ -21,20 +21,46 @@ const STATUS_BADGE: Record<OrderStatus, string> = {
   TRIGGER_PENDING: 'badge-warn',
 }
 
+// Per-broker color palette (matches PositionManager)
+const BROKER_ROW_TINTS = [
+  'border-l-[3px] border-l-[#3b9ede] bg-[#3b9ede]/[0.04]',
+  'border-l-[3px] border-l-[#f5a623] bg-[#f5a623]/[0.04]',
+  'border-l-[3px] border-l-[#7c3aed] bg-[#7c3aed]/[0.04]',
+  'border-l-[3px] border-l-[#10b981] bg-[#10b981]/[0.04]',
+]
+const BROKER_BADGES = [
+  'bg-[#3b9ede]/20 text-[#3b9ede] border border-[#3b9ede]/40',
+  'bg-[#f5a623]/20 text-[#f5a623] border border-[#f5a623]/40',
+  'bg-[#7c3aed]/20 text-[#7c3aed] border border-[#7c3aed]/40',
+  'bg-[#10b981]/20 text-[#10b981] border border-[#10b981]/40',
+]
+
 interface ModifyState {
   order: Order
   price: string
   qty: string
   orderType: string
+  triggerPrice: string
+  validity: string
 }
 
 export default function OrderManagement() {
   const { data, showOnlyOpenOrders, setShowOnlyOpenOrders } = useDashboardStore()
+  const { accounts: brokerAccounts } = useBrokerAccountsStore()
   const { toast } = useToastStore()
   const [cancelling, setCancelling] = useState<string | null>(null)
   const [cancellingAll, setCancellingAll] = useState(false)
   const [modify, setModify] = useState<ModifyState | null>(null)
   const [modifying, setModifying] = useState(false)
+
+  // Build accountId → broker info map
+  const brokerMap = useMemo(() => {
+    const m: Record<string, { name: string; shortName: string; idx: number }> = {}
+    brokerAccounts.forEach((acc, i) => {
+      m[acc.config_id] = { name: acc.broker_name, shortName: acc.client_id, idx: i }
+    })
+    return m
+  }, [brokerAccounts])
 
   const orders = useMemo(() => {
     const all = data?.orders ?? []
@@ -78,6 +104,8 @@ export default function OrderManagement() {
       price: String(order.price ?? ''),
       qty: String(order.quantity ?? ''),
       orderType: order.orderType ?? 'LMT',
+      triggerPrice: String(order.triggerPrice ?? ''),
+      validity: order.validity ?? 'DAY',
     })
   }
 
@@ -91,6 +119,8 @@ export default function OrderManagement() {
         price: parseFloat(modify.price) || undefined,
         quantity: parseInt(modify.qty) || undefined,
         orderType: modify.orderType,
+        triggerPrice: parseFloat(modify.triggerPrice) || undefined,
+        validity: modify.validity || undefined,
       })
       toast(`Modified: ${modify.order.tradingsymbol}`, 'success')
       setModify(null)
@@ -145,22 +175,38 @@ export default function OrderManagement() {
           <table className="data-table">
             <thead className="sticky top-0 bg-bg-card z-10">
               <tr>
+                <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase tracking-wider">Broker</th>
                 <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-left">Symbol</th>
                 <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Type</th>
+                <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Product</th>
                 <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Qty</th>
                 <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Price</th>
+                <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Trig</th>
                 <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Status</th>
                 <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Time</th>
                 <th className="px-3 py-2 w-16"></th>
               </tr>
             </thead>
             <tbody>
-              {orders.map(o => (
-                <tr key={o.id} className="group">
+              {orders.map(o => {
+                const accountId = (o as any).accountId || (o as any).account_id || ''
+                const broker = brokerMap[accountId]
+                const bidx = broker?.idx ?? 0
+                return (
+                <tr key={o.id} className={cn('group transition-colors', BROKER_ROW_TINTS[bidx % BROKER_ROW_TINTS.length])}>
+                  {/* Broker */}
+                  <td className="px-3 py-2">
+                    <div className="flex flex-col gap-0.5">
+                      <span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-sm uppercase tracking-wide w-fit', BROKER_BADGES[bidx % BROKER_BADGES.length])}>
+                        {broker?.name ?? accountId.slice(0, 6)}
+                      </span>
+                      <span className="text-[9px] text-text-muted">{broker?.shortName ?? ''}</span>
+                    </div>
+                  </td>
                   <td className="px-3 py-2">
                     <div>
                       <div className="text-[12px] font-medium text-text-bright truncate max-w-[130px]">{o.tradingsymbol}</div>
-                      <div className="text-[10px] text-text-muted">{o.exchange} · {o.product}</div>
+                      <div className="text-[10px] text-text-muted">{o.exchange}</div>
                     </div>
                   </td>
                   <td className="px-3 py-2">
@@ -171,6 +217,7 @@ export default function OrderManagement() {
                       <span className="text-[10px] text-text-muted">{o.orderType}</span>
                     </div>
                   </td>
+                  <td className="px-3 py-2 text-[10px] text-text-muted">{o.product}</td>
                   <td className="px-3 py-2 text-right">
                     <div className="text-[12px] font-mono text-text-pri">{o.filledQty}/{o.quantity}</div>
                   </td>
@@ -181,6 +228,9 @@ export default function OrderManagement() {
                     {o.avgPrice && o.avgPrice !== o.price && (
                       <div className="text-[10px] font-mono text-text-muted">avg {fmtNum(o.avgPrice)}</div>
                     )}
+                  </td>
+                  <td className="px-3 py-2 text-right text-[11px] font-mono text-text-sec">
+                    {o.triggerPrice ? fmtNum(o.triggerPrice) : '—'}
                   </td>
                   <td className="px-3 py-2">
                     <span className={cn('badge', STATUS_BADGE[o.status] ?? 'badge-neutral')}>
@@ -212,7 +262,8 @@ export default function OrderManagement() {
                     )}
                   </td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         )}
@@ -222,11 +273,14 @@ export default function OrderManagement() {
     {/* Modify Order Modal */}
     {modify && (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-        <div className="bg-bg-card border border-border rounded-xl p-5 w-80 shadow-xl">
-          <div className="text-[14px] font-semibold text-text-bright mb-4">
+        <div className="bg-bg-card border border-border rounded-xl p-5 w-[420px] shadow-xl">
+          <div className="text-[14px] font-semibold text-text-bright mb-1">
             Modify Order — {modify.order.tradingsymbol}
           </div>
-          <div className="space-y-3">
+          <div className="text-[11px] text-text-muted mb-4">
+            {modify.order.exchange} · {modify.order.product} · {modify.order.transactionType}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-[11px] text-text-muted mb-1 block">Order Type</label>
               <select
@@ -241,12 +295,35 @@ export default function OrderManagement() {
               </select>
             </div>
             <div>
+              <label className="text-[11px] text-text-muted mb-1 block">Validity</label>
+              <select
+                value={modify.validity}
+                onChange={e => setModify(m => m ? {...m, validity: e.target.value} : null)}
+                className="input-sm w-full"
+              >
+                <option value="DAY">DAY</option>
+                <option value="IOC">IOC</option>
+                <option value="GTT">GTT</option>
+              </select>
+            </div>
+            <div>
               <label className="text-[11px] text-text-muted mb-1 block">Price</label>
               <input
                 type="number"
                 step="0.05"
                 value={modify.price}
                 onChange={e => setModify(m => m ? {...m, price: e.target.value} : null)}
+                className="input-sm w-full"
+                placeholder="0.00"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] text-text-muted mb-1 block">Trigger Price</label>
+              <input
+                type="number"
+                step="0.05"
+                value={modify.triggerPrice}
+                onChange={e => setModify(m => m ? {...m, triggerPrice: e.target.value} : null)}
                 className="input-sm w-full"
                 placeholder="0.00"
               />

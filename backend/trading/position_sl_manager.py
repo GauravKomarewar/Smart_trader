@@ -71,7 +71,7 @@ class PositionSLManager:
             cur = conn.cursor()
             cur.execute("""
                 SELECT user_id, config_id, pos_key, stop_loss, target,
-                       trailing_value, trail_when, trail_stop
+                       trailing_value, trail_when, trail_stop, initial_ltp, base_stop_loss
                 FROM position_sl_settings
                 WHERE active = TRUE
             """)
@@ -87,36 +87,49 @@ class PositionSLManager:
 
     def _check_row(self, row):
         (user_id, config_id, pos_key, stop_loss, target,
-         trailing_value, trail_when, trail_stop) = row
+         trailing_value, trail_when, trail_stop, initial_ltp, base_stop_loss) = row
 
         # Get current position data from mgr_positions
         ltp, side, qty, avg_price = self._get_position_ltp(user_id, config_id, pos_key)
         if ltp is None or qty == 0:
             return  # No live position data
 
-        # ── Trailing stop update ──────────────────────────────────────────
-        if trailing_value and trailing_value > 0:
-            trail_stop = self._update_trail_stop(
-                side, ltp, avg_price or 0,
-                trailing_value, trail_when or 0, trail_stop
-            )
-            if trail_stop is not None:
-                self._save_trail_stop(user_id, config_id, pos_key, trail_stop)
+        is_long = side == "BUY"
+
+        # ── Step-based trailing stop (Shoonya-style POINTS mode) ──────────
+        if trailing_value and trailing_value > 0 and initial_ltp and initial_ltp > 0:
+            step_trigger = float(trail_when) if trail_when and trail_when > 0 else float(trailing_value)
+            step_move = float(trailing_value)
+            anchor = float(initial_ltp)
+            bsl = float(base_stop_loss) if base_stop_loss is not None else (float(stop_loss) if stop_loss else None)
+
+            if bsl is not None and step_trigger > 0 and step_move > 0:
+                favorable_move = (ltp - anchor) if is_long else (anchor - ltp)
+                favorable_move = max(0.0, favorable_move)
+                steps = int(favorable_move // step_trigger)
+
+                if steps > 0:
+                    if is_long:
+                        new_sl = bsl + (steps * step_move)
+                        if stop_loss is None or new_sl > stop_loss:
+                            stop_loss = new_sl
+                            self._save_sl_and_trail(user_id, config_id, pos_key, stop_loss, trail_stop)
+                    else:
+                        new_sl = bsl - (steps * step_move)
+                        if stop_loss is None or new_sl < stop_loss:
+                            stop_loss = new_sl
+                            self._save_sl_and_trail(user_id, config_id, pos_key, stop_loss, trail_stop)
 
         # ── Check exit conditions ─────────────────────────────────────────
         exit_reason = None
-        if side == "BUY":
+        if is_long:
             if stop_loss and ltp <= stop_loss:
                 exit_reason = f"SL hit {ltp:.2f} ≤ {stop_loss:.2f}"
-            elif trail_stop and ltp <= trail_stop:
-                exit_reason = f"Trail-SL hit {ltp:.2f} ≤ {trail_stop:.2f}"
             elif target and ltp >= target:
                 exit_reason = f"Target hit {ltp:.2f} ≥ {target:.2f}"
         else:  # SELL short
             if stop_loss and ltp >= stop_loss:
                 exit_reason = f"SL hit {ltp:.2f} ≥ {stop_loss:.2f}"
-            elif trail_stop and ltp >= trail_stop:
-                exit_reason = f"Trail-SL hit {ltp:.2f} ≥ {trail_stop:.2f}"
             elif target and ltp <= target:
                 exit_reason = f"Target hit {ltp:.2f} ≤ {target:.2f}"
 
@@ -164,31 +177,25 @@ class PositionSLManager:
             logger.debug("_get_position_ltp error: %s", e)
         return None, None, 0, None
 
-    def _update_trail_stop(
-        self,
-        side: str, ltp: float, avg_price: float,
-        trailing_value: float, trail_when: float,
-        current_trail_stop: Optional[float],
-    ) -> Optional[float]:
-        """
-        Returns the new trail_stop value (or None if trailing not yet activated).
-        trail_when = profit level at which trailing starts (0 = immediate).
-        trailing_value = trailing distance from LTP.
-        """
-        profit = (ltp - avg_price) if side == "BUY" else (avg_price - ltp)
-        if profit < trail_when:
-            return current_trail_stop  # Trailing not activated yet
-
-        if side == "BUY":
-            new_stop = ltp - trailing_value
-            if current_trail_stop is None or new_stop > current_trail_stop:
-                return new_stop
-        else:
-            new_stop = ltp + trailing_value
-            if current_trail_stop is None or new_stop < current_trail_stop:
-                return new_stop
-
-        return current_trail_stop
+    def _save_sl_and_trail(self, user_id: str, config_id: str, pos_key: str,
+                           stop_loss: float, trail_stop=None):
+        """Update stop_loss (and optionally trail_stop) in DB."""
+        from db.trading_db import get_trading_conn
+        try:
+            conn = get_trading_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """UPDATE position_sl_settings
+                       SET stop_loss = %s, trail_stop = %s, updated_at = NOW()
+                       WHERE user_id = %s AND config_id = %s AND pos_key = %s""",
+                    (stop_loss, trail_stop, user_id, config_id, pos_key),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug("_save_sl_and_trail error: %s", e)
 
     def _save_trail_stop(self, user_id: str, config_id: str, pos_key: str, trail_stop: float):
         from db.trading_db import get_trading_conn
@@ -285,8 +292,10 @@ class PositionSLManager:
         target: Optional[float] = None,
         trailing_value: Optional[float] = None,
         trail_when: Optional[float] = None,
+        initial_ltp: Optional[float] = None,
+        base_stop_loss: Optional[float] = None,
     ) -> dict:
-        """Upsert SL settings for a position. Returns saved record."""
+        """Upsert SL settings for a position. Preserves trail state on update."""
         from db.trading_db import get_trading_conn
         conn = get_trading_conn()
         try:
@@ -294,8 +303,8 @@ class PositionSLManager:
             cur.execute("""
                 INSERT INTO position_sl_settings
                     (user_id, config_id, pos_key, active, stop_loss, target,
-                     trailing_value, trail_when, trail_stop, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, NOW())
+                     trailing_value, trail_when, trail_stop, initial_ltp, base_stop_loss, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, %s, NOW())
                 ON CONFLICT (user_id, config_id, pos_key)
                 DO UPDATE SET
                     active          = EXCLUDED.active,
@@ -303,14 +312,17 @@ class PositionSLManager:
                     target          = EXCLUDED.target,
                     trailing_value  = EXCLUDED.trailing_value,
                     trail_when      = EXCLUDED.trail_when,
-                    trail_stop      = NULL,
+                    initial_ltp     = COALESCE(EXCLUDED.initial_ltp, position_sl_settings.initial_ltp),
+                    base_stop_loss  = COALESCE(EXCLUDED.base_stop_loss, position_sl_settings.base_stop_loss),
                     updated_at      = NOW()
-            """, (user_id, config_id, pos_key, active, stop_loss, target, trailing_value, trail_when))
+            """, (user_id, config_id, pos_key, active, stop_loss, target,
+                  trailing_value, trail_when, initial_ltp, base_stop_loss))
             conn.commit()
             return {
                 "user_id": user_id, "config_id": config_id, "pos_key": pos_key,
                 "active": active, "stop_loss": stop_loss, "target": target,
                 "trailing_value": trailing_value, "trail_when": trail_when,
+                "initial_ltp": initial_ltp, "base_stop_loss": base_stop_loss,
             }
         finally:
             conn.close()
@@ -324,14 +336,16 @@ class PositionSLManager:
             cur = conn.cursor()
             cur.execute("""
                 SELECT user_id, config_id, pos_key, active, stop_loss, target,
-                       trailing_value, trail_when, trail_stop, updated_at
+                       trailing_value, trail_when, trail_stop, initial_ltp,
+                       base_stop_loss, updated_at
                 FROM position_sl_settings
                 WHERE user_id = %s
                 ORDER BY updated_at DESC
             """, (user_id,))
             rows = cur.fetchall()
             keys = ["user_id", "config_id", "pos_key", "active", "stop_loss", "target",
-                    "trailing_value", "trail_when", "trail_stop", "updated_at"]
+                    "trailing_value", "trail_when", "trail_stop", "initial_ltp",
+                    "base_stop_loss", "updated_at"]
             return [dict(zip(keys, r)) for r in rows]
         finally:
             conn.close()

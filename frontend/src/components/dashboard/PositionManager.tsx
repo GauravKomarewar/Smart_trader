@@ -37,7 +37,7 @@ interface PmEdits {
   [key: string]: { stop_loss?: string; target?: string; trailing_value?: string; trail_when?: string }
 }
 interface ManagedExit {
-  [key: string]: { stop_loss?: number; target?: number; trailing_value?: number; trail_when?: number; active: boolean }
+  [key: string]: { stop_loss?: number; target?: number; trailing_value?: number; trail_when?: number; initial_ltp?: number; base_stop_loss?: number; trail_stop?: number; active: boolean }
 }
 
 export default function PositionManager() {
@@ -74,6 +74,9 @@ export default function PositionManager() {
               target: s.target ?? undefined,
               trailing_value: s.trailing_value ?? undefined,
               trail_when: s.trail_when ?? undefined,
+              initial_ltp: s.initial_ltp ?? undefined,
+              base_stop_loss: s.base_stop_loss ?? undefined,
+              trail_stop: s.trail_stop ?? undefined,
               active: true,
             }
           }
@@ -186,17 +189,23 @@ export default function PositionManager() {
   }
 
   // PM: activate/update managed exit for a row
-  async function activateManaged(posKey: string, accountId: string) {
+  async function activateManaged(posKey: string, accountId: string, currentLtp?: number) {
     const edits = pmEdits[posKey] ?? {}
+    const prev = managed[posKey]
     const settings = {
-      stop_loss:      edits.stop_loss      ? parseFloat(edits.stop_loss)      : managed[posKey]?.stop_loss,
-      target:         edits.target         ? parseFloat(edits.target)         : managed[posKey]?.target,
-      trailing_value: edits.trailing_value ? parseFloat(edits.trailing_value) : managed[posKey]?.trailing_value,
-      trail_when:     edits.trail_when     ? parseFloat(edits.trail_when)     : managed[posKey]?.trail_when,
+      stop_loss:      edits.stop_loss      ? parseFloat(edits.stop_loss)      : prev?.stop_loss,
+      target:         edits.target         ? parseFloat(edits.target)         : prev?.target,
+      trailing_value: edits.trailing_value ? parseFloat(edits.trailing_value) : prev?.trailing_value,
+      trail_when:     edits.trail_when     ? parseFloat(edits.trail_when)     : prev?.trail_when,
     }
+    // Capture initial_ltp on first activation (current LTP at activation time)
+    const initialLtp = prev?.initial_ltp ?? currentLtp ?? undefined
+    // base_stop_loss = original SL before any trailing
+    const baseStopLoss = prev?.base_stop_loss ?? settings.stop_loss ?? undefined
+
     setManaged(prev => ({
       ...prev,
-      [posKey]: { active: true, ...settings },
+      [posKey]: { active: true, ...settings, initial_ltp: initialLtp, base_stop_loss: baseStopLoss },
     }))
     setPmEdits(prev => { const n = { ...prev }; delete n[posKey]; return n })
     try {
@@ -208,6 +217,8 @@ export default function PositionManager() {
         target: settings.target || null,
         trailingValue: settings.trailing_value || null,
         trailWhen: settings.trail_when || null,
+        initialLtp: initialLtp || null,
+        baseStopLoss: baseStopLoss || null,
       })
       toast(`Position manager ACTIVE — SL/TG/Trail monitoring started`, 'success')
     } catch {
@@ -313,6 +324,8 @@ export default function PositionManager() {
                   <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-center">Target</th>
                   <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-center">Trail</th>
                   <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-center">Trail@</th>
+                  <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-center whitespace-nowrap">Start LTP</th>
+                  <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-center">Act@</th>
                   <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-center">Status</th>
                   <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-center">Action</th>
                 </>}
@@ -379,43 +392,68 @@ export default function PositionManager() {
                     <td className="px-3 py-2 text-[10px] text-text-muted">{(p as any).exchange || ''}</td>
 
                     {/* Position Manager columns */}
-                    {pmMode && isClosed && <td colSpan={6} className="px-3 py-2 text-center text-[10px] text-text-muted">—</td>}
-                    {pmMode && !isClosed && <>
-                      {(['stop_loss', 'target', 'trailing_value', 'trail_when'] as const).map(field => (
-                        <td key={field} className="px-2 py-1.5">
-                          <input
-                            type="number"
-                            step="any"
-                            value={edits[field] ?? (managed[posKey]?.[field] != null ? String(managed[posKey][field]) : '')}
-                            onChange={e => setPmField(posKey, field, e.target.value)}
-                            placeholder="—"
-                            className={cn(
-                              'w-20 bg-bg-surface border text-[11px] font-mono px-1.5 py-1 rounded text-text-bright focus:outline-none focus:border-brand',
-                              edits[field] ? 'border-brand/60' : 'border-border'
-                            )}
-                          />
+                    {pmMode && isClosed && <td colSpan={8} className="px-3 py-2 text-center text-[10px] text-text-muted">—</td>}
+                    {pmMode && !isClosed && (() => {
+                      const mgdRow = managed[posKey]
+                      // Compute next trail activation price
+                      let nextTrailPrice: number | undefined
+                      if (isMgd && mgdRow?.initial_ltp && mgdRow?.trailing_value && mgdRow?.trail_when) {
+                        const isLong = p.side === 'BUY'
+                        const bsl = mgdRow.base_stop_loss ?? mgdRow.stop_loss ?? 0
+                        const stepsDone = mgdRow.trailing_value > 0
+                          ? Math.floor(Math.abs((mgdRow.stop_loss ?? bsl) - bsl) / mgdRow.trailing_value)
+                          : 0
+                        nextTrailPrice = mgdRow.initial_ltp + ((isLong ? 1 : -1) * ((stepsDone + 1) * mgdRow.trail_when))
+                      }
+                      return <>
+                        {(['stop_loss', 'target', 'trailing_value', 'trail_when'] as const).map(field => (
+                          <td key={field} className="px-2 py-1.5">
+                            <input
+                              type="number"
+                              step="any"
+                              value={edits[field] ?? (mgdRow?.[field] != null ? String(mgdRow[field]) : '')}
+                              onChange={e => setPmField(posKey, field, e.target.value)}
+                              placeholder="—"
+                              className={cn(
+                                'w-20 bg-bg-surface border text-[11px] font-mono px-1.5 py-1 rounded text-text-bright focus:outline-none focus:border-brand',
+                                edits[field] ? 'border-brand/60' : 'border-border'
+                              )}
+                            />
+                          </td>
+                        ))}
+                        {/* Start LTP — read-only, captured at activation */}
+                        <td className="px-2 py-1.5 text-center">
+                          <span className="text-[11px] font-mono text-text-sec">
+                            {isMgd && mgdRow?.initial_ltp ? fmtNum(mgdRow.initial_ltp) : '—'}
+                          </span>
                         </td>
-                      ))}
-                      <td className="px-2 py-1.5 text-center">
-                        <span className={cn('badge text-[9px]', isMgd ? 'bg-profit/10 text-profit border-profit/30' : 'bg-text-muted/10 text-text-muted border-text-muted/20')}>
-                          {isMgd ? 'ACTIVE' : 'OFF'}
-                        </span>
-                      </td>
-                      <td className="px-2 py-1.5">
-                        <div className="flex items-center gap-1">
-                          <button onClick={() => activateManaged(posKey, accountId)}
-                            className="text-[10px] px-2 py-1 rounded border border-brand/60 text-brand hover:bg-brand/10 transition-colors font-medium whitespace-nowrap">
-                            {isMgd ? 'Update' : 'Activate'}
-                          </button>
-                          {isMgd && (
-                            <button onClick={() => deactivateManaged(posKey, accountId)}
-                              className="text-[10px] px-2 py-1 rounded border border-loss/40 text-loss hover:bg-loss/10 transition-colors font-medium">
-                              Off
+                        {/* Act@ — next trail activation price */}
+                        <td className="px-2 py-1.5 text-center">
+                          <span className="text-[11px] font-mono text-brand">
+                            {nextTrailPrice != null ? fmtNum(nextTrailPrice) : '—'}
+                          </span>
+                        </td>
+                        <td className="px-2 py-1.5 text-center">
+                          <span className={cn('badge text-[9px]', isMgd ? 'bg-profit/10 text-profit border-profit/30' : 'bg-text-muted/10 text-text-muted border-text-muted/20')}>
+                            {isMgd ? 'ACTIVE' : 'OFF'}
+                          </span>
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <div className="flex items-center gap-1">
+                            <button onClick={() => activateManaged(posKey, accountId, p.ltp)}
+                              className="text-[10px] px-2 py-1 rounded border border-brand/60 text-brand hover:bg-brand/10 transition-colors font-medium whitespace-nowrap">
+                              {isMgd ? 'Update' : 'Activate'}
                             </button>
-                          )}
-                        </div>
-                      </td>
-                    </>}
+                            {isMgd && (
+                              <button onClick={() => deactivateManaged(posKey, accountId)}
+                                className="text-[10px] px-2 py-1 rounded border border-loss/40 text-loss hover:bg-loss/10 transition-colors font-medium">
+                                Off
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </>
+                    })()}
 
                     {/* Actions */}
                     <td className="px-3 py-2">
@@ -442,7 +480,7 @@ export default function PositionManager() {
             </tbody>
             <tfoot>
               <tr className="border-t border-border bg-bg-elevated/50">
-                <td colSpan={pmMode ? 8 : 5} className="px-3 py-2 text-[11px] text-text-muted">
+                <td colSpan={pmMode ? 10 : 5} className="px-3 py-2 text-[11px] text-text-muted">
                   Total — {openPositions.length} open, {closedPositions.length} closed
                 </td>
                 <td className={cn('px-3 py-2 font-mono font-bold text-[12px]', pnlClass(totalPnl))}>
@@ -450,7 +488,7 @@ export default function PositionManager() {
                 </td>
                 <td />
                 <td className="px-3 py-2 font-mono text-right text-[11px] text-text-sec">{fmtINR(totalValue)}</td>
-                <td colSpan={pmMode ? 8 : 2} />
+                <td colSpan={pmMode ? 10 : 2} />
               </tr>
             </tfoot>
           </table>

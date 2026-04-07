@@ -92,7 +92,14 @@ class ShoonyaAdapter(BrokerAdapter):
         prd_raw  = raw.get("prd") or raw.get("productType") or ""
         product  = _PRD_MAP.get(prd_raw.upper(), prd_raw)
         net_qty  = int(raw.get("netqty") or raw.get("qty") or raw.get("netQty") or 0)
-        avg_prc  = float(raw.get("avgprc") or raw.get("avg_price") or raw.get("buyAvg") or 0)
+        # Shoonya: avgprc can be 0 for sell-first positions.
+        # Fallback chain: netavgprc → avgprc → totbuyavgprc/totsellavgprc → daybuyavgprc/daysellavgprc → upldprc
+        avg_prc  = float(
+            raw.get("netavgprc") or raw.get("avgprc") or raw.get("avg_price") or raw.get("buyAvg") or
+            raw.get("totbuyavgprc") or raw.get("totsellavgprc") or
+            raw.get("daybuyavgprc") or raw.get("daysellavgprc") or
+            raw.get("upldprc") or 0
+        )
         ltp      = float(raw.get("lp") or raw.get("ltp") or raw.get("last_price") or 0)
         rpnl     = float(raw.get("rpnl") or raw.get("realised_pnl") or raw.get("realized_profit") or 0)
         urmtom   = float(raw.get("urmtom") or raw.get("unrealised_pnl") or raw.get("unrealized_profit") or 0)
@@ -193,10 +200,15 @@ class ShoonyaAdapter(BrokerAdapter):
             return []
         try:
             raw_list = client.get_holdings()
+            if raw_list is None:
+                logger.debug("get_holdings returned None — treating as empty (no holdings)")
+                return []
             if isinstance(raw_list, dict) and raw_list.get("stat") == "Not_Ok":
                 emsg = str(raw_list.get("emsg", "")).lower()
                 if "session" in emsg or "expired" in emsg or "invalid" in emsg:
                     raise RuntimeError(f"Session Expired: {raw_list.get('emsg', 'unknown')}")
+                # Non-session error (e.g. "no data") — return empty
+                return []
             return [self._enrich(self._map_holding(h)) for h in (raw_list or [])]
         except json.JSONDecodeError:
             raise  # Empty response = session expired — let auto-relogin handle
@@ -235,10 +247,14 @@ class ShoonyaAdapter(BrokerAdapter):
             if raw_fn is None:
                 return []
             raw_list = raw_fn()
+            if raw_list is None:
+                logger.debug("get_tradebook returned None — treating as empty (no trades)")
+                return []
             if isinstance(raw_list, dict) and raw_list.get("stat") == "Not_Ok":
                 emsg = str(raw_list.get("emsg", "")).lower()
                 if "session" in emsg or "expired" in emsg or "invalid" in emsg:
                     raise RuntimeError(f"Session Expired: {raw_list.get('emsg', 'unknown')}")
+                return []
             return [self._enrich(self._map_trade(t)) for t in (raw_list or [])]
         except json.JSONDecodeError:
             raise  # Empty response = session expired — let auto-relogin handle
