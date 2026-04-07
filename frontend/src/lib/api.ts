@@ -144,11 +144,11 @@ export const api = {
   getSLSettings:   ()                   => api.get('/orders/positions/sl-settings'),
 
   // ── Holdings ──
-  holdings: (accountId: string) => api.get(`/holdings?account=${accountId}`),
+  holdings: (accountId: string) => api.get(`/orders/holdings?account_id=${accountId}`),
 
   // ── Trades ──
   trades: (accountId: string, date?: string) =>
-    api.get(`/trades?account=${accountId}${date ? `&date=${date}` : ''}`),
+    api.get(`/orders/tradebook?account_id=${accountId}${date ? `&date=${date}` : ''}`),
 
   // ── Market data ──
   quote:      (tokens: string[]) => api.post('/market/quote', { tokens }),

@@ -40,14 +40,15 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import logging
 import threading
-from datetime import datetime, timezone, timedelta
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from core.daily_refresh import current_refresh_cycle_start, now_ist
 
 logger = logging.getLogger("smart_trader.fyers_scriptmaster")
 
@@ -66,11 +67,6 @@ SCRIPTMASTER_URLS: Dict[str, str] = {
     "NSE_CD":  f"{BASE_URL}/NSE_CD.csv",
     "BSE_CD":  f"{BASE_URL}/BSE_CD.csv",
 }
-
-_HERE = Path(__file__).resolve().parent
-DATA_DIR = _HERE / "data" / "fyers_scriptmaster"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-META_FILE = DATA_DIR / "metadata.json"
 
 # ── Instrument type codes → human label ───────────────────────────────────────
 # Fyers CSV instrument_code field (column 2):
@@ -106,30 +102,19 @@ TOKEN_INDEX: Dict[str, Dict[str, str]] = {}
 EXPIRY_CALENDAR: Dict[str, Dict[str, Dict[str, List[str]]]] = {}
 
 _LOCK = threading.RLock()
-_last_refresh: Optional[str] = None  # YYYY-MM-DD
+_last_refresh: Optional[datetime] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _today_ist() -> str:
     """Current date in IST as YYYY-MM-DD."""
-    ist = timezone(timedelta(hours=5, minutes=30))
-    return datetime.now(ist).strftime("%Y-%m-%d")
+    return now_ist().strftime("%Y-%m-%d")
 
 
 def _needs_refresh() -> bool:
     global _last_refresh
-    if _last_refresh == _today_ist():
-        return False
-    if META_FILE.exists():
-        try:
-            meta = json.loads(META_FILE.read_text())
-            if meta.get("date") == _today_ist():
-                _last_refresh = _today_ist()
-                return False
-        except Exception:
-            pass
-    return True
+    return not (_last_refresh and _last_refresh >= current_refresh_cycle_start())
 
 
 def _epoch_to_date(epoch_str: str) -> str:
@@ -219,14 +204,13 @@ def _parse_csv(content: str, segment_key: str) -> tuple[Dict[str, Dict[str, Any]
 
 # ── Download + build ──────────────────────────────────────────────────────────
 
-def _download(segment_key: str, url: str) -> str:
+def _download(segment_key: str, url: str, temp_dir: str) -> str:
     logger.info("Downloading Fyers scriptmaster: %s", url)
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
-    # Save raw
-    raw_path = DATA_DIR / f"{segment_key}.csv"
+    raw_path = Path(temp_dir) / f"{segment_key}.csv"
     raw_path.write_bytes(resp.content)
-    return resp.text
+    return raw_path.read_text()
 
 
 def _build_expiry_calendar() -> None:
@@ -269,23 +253,23 @@ def refresh(force: bool = False) -> None:
     global _last_refresh
 
     if not force and not _needs_refresh():
-        logger.info("Fyers scriptmaster is up-to-date — loading from disk cache")
-        _load_from_disk()
+        logger.info("Fyers scriptmaster already refreshed for current cycle — skipping download")
         return
 
     temp_sm: Dict[str, Dict[str, Any]] = {}
     temp_tok: Dict[str, Dict[str, str]] = {}
 
-    for seg_key, url in SCRIPTMASTER_URLS.items():
-        try:
-            content = _download(seg_key, url)
-            records, token_map = _parse_csv(content, seg_key)
-            temp_sm.update(records)
-            temp_tok[seg_key] = token_map
-            logger.info("Loaded %d symbols from %s", len(records), seg_key)
-        except Exception as exc:
-            logger.error("Failed to load %s: %s", seg_key, exc)
-            # Non-fatal: continue with other segments
+    with tempfile.TemporaryDirectory(prefix="smart_trader_fyers_") as temp_dir:
+        for seg_key, url in SCRIPTMASTER_URLS.items():
+            try:
+                content = _download(seg_key, url, temp_dir)
+                records, token_map = _parse_csv(content, seg_key)
+                temp_sm.update(records)
+                temp_tok[seg_key] = token_map
+                logger.info("Loaded %d symbols from %s", len(records), seg_key)
+            except Exception as exc:
+                logger.error("Failed to load %s: %s", seg_key, exc)
+                # Non-fatal: continue with other segments
 
     with _LOCK:
         FYERS_SCRIPTMASTER.clear()
@@ -293,42 +277,14 @@ def refresh(force: bool = False) -> None:
         TOKEN_INDEX.clear()
         TOKEN_INDEX.update(temp_tok)
         _build_expiry_calendar()
-        _last_refresh = _today_ist()
+        _last_refresh = now_ist()
 
-    META_FILE.write_text(json.dumps({
-        "date": _today_ist(),
-        "version": SCRIPTMASTER_VERSION,
-        "total_symbols": len(temp_sm),
-    }, indent=2))
     logger.info("Fyers scriptmaster refreshed: %d total symbols", len(temp_sm))
 
 
 def _load_from_disk() -> None:
-    """Reload previously downloaded CSVs from disk without re-downloading."""
-    temp_sm: Dict[str, Dict[str, Any]] = {}
-    temp_tok: Dict[str, Dict[str, str]] = {}
-    for seg_key in SCRIPTMASTER_URLS:
-        raw_path = DATA_DIR / f"{seg_key}.csv"
-        if not raw_path.exists():
-            continue
-        try:
-            records, token_map = _parse_csv(raw_path.read_text(), seg_key)
-            temp_sm.update(records)
-            temp_tok[seg_key] = token_map
-        except Exception as exc:
-            logger.warning("Could not load %s from disk: %s", seg_key, exc)
-
-    if not temp_sm:
-        logger.warning("No cached Fyers scriptmaster found — call refresh(force=True)")
-        return
-
-    with _LOCK:
-        FYERS_SCRIPTMASTER.clear()
-        FYERS_SCRIPTMASTER.update(temp_sm)
-        TOKEN_INDEX.clear()
-        TOKEN_INDEX.update(temp_tok)
-        _build_expiry_calendar()
-    logger.info("Fyers scriptmaster loaded from disk: %d symbols", len(temp_sm))
+    """Persistent disk cache is disabled; startup/runtime should use symbols_db instead."""
+    logger.debug("Fyers disk cache disabled; no persistent scriptmaster files are loaded")
 
 
 def get_symbol(fyers_symbol: str) -> Optional[Dict[str, Any]]:

@@ -45,6 +45,18 @@ const EMPTY_DASHBOARD: DashboardData = {
   },
 }
 
+function hasMeaningfulDashboard(data: any): boolean {
+  if (!data) return false
+  const summary = data.accountSummary ?? {}
+  return Boolean(
+    (data.positions && data.positions.length)
+    || (data.orders && data.orders.length)
+    || (data.holdings && data.holdings.length)
+    || (data.trades && data.trades.length)
+    || Object.values(summary).some(v => Number(v) !== 0)
+  )
+}
+
 // ── WebSocket live data — connects on auth, pushes to stores ──
 export function useLiveData() {
   const { isAuthenticated } = useAuthStore()
@@ -75,6 +87,10 @@ export function useLiveData() {
     // Handlers
     const onDashboard = (data: any) => {
       if (!data) return
+      const current = useDashboardStore.getState().data
+      if (current && hasMeaningfulDashboard(current) && !hasMeaningfulDashboard(data)) {
+        return
+      }
       // Always accept — backend guarantees consistent data from SupremeManager  
       setData(data as DashboardData)
     }
@@ -221,6 +237,10 @@ export function useDashboardData() {
     if (lastWs && Date.now() - lastWs < 10_000) return
     try {
       const data = await api.liveDashboard() as DashboardData
+      const current = useDashboardStore.getState().data
+      if (current && hasMeaningfulDashboard(current) && !hasMeaningfulDashboard(data)) {
+        return
+      }
       if ((data as any).source === 'demo' && !(data as any).positions?.length) {
         setData({ ...data, positions: [], orders: [], holdings: [], trades: [] } as DashboardData)
       } else {

@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger("smart_trader.pos_sl")
@@ -32,6 +31,7 @@ class PositionSLManager:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._missing_counts: dict[tuple[str, str, str], int] = {}
 
     def start(self):
         if self._running:
@@ -89,10 +89,25 @@ class PositionSLManager:
         (user_id, config_id, pos_key, stop_loss, target,
          trailing_value, trail_when, trail_stop, initial_ltp, base_stop_loss) = row
 
-        # Get current position data from mgr_positions
-        ltp, side, qty, avg_price = self._get_position_ltp(user_id, config_id, pos_key)
-        if ltp is None or qty == 0:
-            return  # No live position data
+        position = self._get_position_snapshot(user_id, config_id, pos_key)
+        state_key = (user_id, config_id, pos_key)
+        if position is None or position["ltp"] is None or position["qty"] == 0:
+            misses = self._missing_counts.get(state_key, 0) + 1
+            self._missing_counts[state_key] = misses
+            if misses >= 3:
+                logger.info(
+                    "Deactivating managed position %s/%s %s — position no longer present",
+                    config_id[:8], user_id[:8], pos_key,
+                )
+                self._deactivate(user_id, config_id, pos_key)
+            return
+
+        self._missing_counts.pop(state_key, None)
+        ltp = position["ltp"]
+        side = position["side"]
+        qty = position["qty"]
+        exchange = position["exchange"]
+        product = position["product"]
 
         is_long = side == "BUY"
 
@@ -113,11 +128,13 @@ class PositionSLManager:
                         new_sl = bsl + (steps * step_move)
                         if stop_loss is None or new_sl > stop_loss:
                             stop_loss = new_sl
+                            trail_stop = new_sl
                             self._save_sl_and_trail(user_id, config_id, pos_key, stop_loss, trail_stop)
                     else:
                         new_sl = bsl - (steps * step_move)
                         if stop_loss is None or new_sl < stop_loss:
                             stop_loss = new_sl
+                            trail_stop = new_sl
                             self._save_sl_and_trail(user_id, config_id, pos_key, stop_loss, trail_stop)
 
         # ── Check exit conditions ─────────────────────────────────────────
@@ -135,16 +152,13 @@ class PositionSLManager:
 
         if exit_reason:
             logger.info("EXIT TRIGGERED: %s/%s %s — %s", config_id[:8], pos_key, side, exit_reason)
-            self._fire_exit(user_id, config_id, pos_key, side, qty, exit_reason)
+            self._fire_exit(user_id, config_id, pos_key, exchange, product, side, qty, exit_reason)
             self._deactivate(user_id, config_id, pos_key)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _get_position_ltp(self, user_id: str, config_id: str, pos_key: str):
-        """
-        Returns (ltp, side, qty, avg_price) from mgr_positions, or (None, None, 0, None).
-        pos_key = "SYMBOL|PRODUCT" e.g. "GOLDPETAL30APR26|M"
-        """
+    def _get_position_snapshot(self, user_id: str, config_id: str, pos_key: str) -> Optional[dict]:
+        """Return the latest position snapshot for a managed `pos_key`, if present."""
         from db.trading_db import get_trading_conn
         try:
             symbol, product = (pos_key.split("|") + [""])[:2]
@@ -152,30 +166,47 @@ class PositionSLManager:
             try:
                 cur = conn.cursor()
                 cur.execute(
-                    "SELECT data FROM mgr_positions WHERE user_id = %s AND config_id = %s",
-                    (user_id, config_id),
+                    """
+                    SELECT data, exchange
+                    FROM mgr_positions
+                    WHERE user_id = %s AND config_id = %s AND symbol = %s
+                    ORDER BY fetched_at DESC
+                    """,
+                    (user_id, config_id, symbol),
                 )
                 rows = cur.fetchall()
             finally:
                 conn.close()
 
-            for (data,) in rows:
+            for data, exchange in rows:
                 if not data:
                     continue
-                # data is a list or dict
-                positions = data if isinstance(data, list) else [data]
-                for p in positions:
-                    psym = str(p.get("tradingsymbol") or p.get("symbol") or "")
-                    pprd = str(p.get("product") or "")
-                    if psym == symbol and pprd == product:
-                        ltp = float(p.get("ltp") or p.get("lastPrice") or 0)
-                        side = str(p.get("side") or "BUY").upper()
-                        qty = int(abs(float(p.get("netQty") or p.get("qty") or 0)))
-                        avg = float(p.get("avgPrice") or p.get("averagePrice") or 0)
-                        return ltp, side, qty, avg
+                p = data if isinstance(data, dict) else None
+                if not p:
+                    continue
+                psym = str(p.get("tradingsymbol") or p.get("symbol") or "")
+                pprd = str(p.get("product") or "")
+                if psym != symbol or pprd != product:
+                    continue
+
+                qty_raw = float(
+                    p.get("netQty")
+                    or p.get("netqty")
+                    or p.get("qty")
+                    or 0
+                )
+                side = str(p.get("side") or ("SELL" if qty_raw < 0 else "BUY")).upper()
+                return {
+                    "ltp": float(p.get("ltp") or p.get("lastPrice") or p.get("lp") or 0),
+                    "side": side,
+                    "qty": int(abs(qty_raw)),
+                    "avg_price": float(p.get("avgPrice") or p.get("averagePrice") or p.get("avg_price") or 0),
+                    "exchange": str(p.get("exchange") or p.get("exch") or exchange or "NSE"),
+                    "product": pprd,
+                }
         except Exception as e:
-            logger.debug("_get_position_ltp error: %s", e)
-        return None, None, 0, None
+            logger.debug("_get_position_snapshot error: %s", e)
+        return None
 
     def _save_sl_and_trail(self, user_id: str, config_id: str, pos_key: str,
                            stop_loss: float, trail_stop=None):
@@ -217,6 +248,7 @@ class PositionSLManager:
 
     def _deactivate(self, user_id: str, config_id: str, pos_key: str):
         from db.trading_db import get_trading_conn
+        self._missing_counts.pop((user_id, config_id, pos_key), None)
         try:
             conn = get_trading_conn()
             try:
@@ -238,28 +270,17 @@ class PositionSLManager:
         user_id: str,
         config_id: str,
         pos_key: str,
+        exchange: str,
+        product: str,
         side: str,
         qty: int,
         reason: str,
     ):
         """Place a market exit order to close the position."""
-        from db.trading_db import get_trading_conn
         try:
-            # Get position details from mgr_positions
-            symbol, product = (pos_key.split("|") + [""])[:2]
-            ltp, _, _, _ = self._get_position_ltp(user_id, config_id, pos_key)
-
+            symbol, _ = (pos_key.split("|") + [""])[:2]
             from broker.multi_broker import registry
             exit_side = "SELL" if side == "BUY" else "BUY"
-            # Auto-detect exchange from symbol
-            import re
-            sym_upper = symbol.upper().replace(" ", "")
-            if re.search(r'\d{3,}(CE|PE)', sym_upper) or re.search(r'\d+FUT$', sym_upper):
-                exchange = "NFO"
-            elif any(k in sym_upper for k in ("CRUDE", "GOLD", "SILVER", "COPPER", "NATURAL", "ZINC", "LEAD", "ALUMINIUM", "NICKEL", "COTTON")):
-                exchange = "MCX"
-            else:
-                exchange = "NSE"
             order = {
                 "symbol":            symbol,
                 "exchange":          exchange,

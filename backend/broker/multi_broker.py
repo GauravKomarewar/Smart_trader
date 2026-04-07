@@ -1601,7 +1601,7 @@ class MultiAccountRegistry:
             # Get current open orders
             orders = sess.get_order_book()
             open_orders = [o for o in orders
-                           if str(o.get("status", "")).upper() in ("OPEN", "PENDING", "TRIGGER PENDING", "AMO REQ RECEIVED", "VALIDATION PENDING")]
+                           if str(o.get("status", "")).upper() in ("OPEN", "PENDING", "TRIGGER_PENDING", "TRIGGER PENDING", "AMO REQ RECEIVED", "VALIDATION PENDING")]
             if not open_orders:
                 return {"success": True, "cancelled": 0, "message": "No open orders"}
 

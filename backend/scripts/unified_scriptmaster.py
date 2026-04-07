@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+from core.daily_refresh import IST
 
 logger = logging.getLogger("smart_trader.unified_scriptmaster")
 
@@ -68,15 +70,533 @@ _EXCHANGE_NORM: Dict[str, str] = {
 
 
 def _ensure_loaded() -> None:
-    """Ensure both scriptmasters are loaded (lazy, once per process)."""
+    """Ensure runtime symbol stores are hydrated from the symbols DB."""
     global _initialized
     if _initialized:
         return
     with _LOCK:
         if _initialized:
             return
-        refresh_all(force=False)
-        _initialized = True
+        counts = load_all_from_db()
+        if sum(counts.values()) > 0:
+            _initialized = True
+        else:
+            logger.warning("Unified ScriptMaster DB hydrate found no symbols; runtime stores remain empty")
+
+
+def load_all_from_db() -> Dict[str, int]:
+    """Hydrate broker runtime stores from the PostgreSQL symbols table."""
+    global _initialized
+    counts: Dict[str, int] = {
+        "fyers": 0,
+        "shoonya": 0,
+        "angelone": 0,
+        "dhan": 0,
+        "kite": 0,
+        "upstox": 0,
+        "groww": 0,
+    }
+
+    try:
+        import psycopg2.extras
+        from db.trading_db import get_trading_conn
+
+        conn = get_trading_conn()
+        try:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(
+                """
+                SELECT
+                    exchange, exchange_token, symbol, trading_symbol, instrument_type,
+                    lot_size, tick_size, isin, expiry, strike, option_type, description,
+                    fyers_symbol, fyers_token, shoonya_token, shoonya_tsym,
+                    angelone_token, angelone_tsym, dhan_security_id,
+                    kite_instrument_token, kite_exchange_token, upstox_ikey, groww_token,
+                    updated_at
+                FROM symbols
+                """
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("Unified ScriptMaster DB hydrate failed: %s", exc)
+        _initialized = False
+        return counts
+
+    if not rows:
+        _initialized = False
+        return counts
+
+    latest_refresh_at: Optional[datetime] = None
+    fyers_records: Dict[str, Dict[str, Any]] = {}
+    fyers_token_index: Dict[str, Dict[str, str]] = {}
+    shoonya_records: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    angelone_records: Dict[str, Dict[str, Any]] = {}
+    dhan_records: Dict[str, Dict[str, Any]] = {}
+    kite_records: Dict[str, Dict[str, Any]] = {}
+    kite_token_index: Dict[str, Dict[str, Any]] = {}
+    upstox_records: Dict[str, Dict[str, Any]] = {}
+    groww_records: Dict[str, Dict[str, Any]] = {}
+    groww_token_index: Dict[str, Dict[str, Any]] = {}
+
+    for row in rows:
+        exchange = str(row.get("exchange") or "").upper()
+        trading_symbol = str(row.get("trading_symbol") or "").strip()
+        if not exchange or not trading_symbol:
+            continue
+
+        latest_refresh_at = _max_refresh_time(latest_refresh_at, row.get("updated_at"))
+        exchange_token = str(row.get("exchange_token") or "").strip()
+        underlying = str(row.get("symbol") or trading_symbol).strip().upper()
+        instrument = str(row.get("instrument_type") or "EQ").strip().upper()
+        expiry = _db_expiry_to_broker(row.get("expiry"))
+        expiry_epoch = _expiry_to_epoch(expiry)
+        strike_val = float(row.get("strike") or 0) or 0.0
+        option_type = str(row.get("option_type") or "").strip().upper() or None
+        lot_size = int(row.get("lot_size") or 1)
+        tick_size = float(row.get("tick_size") or 0.05)
+        description = str(row.get("description") or "").strip()
+        isin = str(row.get("isin") or "").strip()
+
+        fyers_symbol = str(row.get("fyers_symbol") or "").strip()
+        if not fyers_symbol:
+            fyers_symbol = _default_fyers_symbol(exchange, trading_symbol, underlying)
+        if fyers_symbol:
+            segment_key = _fyers_segment_for_exchange(exchange)
+            fyers_records[fyers_symbol] = {
+                "FyersSymbol": fyers_symbol,
+                "FyToken": str(row.get("fyers_token") or "").strip(),
+                "Token": exchange_token,
+                "Exchange": exchange,
+                "SegmentKey": segment_key,
+                "Description": description,
+                "Instrument": instrument,
+                "Underlying": underlying,
+                "LotSize": lot_size,
+                "TickSize": tick_size,
+                "ISIN": isin,
+                "Expiry": expiry,
+                "ExpiryEpoch": expiry_epoch,
+                "StrikePrice": strike_val if strike_val > 0 else None,
+                "OptionType": option_type,
+            }
+            if exchange_token:
+                fyers_token_index.setdefault(segment_key, {})[exchange_token] = fyers_symbol
+
+        shoonya_token = str(row.get("shoonya_token") or exchange_token).strip()
+        shoonya_tsym = str(row.get("shoonya_tsym") or trading_symbol).strip()
+        shoonya_records.setdefault(exchange, {})[shoonya_token or exchange_token or trading_symbol] = {
+            "Exchange": exchange,
+            "Token": shoonya_token or exchange_token,
+            "TradingSymbol": shoonya_tsym,
+            "Symbol": underlying,
+            "Underlying": underlying,
+            "LotSize": lot_size,
+            "Expiry": expiry,
+            "Instrument": _shoonya_instrument_for_row(instrument, exchange, underlying),
+            "OptionType": option_type,
+            "StrikePrice": strike_val if strike_val > 0 else None,
+            "TickSize": tick_size,
+        }
+
+        angelone_token = str(row.get("angelone_token") or "").strip()
+        if angelone_token:
+            angelone_symbol = str(row.get("angelone_tsym") or trading_symbol).strip()
+            angelone_records[angelone_token] = {
+                "Token": angelone_token,
+                "Symbol": angelone_symbol,
+                "Name": description or underlying,
+                "Underlying": underlying,
+                "Exchange": exchange,
+                "ExchSeg": _angel_exchange_segment(exchange, instrument),
+                "Instrument": instrument,
+                "InstrumentType": _instrument_type_label(instrument, exchange, underlying),
+                "Expiry": expiry,
+                "StrikePrice": strike_val if strike_val > 0 else None,
+                "OptionType": option_type,
+                "LotSize": lot_size,
+                "TickSize": tick_size,
+                "TradingSymbol": angelone_symbol,
+            }
+
+        dhan_security_id = str(row.get("dhan_security_id") or "").strip()
+        if dhan_security_id:
+            dhan_records[dhan_security_id] = {
+                "SecurityId": dhan_security_id,
+                "Token": dhan_security_id,
+                "Exchange": exchange,
+                "ExchId": _dhan_exchange_id(exchange),
+                "Segment": _dhan_segment(exchange),
+                "Symbol": underlying,
+                "Underlying": underlying,
+                "TradingSymbol": trading_symbol,
+                "DisplayName": description or trading_symbol,
+                "Instrument": instrument,
+                "InstrumentName": _instrument_type_label(instrument, exchange, underlying),
+                "InstrumentType": _instrument_type_label(instrument, exchange, underlying),
+                "Series": "",
+                "Expiry": expiry,
+                "StrikePrice": strike_val if strike_val > 0 else None,
+                "OptionType": option_type,
+                "LotSize": lot_size,
+                "TickSize": tick_size,
+            }
+
+        kite_instrument_token = str(row.get("kite_instrument_token") or "").strip()
+        kite_exchange_token = str(row.get("kite_exchange_token") or exchange_token).strip()
+        if kite_instrument_token or kite_exchange_token:
+            kite_key = f"{exchange}:{trading_symbol}"
+            kite_record = {
+                "InstrumentToken": kite_instrument_token,
+                "ExchangeToken": kite_exchange_token,
+                "Token": kite_instrument_token or kite_exchange_token,
+                "TradingSymbol": trading_symbol,
+                "Name": description or underlying,
+                "Underlying": underlying,
+                "Exchange": exchange,
+                "Segment": _kite_segment(exchange, instrument),
+                "Instrument": instrument,
+                "InstrumentType": _kite_instrument_type(instrument, option_type),
+                "Expiry": expiry,
+                "StrikePrice": strike_val if strike_val > 0 else None,
+                "OptionType": option_type,
+                "LotSize": lot_size,
+                "TickSize": tick_size,
+                "KiteSymbol": kite_key,
+            }
+            kite_records[kite_key] = kite_record
+            if kite_instrument_token:
+                kite_token_index[kite_instrument_token] = kite_record
+
+        upstox_ikey = str(row.get("upstox_ikey") or "").strip()
+        if upstox_ikey:
+            upstox_records[upstox_ikey] = {
+                "InstrumentKey": upstox_ikey,
+                "Token": exchange_token,
+                "TradingSymbol": trading_symbol,
+                "ShortName": underlying,
+                "Name": description or underlying,
+                "Underlying": underlying,
+                "Exchange": exchange,
+                "Segment": _upstox_segment(exchange, instrument),
+                "Instrument": instrument,
+                "InstrumentType": _upstox_instrument_type(instrument, option_type),
+                "ISIN": isin,
+                "Expiry": expiry,
+                "StrikePrice": strike_val if strike_val > 0 else None,
+                "OptionType": option_type,
+                "LotSize": lot_size,
+                "TickSize": tick_size,
+                "FreezeQuantity": 0,
+            }
+
+        groww_token = str(row.get("groww_token") or exchange_token).strip()
+        if groww_token:
+            raw_exchange = _groww_raw_exchange(exchange)
+            groww_key = f"{raw_exchange}:{trading_symbol}"
+            groww_record = {
+                "ExchangeToken": groww_token,
+                "Token": groww_token,
+                "TradingSymbol": trading_symbol,
+                "GrowwSymbol": trading_symbol,
+                "Name": description or underlying,
+                "Underlying": underlying,
+                "UnderlyingExchangeToken": "",
+                "Exchange": exchange,
+                "RawExchange": raw_exchange,
+                "Segment": _groww_segment(exchange),
+                "Series": "",
+                "ISIN": isin,
+                "Instrument": instrument,
+                "InstrumentType": _upstox_instrument_type(instrument, option_type),
+                "Expiry": expiry,
+                "StrikePrice": strike_val if strike_val > 0 else None,
+                "OptionType": option_type,
+                "LotSize": lot_size,
+                "TickSize": tick_size,
+                "FreezeQuantity": 0,
+                "BuyAllowed": True,
+                "SellAllowed": True,
+            }
+            groww_records[groww_key] = groww_record
+            groww_token_index[groww_token] = groww_record
+
+    from scripts import angelone_scriptmaster as angelone_mod
+    from scripts import dhan_scriptmaster as dhan_mod
+    from scripts import fyers_scriptmaster as fyers_mod
+    from scripts import groww_scriptmaster as groww_mod
+    from scripts import kite_scriptmaster as kite_mod
+    from scripts import shoonya_scriptmaster as shoonya_mod
+    from scripts import upstox_scriptmaster as upstox_mod
+
+    with fyers_mod._LOCK:
+        fyers_mod.FYERS_SCRIPTMASTER.clear()
+        fyers_mod.FYERS_SCRIPTMASTER.update(fyers_records)
+        fyers_mod.TOKEN_INDEX.clear()
+        fyers_mod.TOKEN_INDEX.update(fyers_token_index)
+        fyers_mod._build_expiry_calendar()
+        fyers_mod._last_refresh = latest_refresh_at
+    counts["fyers"] = len(fyers_mod.FYERS_SCRIPTMASTER)
+
+    with shoonya_mod._LOCK:
+        shoonya_mod.SHOONYA_SCRIPTMASTER.clear()
+        shoonya_mod.SHOONYA_SCRIPTMASTER.update(shoonya_records)
+        shoonya_mod._build_universal()
+        shoonya_mod._build_expiry_calendar()
+        shoonya_mod._last_refresh = latest_refresh_at
+    counts["shoonya"] = len(shoonya_mod.SHOONYA_UNIVERSAL)
+
+    with angelone_mod._LOCK:
+        angelone_mod.ANGELONE_SCRIPTMASTER.clear()
+        angelone_mod.ANGELONE_SCRIPTMASTER.update(angelone_records)
+        angelone_mod._build_indices()
+        angelone_mod._last_refresh = latest_refresh_at
+    counts["angelone"] = len(angelone_mod.ANGELONE_SCRIPTMASTER)
+
+    with dhan_mod._LOCK:
+        dhan_mod.DHAN_SCRIPTMASTER.clear()
+        dhan_mod.DHAN_SCRIPTMASTER.update(dhan_records)
+        dhan_mod._build_indices()
+        dhan_mod._last_refresh = latest_refresh_at
+    counts["dhan"] = len(dhan_mod.DHAN_SCRIPTMASTER)
+
+    with kite_mod._LOCK:
+        kite_mod.KITE_SCRIPTMASTER.clear()
+        kite_mod.KITE_SCRIPTMASTER.update(kite_records)
+        kite_mod.TOKEN_INDEX.clear()
+        kite_mod.TOKEN_INDEX.update(kite_token_index)
+        kite_mod._build_expiry_calendar()
+        kite_mod._last_refresh = latest_refresh_at
+    counts["kite"] = len(kite_mod.KITE_SCRIPTMASTER)
+
+    with upstox_mod._LOCK:
+        upstox_mod.UPSTOX_SCRIPTMASTER.clear()
+        upstox_mod.UPSTOX_SCRIPTMASTER.update(upstox_records)
+        upstox_mod._build_indices()
+        upstox_mod._last_refresh = latest_refresh_at
+    counts["upstox"] = len(upstox_mod.UPSTOX_SCRIPTMASTER)
+
+    with groww_mod._LOCK:
+        groww_mod.GROWW_SCRIPTMASTER.clear()
+        groww_mod.GROWW_SCRIPTMASTER.update(groww_records)
+        groww_mod.TOKEN_INDEX.clear()
+        groww_mod.TOKEN_INDEX.update(groww_token_index)
+        groww_mod._build_expiry_calendar()
+        groww_mod._last_refresh = latest_refresh_at
+    counts["groww"] = len(groww_mod.GROWW_SCRIPTMASTER)
+
+    _initialized = sum(counts.values()) > 0
+    if _initialized:
+        logger.info("Unified ScriptMaster hydrated from symbols DB: %s", counts)
+    return counts
+
+
+def load_all_from_disk() -> Dict[str, int]:
+    """Backward-compatible alias now backed by the symbols DB."""
+    return load_all_from_db()
+
+
+def _max_refresh_time(current: Optional[datetime], candidate: Optional[datetime]) -> Optional[datetime]:
+    if candidate is None:
+        return current
+    if candidate.tzinfo is None:
+        candidate = candidate.replace(tzinfo=timezone.utc)
+    candidate = candidate.astimezone(IST)
+    if current is None or candidate > current:
+        return candidate
+    return current
+
+
+def _db_expiry_to_broker(value: Any) -> str:
+    if not value:
+        return ""
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value)
+        for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y"):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return raw
+    return dt.strftime("%-d-%b-%Y")
+
+
+def _expiry_to_epoch(expiry: str) -> int:
+    date_value = _parse_expiry_date(expiry)
+    if not date_value:
+        return 0
+    return int(datetime.combine(date_value, datetime.min.time(), tzinfo=IST).timestamp())
+
+
+def _fyers_segment_for_exchange(exchange: str) -> str:
+    return {
+        "NFO": "NSE_FO",
+        "BFO": "BSE_FO",
+        "NSE": "NSE_CM",
+        "BSE": "BSE_CM",
+        "MCX": "MCX_COM",
+        "CDS": "NSE_CD",
+        "BCD": "BSE_CD",
+    }.get(exchange.upper(), exchange.upper())
+
+
+def _default_fyers_symbol(exchange: str, trading_symbol: str, underlying: str) -> str:
+    exchange = exchange.upper()
+    if trading_symbol.endswith("-INDEX"):
+        return f"{exchange}:{trading_symbol}"
+    return _INDEX_SYMBOLS.get(underlying.upper(), f"{exchange}:{trading_symbol}")
+
+
+def _is_index_underlying(symbol: str) -> bool:
+    return symbol.upper() in {
+        "NIFTY",
+        "BANKNIFTY",
+        "NIFTYBANK",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+        "BANKEX",
+    }
+
+
+def _shoonya_instrument_for_row(instrument: str, exchange: str, symbol: str) -> str:
+    instrument = instrument.upper()
+    exchange = exchange.upper()
+    if instrument == "FUT":
+        if exchange in ("CDS", "BCD"):
+            return "FUTCUR"
+        if exchange == "MCX":
+            return "FUTCOM"
+        return "FUTIDX" if _is_index_underlying(symbol) else "FUTSTK"
+    if instrument == "OPT":
+        if exchange in ("CDS", "BCD"):
+            return "OPTCUR"
+        if exchange == "MCX":
+            return "OPTFUT"
+        return "OPTIDX" if _is_index_underlying(symbol) else "OPTSTK"
+    return "EQ"
+
+
+def _instrument_type_label(instrument: str, exchange: str, symbol: str) -> str:
+    instrument = instrument.upper()
+    if instrument in ("FUT", "OPT"):
+        return _shoonya_instrument_for_row(instrument, exchange, symbol)
+    if instrument == "IDX":
+        return "INDEX"
+    return "EQ"
+
+
+def _angel_exchange_segment(exchange: str, instrument: str) -> str:
+    instrument = instrument.upper()
+    exchange = exchange.upper()
+    if exchange == "NSE":
+        return "nse_index" if instrument == "IDX" else "nse_cm"
+    if exchange == "BSE":
+        return "bse_index" if instrument == "IDX" else "bse_cm"
+    return {
+        "NFO": "nfo",
+        "BFO": "bfo",
+        "MCX": "mcx_fo",
+        "CDS": "cds_fo",
+        "BCD": "bcd_fo",
+    }.get(exchange, exchange.lower())
+
+
+def _dhan_exchange_id(exchange: str) -> str:
+    return {
+        "NFO": "NSE",
+        "CDS": "NSE",
+        "NSE": "NSE",
+        "BFO": "BSE",
+        "BCD": "BSE",
+        "BSE": "BSE",
+        "MCX": "MCX",
+    }.get(exchange.upper(), exchange.upper())
+
+
+def _dhan_segment(exchange: str) -> str:
+    return {
+        "NSE": "E",
+        "BSE": "E",
+        "NFO": "D",
+        "BFO": "D",
+        "CDS": "C",
+        "BCD": "C",
+        "MCX": "M",
+    }.get(exchange.upper(), "E")
+
+
+def _kite_segment(exchange: str, instrument: str) -> str:
+    exchange = exchange.upper()
+    instrument = instrument.upper()
+    if exchange in ("NSE", "BSE"):
+        return exchange
+    if exchange == "MCX":
+        return "MCX" if instrument == "EQ" else f"{exchange}-{'OPT' if instrument == 'OPT' else 'FUT'}"
+    return f"{exchange}-{'OPT' if instrument == 'OPT' else 'FUT'}"
+
+
+def _kite_instrument_type(instrument: str, option_type: Optional[str]) -> str:
+    instrument = instrument.upper()
+    if instrument == "OPT":
+        return option_type or "CE"
+    if instrument == "FUT":
+        return "FUT"
+    return "EQ"
+
+
+def _upstox_segment(exchange: str, instrument: str) -> str:
+    exchange = exchange.upper()
+    instrument = instrument.upper()
+    if exchange == "NSE":
+        return "NSE_INDEX" if instrument == "IDX" else "NSE_EQ"
+    if exchange == "BSE":
+        return "BSE_INDEX" if instrument == "IDX" else "BSE_EQ"
+    return {
+        "NFO": "NSE_FO",
+        "BFO": "BSE_FO",
+        "CDS": "NCD_FO",
+        "BCD": "BCD_FO",
+        "MCX": "MCX_FO",
+    }.get(exchange, exchange)
+
+
+def _upstox_instrument_type(instrument: str, option_type: Optional[str]) -> str:
+    instrument = instrument.upper()
+    if instrument == "OPT":
+        return option_type or "OPT"
+    if instrument == "IDX":
+        return "INDEX"
+    return instrument
+
+
+def _groww_raw_exchange(exchange: str) -> str:
+    return {
+        "NFO": "NSE",
+        "CDS": "NSE",
+        "NSE": "NSE",
+        "BFO": "BSE",
+        "BCD": "BSE",
+        "BSE": "BSE",
+        "MCX": "MCX",
+    }.get(exchange.upper(), exchange.upper())
+
+
+def _groww_segment(exchange: str) -> str:
+    return {
+        "NSE": "CASH",
+        "BSE": "CASH",
+        "NFO": "FNO",
+        "BFO": "FNO",
+        "MCX": "COMMODITY",
+        "CDS": "FNO",
+        "BCD": "FNO",
+    }.get(exchange.upper(), "CASH")
 
 
 def refresh_all(force: bool = False) -> Dict[str, int]:
@@ -174,28 +694,103 @@ def search_all(
         angelone_symbol, dhan_symbol, kite_symbol, upstox_symbol, groww_symbol,
         lot_size, tick_size, expiry, strike, option_type, token
     """
-    _ensure_loaded()
     q = query.upper().strip()
     if not q:
         return []
 
-    # Collect from Fyers
-    fyers_results = _search_fyers(q, exchange, instrument_type, limit * 2)
-    # Collect from Shoonya
-    shoonya_results = _search_shoonya(q, exchange, instrument_type, limit * 2)
-    # Collect from other brokers
-    other_results = _search_other_brokers(q, exchange, instrument_type, limit * 2)
+    try:
+        from db.symbols_db import search_symbols
 
-    # Merge: prefer Fyers records (richer data), augment with other broker symbols
-    merged = _merge_results(fyers_results, shoonya_results, other_results)
+        rows = search_symbols(query=query, exchange=exchange, instrument_type=instrument_type, limit=limit)
+        results = [_db_row_to_unified_result(row) for row in rows]
+        results.sort(key=lambda r: (
+            _relevance_score(r, q),
+            {"IDX": 0, "FUT": 1, "EQ": 2, "OPT": 3}.get(r.get("instrument_type", ""), 4),
+        ))
+        return results[:limit]
+    except Exception as exc:
+        logger.debug("search_all(%s, %s, %s) DB fallback failed: %s", query, exchange, instrument_type, exc)
+        return []
 
-    # Sort by relevance
-    merged.sort(key=lambda r: (
-        _relevance_score(r, q),
-        {"IDX": 0, "FUT": 1, "EQ": 2, "OPT": 3}.get(r.get("instrument_type", ""), 4),
-    ))
 
-    return merged[:limit]
+def _db_row_to_unified_result(row: Dict[str, Any]) -> Dict[str, Any]:
+    exchange = str(row.get("exchange") or "").upper()
+    trading_symbol = str(row.get("trading_symbol") or "").strip()
+    return {
+        "symbol": row.get("symbol", ""),
+        "trading_symbol": trading_symbol,
+        "fyers_symbol": row.get("fyers_symbol") or _default_fyers_symbol(exchange, trading_symbol, row.get("symbol", "")),
+        "shoonya_symbol": row.get("shoonya_tsym") or trading_symbol,
+        "angelone_symbol": row.get("angelone_tsym") or trading_symbol,
+        "dhan_symbol": row.get("dhan_security_id") or trading_symbol,
+        "kite_symbol": trading_symbol,
+        "upstox_symbol": row.get("upstox_ikey") or trading_symbol,
+        "groww_symbol": trading_symbol,
+        "exchange": exchange,
+        "instrument_type": row.get("instrument_type", ""),
+        "lot_size": int(row.get("lot_size") or 1),
+        "tick_size": float(row.get("tick_size") or 0.05),
+        "expiry": _to_iso(str(row.get("expiry") or "")),
+        "strike": float(row.get("strike") or 0),
+        "option_type": row.get("option_type") or "",
+        "token": str(row.get("exchange_token", "")),
+        "description": row.get("description") or "",
+    }
+
+
+def _db_row_to_standard(row: Dict[str, Any]) -> Dict[str, Any]:
+    exchange = str(row.get("exchange") or "").upper()
+    trading_symbol = str(row.get("trading_symbol") or "").strip()
+    return {
+        "TradingSymbol": trading_symbol,
+        "FyersSymbol": row.get("fyers_symbol") or _default_fyers_symbol(exchange, trading_symbol, row.get("symbol", "")),
+        "Symbol": row.get("symbol", ""),
+        "Underlying": row.get("symbol", ""),
+        "Exchange": exchange,
+        "Token": str(row.get("exchange_token", "")),
+        "FyToken": str(row.get("fyers_token", "")),
+        "LotSize": int(row.get("lot_size") or 1),
+        "TickSize": float(row.get("tick_size") or 0.05),
+        "Expiry": _iso_to_broker(str(row.get("expiry") or "")) or "",
+        "Instrument": row.get("instrument_type", ""),
+        "OptionType": row.get("option_type") or "",
+        "StrikePrice": float(row.get("strike") or 0) or None,
+        "Description": row.get("description") or "",
+        "tsym": trading_symbol,
+        "exch": exchange,
+        "ls": str(int(row.get("lot_size") or 1)),
+    }
+
+
+def lookup_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Optional[Any]:
+    """DB-backed lookup used by quote and websocket symbol resolution."""
+    try:
+        from types import SimpleNamespace
+        from db.symbols_db import lookup_by_trading_symbol as db_lookup
+
+        row = db_lookup(trading_symbol, exchange)
+        if not row:
+            return None
+
+        expiry_value = row.get("expiry")
+        expiry_iso = expiry_value.strftime("%Y-%m-%d") if hasattr(expiry_value, "strftime") else str(expiry_value or "")
+        return SimpleNamespace(
+            symbol=row.get("symbol", ""),
+            trading_symbol=row.get("trading_symbol", ""),
+            exchange=row.get("exchange", ""),
+            instrument_type=row.get("instrument_type", ""),
+            expiry=expiry_iso,
+            strike=float(row.get("strike") or 0),
+            option_type=row.get("option_type") or "",
+            lot_size=int(row.get("lot_size") or 1),
+            tick_size=float(row.get("tick_size") or 0.05),
+            token=str(row.get("exchange_token", "")),
+            fyers_symbol=row.get("fyers_symbol") or _default_fyers_symbol(row.get("exchange", ""), row.get("trading_symbol", ""), row.get("symbol", "")),
+            description=row.get("description") or "",
+        )
+    except Exception as exc:
+        logger.debug("lookup_by_trading_symbol(%s) failed: %s", trading_symbol, exc)
+        return None
 
 
 def _search_fyers(query: str, exchange: str, instrument_type: str, limit: int) -> List[Dict[str, Any]]:
@@ -564,50 +1159,14 @@ def get_expiries(
     Get available expiry dates (ISO format) from all broker data.
     Returns sorted list of ISO date strings.
     """
-    _ensure_loaded()
-    all_expiries = set()
-    sym = symbol.upper()
-
-    # Fyers
     try:
-        from scripts.fyers_scriptmaster import get_expiry_list
-        for exp in get_expiry_list(sym, exchange, kind):
-            iso = _to_iso(exp)
-            if iso:
-                all_expiries.add(iso)
-    except Exception:
-        pass
+        from db.symbols_db import get_expiry_list as db_get_expiry_list
 
-    # Shoonya
-    try:
-        from scripts.shoonya_scriptmaster import get_expiry_list as shoo_exp
-        for exp in shoo_exp(sym, exchange, kind):
-            iso = _to_iso(exp)
-            if iso:
-                all_expiries.add(iso)
-    except Exception:
-        pass
-
-    # Additional brokers (Angel One, Dhan, Kite, Upstox, Groww)
-    for mod_name in (
-        "scripts.angelone_scriptmaster",
-        "scripts.dhan_scriptmaster",
-        "scripts.kite_scriptmaster",
-        "scripts.upstox_scriptmaster",
-        "scripts.groww_scriptmaster",
-    ):
-        try:
-            import importlib
-            mod = importlib.import_module(mod_name)
-            for exp in mod.get_expiry_list(sym, exchange, kind):
-                iso = _to_iso(exp)
-                if iso:
-                    all_expiries.add(iso)
-        except Exception:
-            pass
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    return sorted(e for e in all_expiries if e >= today)
+        instrument_type = "FUT" if kind.upper().startswith("FUT") else "OPT"
+        return db_get_expiry_list(symbol, exchange, instrument_type)
+    except Exception as exc:
+        logger.debug("get_expiries(%s, %s, %s) failed: %s", symbol, exchange, kind, exc)
+        return []
 
 
 def get_options(
@@ -621,93 +1180,30 @@ def get_options(
     Get options from all scriptmasters, returning unified records.
     Expiry can be ISO or DD-Mon-YYYY format.
     """
-    _ensure_loaded()
-    results = []
-
-    # Convert ISO expiry to broker format if needed
-    broker_expiry = _iso_to_broker(expiry) if expiry else None
-
-    # Fyers options
     try:
-        from scripts.fyers_scriptmaster import get_options as fy_opts
-        for rec in fy_opts(underlying, exchange, broker_expiry, strike, option_type):
-            fyers_sym = rec.get("FyersSymbol", "")
-            tsym = fyers_sym.split(":", 1)[-1] if ":" in fyers_sym else fyers_sym
-            results.append({
-                "symbol": rec.get("Underlying", ""),
-                "trading_symbol": tsym,
-                "fyers_symbol": fyers_sym,
-                "shoonya_symbol": "",
-                "exchange": rec.get("Exchange", ""),
-                "instrument_type": "OPT",
-                "lot_size": int(rec.get("LotSize", 1) or 1),
-                "tick_size": float(rec.get("TickSize", 0.05) or 0.05),
-                "expiry": _to_iso(rec.get("Expiry", "")),
-                "strike": float(rec.get("StrikePrice") or 0),
-                "option_type": rec.get("OptionType") or "",
-                "token": str(rec.get("Token", "")),
-            })
-    except Exception:
-        pass
+        from db.symbols_db import get_options as db_get_options
 
-    # Shoonya options — cross-link
-    try:
-        from scripts.shoonya_scriptmaster import get_options as sh_opts
-        for rec in sh_opts(underlying, exchange, broker_expiry, strike, option_type):
-            # Try to find matching Fyers record
-            strike_val = float(rec.get("StrikePrice") or 0)
-            otype_val = (rec.get("OptionType") or "").upper()
-            matched = False
-            for r in results:
-                if (abs(r["strike"] - strike_val) < 0.01
-                        and r["option_type"].upper() == otype_val
-                        and r["expiry"] == _to_iso(rec.get("Expiry", ""))):
-                    r["shoonya_symbol"] = rec.get("TradingSymbol", "")
-                    matched = True
-                    break
-            if not matched:
-                results.append({
-                    "symbol": rec.get("Underlying", "") or rec.get("Symbol", ""),
-                    "trading_symbol": rec.get("TradingSymbol", ""),
-                    "fyers_symbol": "",
-                    "shoonya_symbol": rec.get("TradingSymbol", ""),
-                    "exchange": exchange,
-                    "instrument_type": "OPT",
-                    "lot_size": int(rec.get("LotSize") or 1),
-                    "tick_size": float(rec.get("TickSize") or 0.05),
-                    "expiry": _to_iso(rec.get("Expiry", "")),
-                    "strike": strike_val,
-                    "option_type": otype_val,
-                    "token": str(rec.get("Token", "")),
-                })
-    except Exception:
-        pass
-
-    return sorted(results, key=lambda r: (r.get("expiry", ""), r.get("strike", 0)))
+        rows = db_get_options(
+            symbol=underlying,
+            exchange=exchange,
+            expiry=expiry,
+            strike=strike,
+            option_type=option_type,
+        )
+        return [_db_row_to_unified_result(row) for row in rows]
+    except Exception as exc:
+        logger.debug("get_options(%s, %s) failed: %s", underlying, exchange, exc)
+        return []
 
 
 def get_lot_size(symbol: str, exchange: str = "NFO") -> int:
-    """Get lot size from any available scriptmaster."""
-    _ensure_loaded()
-    sym = symbol.upper()
-
+    """Get lot size from the symbols DB."""
     try:
-        from scripts.fyers_scriptmaster import get_near_futures
-        rec = get_near_futures(sym, exchange)
-        if rec and rec.get("LotSize", 0) > 0:
-            return rec["LotSize"]
-    except Exception:
-        pass
-
-    try:
-        from scripts.shoonya_scriptmaster import get_futures as sh_futs
-        futs = sh_futs(sym, exchange)
-        if futs and futs[0].get("LotSize", 0) > 0:
-            return futs[0]["LotSize"]
-    except Exception:
-        pass
-
-    return 1
+        from db.symbols_db import get_lot_size as db_get_lot_size
+        return db_get_lot_size(symbol, exchange)
+    except Exception as exc:
+        logger.debug("get_lot_size(%s, %s) failed: %s", symbol, exchange, exc)
+        return 1
 
 
 def requires_limit_order(exchange: str = "", trading_symbol: str = "",
@@ -717,24 +1213,18 @@ def requires_limit_order(exchange: str = "", trading_symbol: str = "",
     Check if LIMIT order is required (stock options / MCX options).
     Accepts both trading_symbol and tradingsymbol for backwards compatibility.
     """
-    _ensure_loaded()
     ts = trading_symbol or tradingsymbol
-
-    # Try Shoonya (has granular instrument types: OPTSTK, OPTFUT, OPTIDX)
     try:
-        from scripts.shoonya_scriptmaster import requires_limit_order as shoo_rlo
-        if shoo_rlo(exchange, tradingsymbol=ts):
-            return True
-    except Exception:
-        pass
+        from db.symbols_db import lookup_by_trading_symbol as db_lookup
 
-    # Fallback: Fyers lookup
-    try:
-        from scripts.fyers_scriptmaster import FYERS_SCRIPTMASTER
-        rec = FYERS_SCRIPTMASTER.get(ts) or FYERS_SCRIPTMASTER.get(f"{exchange}:{ts}")
-        if rec:
-            instr = rec.get("Instrument", "")
-            return instr == "OPT" and rec.get("Exchange", "") in ("NFO", "BFO", "MCX")
+        rec = db_lookup(ts, exchange)
+        if rec and rec.get("instrument_type") == "OPT":
+            exch = str(rec.get("exchange") or exchange).upper()
+            sym = str(rec.get("symbol") or "").upper()
+            if exch == "MCX":
+                return True
+            if exch in ("NFO", "BFO"):
+                return not _is_index_underlying(sym)
     except Exception:
         pass
 
@@ -772,23 +1262,8 @@ def resolve_broker_symbol(
         Groww:    trading_symbol
     """
     clean = trading_symbol.split(":", 1)[-1] if ":" in trading_symbol else trading_symbol
-
-    if broker == "fyers":
-        return f"{exchange}:{clean}"
-
-    if broker == "upstox":
-        # Upstox uses instrument_key (e.g. NSE_FO|43919)
-        try:
-            from scripts.upstox_scriptmaster import UPSTOX_UNIVERSAL
-            rec = UPSTOX_UNIVERSAL.get(f"{exchange}:{clean}")
-            if rec:
-                return rec.get("InstrumentKey", clean)
-        except Exception:
-            pass
-        return clean
-
-    # Shoonya, Angel One, Dhan, Kite, Groww, Paper use plain symbols
-    return clean
+    symbols = get_broker_symbols(clean, exchange)
+    return symbols.get(broker, clean)
 
 
 def resolve_from_broker(broker_symbol: str, broker: str) -> tuple:
@@ -815,88 +1290,20 @@ def get_broker_symbols(
          "angelone": "NIFTY26APR24500CE", "dhan": "NIFTY26APR24500CE",
          "kite": "NIFTY26APR24500CE", "upstox": "NSE_FO|...", "groww": "NIFTY26APR24500CE"}
     """
-    _ensure_loaded()
-    result = {}
-
-    # Fyers: try direct lookup
     try:
-        from scripts.fyers_scriptmaster import FYERS_SCRIPTMASTER
-        fyers_key = f"{exchange}:{trading_symbol}"
-        if fyers_key in FYERS_SCRIPTMASTER:
-            result["fyers"] = fyers_key
+        from db.symbols_db import get_broker_symbols_by_trading_symbol
+        return get_broker_symbols_by_trading_symbol(trading_symbol, exchange)
     except Exception:
-        pass
-
-    # Shoonya: try lookup by TradingSymbol
-    try:
-        from scripts.shoonya_scriptmaster import get_record_by_tsym
-        rec = get_record_by_tsym(trading_symbol, exchange)
-        if rec:
-            result["shoonya"] = rec["TradingSymbol"]
-    except Exception:
-        pass
-
-    # Angel One
-    try:
-        from scripts.angelone_scriptmaster import get_record_by_symbol
-        rec = get_record_by_symbol(trading_symbol)
-        if rec and rec.get("Exchange", "").upper() == exchange.upper():
-            result["angelone"] = rec["Symbol"]
-    except Exception:
-        pass
-
-    # Dhan
-    try:
-        from scripts.dhan_scriptmaster import SYMBOL_INDEX as DHAN_SYM_IDX
-        rec = DHAN_SYM_IDX.get(trading_symbol.upper())
-        if rec and rec.get("Exchange", "").upper() == exchange.upper():
-            result["dhan"] = rec.get("SecurityId", trading_symbol)
-    except Exception:
-        pass
-
-    # Kite
-    try:
-        from scripts.kite_scriptmaster import KITE_SCRIPTMASTER
-        kite_key = f"{exchange}:{trading_symbol}"
-        if kite_key in KITE_SCRIPTMASTER:
-            result["kite"] = trading_symbol
-    except Exception:
-        pass
-
-    # Upstox
-    try:
-        from scripts.upstox_scriptmaster import UPSTOX_UNIVERSAL
-        upstox_key = f"{exchange}:{trading_symbol}"
-        rec = UPSTOX_UNIVERSAL.get(upstox_key)
-        if rec:
-            result["upstox"] = rec.get("InstrumentKey", trading_symbol)
-    except Exception:
-        pass
-
-    # Groww
-    try:
-        from scripts.groww_scriptmaster import GROWW_SCRIPTMASTER
-        # Groww uses exchange:trading_symbol as key with raw exchange (NSE not NFO)
-        for key, rec in GROWW_SCRIPTMASTER.items():
-            if rec.get("TradingSymbol", "").upper() == trading_symbol.upper():
-                if rec.get("Exchange", "").upper() == exchange.upper():
-                    result["groww"] = rec["TradingSymbol"]
-                    break
-    except Exception:
-        pass
-
-    # Fallbacks
-    if "fyers" not in result:
-        result["fyers"] = f"{exchange}:{trading_symbol}"
-    if "shoonya" not in result:
-        result["shoonya"] = trading_symbol
-    for broker in ("angelone", "dhan", "kite", "groww"):
-        if broker not in result:
-            result[broker] = trading_symbol
-    if "upstox" not in result:
-        result["upstox"] = trading_symbol
-
-    return result
+        clean = trading_symbol.split(":", 1)[-1] if ":" in trading_symbol else trading_symbol
+        return {
+            "fyers": f"{exchange}:{clean}",
+            "shoonya": clean,
+            "angelone": clean,
+            "dhan": clean,
+            "kite": clean,
+            "upstox": clean,
+            "groww": clean,
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -905,32 +1312,29 @@ def get_broker_symbols(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _fyers_to_standard(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert a fyers_scriptmaster record to the standard interface.
-
-    TradingSymbol is the PLAIN symbol WITHOUT exchange prefix (broker-agnostic).
-    FyersSymbol retains the full 'EXCHANGE:SYMBOL' format for Fyers-specific use.
-    """
+    """Backward-compatible adapter that now accepts DB rows or legacy records."""
+    if "exchange" in rec or "trading_symbol" in rec:
+        return _db_row_to_standard(rec)
     fyers_sym = rec.get("FyersSymbol", "")
-    # Strip exchange prefix for TradingSymbol (e.g. 'NSE:NIFTY26APRFUT' → 'NIFTY26APRFUT')
     plain_sym = fyers_sym.split(":", 1)[-1] if ":" in fyers_sym else fyers_sym
     return {
         "TradingSymbol": plain_sym,
-        "FyersSymbol":   fyers_sym,
-        "Symbol":        rec.get("Underlying", ""),
-        "Underlying":    rec.get("Underlying", ""),
-        "Exchange":      rec.get("Exchange", ""),
-        "Token":         rec.get("Token", ""),
-        "FyToken":       rec.get("FyToken", ""),
-        "LotSize":       rec.get("LotSize", 1),
-        "TickSize":      rec.get("TickSize", 0.05),
-        "Expiry":        rec.get("Expiry", ""),
-        "Instrument":    rec.get("Instrument", ""),
-        "OptionType":    rec.get("OptionType"),
-        "StrikePrice":   rec.get("StrikePrice"),
-        "Description":   rec.get("Description", ""),
-        "tsym":          plain_sym,
-        "exch":          rec.get("Exchange", ""),
-        "ls":            str(rec.get("LotSize", 1)),
+        "FyersSymbol": fyers_sym,
+        "Symbol": rec.get("Underlying", ""),
+        "Underlying": rec.get("Underlying", ""),
+        "Exchange": rec.get("Exchange", ""),
+        "Token": rec.get("Token", ""),
+        "FyToken": rec.get("FyToken", ""),
+        "LotSize": rec.get("LotSize", 1),
+        "TickSize": rec.get("TickSize", 0.05),
+        "Expiry": rec.get("Expiry", ""),
+        "Instrument": rec.get("Instrument", ""),
+        "OptionType": rec.get("OptionType"),
+        "StrikePrice": rec.get("StrikePrice"),
+        "Description": rec.get("Description", ""),
+        "tsym": plain_sym,
+        "exch": rec.get("Exchange", ""),
+        "ls": str(rec.get("LotSize", 1)),
     }
 
 
@@ -961,38 +1365,15 @@ def get_future(
     Look up futures contract for a given underlying.
     Returns dict with TradingSymbol, LotSize, Expiry, Exchange, Token, etc.
     """
-    _ensure_loaded()
     try:
-        from scripts.fyers_scriptmaster import get_futures
-        futs = get_futures(symbol.upper(), exchange.upper())
-        if futs and len(futs) > result:
-            return _fyers_to_standard(futs[result])
-    except Exception as exc:
-        logger.debug("get_future(%s, %s) fyers: %s", symbol, exchange, exc)
+        from db.symbols_db import get_future as db_get_future
 
-    # Try Shoonya
-    try:
-        from scripts.shoonya_scriptmaster import get_futures as sh_futs
-        futs = sh_futs(symbol.upper(), exchange.upper())
-        if futs and len(futs) > result:
-            rec = futs[result]
-            return {
-                "TradingSymbol": rec.get("TradingSymbol", ""),
-                "Symbol":        rec.get("Underlying", "") or rec.get("Symbol", ""),
-                "Underlying":    rec.get("Underlying", "") or rec.get("Symbol", ""),
-                "Exchange":      rec.get("Exchange", exchange),
-                "LotSize":       int(rec.get("LotSize", 1)),
-                "Expiry":        rec.get("Expiry", ""),
-                "Instrument":    "FUT",
-                "Token":         rec.get("Token", ""),
-                "tsym":          rec.get("TradingSymbol", ""),
-                "exch":          rec.get("Exchange", exchange),
-                "ls":            str(rec.get("LotSize", 1)),
-            }
+        rec = db_get_future(symbol, exchange, result)
+        if rec:
+            return _db_row_to_standard(rec)
     except Exception as exc:
-        logger.debug("get_future(%s, %s) shoonya: %s", symbol, exchange, exc)
+        logger.debug("get_future(%s, %s) failed: %s", symbol, exchange, exc)
 
-    # Fallback: synthetic record
     lot = get_lot_size(symbol, exchange)
     return {
         "TradingSymbol": f"{symbol.upper()}FUT",
@@ -1015,13 +1396,16 @@ def get_futures_list(
     exchange: str = "NFO",
 ) -> List[Dict[str, Any]]:
     """Return all futures contracts for a symbol, sorted by expiry."""
-    _ensure_loaded()
     try:
-        from scripts.fyers_scriptmaster import get_futures
-        return [_fyers_to_standard(r) for r in get_futures(symbol.upper(), exchange.upper())]
-    except Exception:
-        fut = get_future(symbol, exchange)
-        return [fut] if fut else []
+        from db.symbols_db import get_futures as db_get_futures
+
+        rows = db_get_futures(symbol, exchange)
+        if rows:
+            return [_db_row_to_standard(row) for row in rows]
+    except Exception as exc:
+        logger.debug("get_futures_list(%s, %s) failed: %s", symbol, exchange, exc)
+    fut = get_future(symbol, exchange)
+    return [fut] if fut else []
 
 
 def get_option(
@@ -1044,17 +1428,17 @@ def get_options_list(
     option_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Return options matching filters, sorted by (expiry, strike)."""
-    _ensure_loaded()
     try:
-        from scripts.fyers_scriptmaster import get_options as fy_opts
-        raw = fy_opts(
-            underlying=symbol.upper(),
-            exchange=exchange.upper(),
+        from db.symbols_db import get_options as db_get_options
+
+        rows = db_get_options(
+            symbol=symbol,
+            exchange=exchange,
             expiry=expiry,
             strike=strike,
-            option_type=option_type.upper() if option_type else None,
+            option_type=option_type,
         )
-        return [_fyers_to_standard(r) for r in raw]
+        return [_db_row_to_standard(row) for row in rows]
     except Exception as exc:
         logger.debug("get_options_list error: %s", exc)
         return []
@@ -1068,15 +1452,16 @@ def universal_symbol_search(
     Search instrument master for matching symbols/underlyings.
     Returns list of dicts with TradingSymbol, LotSize, Expiry, etc.
     """
-    _ensure_loaded()
     try:
-        from scripts.fyers_scriptmaster import search
-        raw = search(query=symbol, exchange=exchange)
-        return [_fyers_to_standard(r) for r in raw]
+        from db.symbols_db import search_symbols
+
+        rows = search_symbols(symbol, exchange, limit=50)
+        if rows:
+            return [_db_row_to_standard(row) for row in rows]
     except Exception as exc:
         logger.debug("universal_symbol_search error: %s", exc)
-        fut = get_future(symbol, exchange)
-        return [fut] if fut else []
+    fut = get_future(symbol, exchange)
+    return [fut] if fut else []
 
 
 def options_expiry(
@@ -1089,19 +1474,10 @@ def options_expiry(
     result=None: full list, result=0: nearest, result=1: next, etc.
     Returns list[str] (DD-Mon-YYYY) or str.
     """
-    _ensure_loaded()
-    try:
-        from scripts.fyers_scriptmaster import get_expiry_list
-        expiries = get_expiry_list(symbol.upper(), exchange.upper(), "OPTION")
-        if expiries:
-            today = datetime.now().date()
-            expiries = [e for e in expiries if _parse_expiry_date(e) and _parse_expiry_date(e) >= today]
-        if result is not None:
-            return expiries[result] if len(expiries) > result else ""
-        return expiries
-    except Exception as exc:
-        logger.debug("options_expiry error: %s", exc)
-        return "" if result is not None else []
+    expiries = [_iso_to_broker(exp) or "" for exp in get_expiries(symbol, exchange, "OPTION")]
+    if result is not None:
+        return expiries[result] if len(expiries) > result else ""
+    return expiries
 
 
 def fut_expiry(
@@ -1110,19 +1486,10 @@ def fut_expiry(
     result: Optional[int] = None,
 ) -> Any:
     """Return futures expiry dates for the symbol."""
-    _ensure_loaded()
-    try:
-        from scripts.fyers_scriptmaster import get_expiry_list
-        expiries = get_expiry_list(symbol.upper(), exchange.upper(), "FUTURE")
-        if expiries:
-            today = datetime.now().date()
-            expiries = [e for e in expiries if _parse_expiry_date(e) and _parse_expiry_date(e) >= today]
-        if result is not None:
-            return expiries[result] if len(expiries) > result else ""
-        return expiries
-    except Exception as exc:
-        logger.debug("fut_expiry error: %s", exc)
-        return "" if result is not None else []
+    expiries = [_iso_to_broker(exp) or "" for exp in get_expiries(symbol, exchange, "FUTURE")]
+    if result is not None:
+        return expiries[result] if len(expiries) > result else ""
+    return expiries
 
 
 def get_strike_gap(symbol: str, exchange: str = "NFO") -> int:
@@ -1143,18 +1510,19 @@ def build_option_trading_symbol(
     exchange: str = "NFO",
 ) -> str:
     """Build a Fyers-format option trading symbol using real scriptmaster data."""
-    _ensure_loaded()
     try:
-        from scripts.fyers_scriptmaster import get_options as fy_opts
-        matches = fy_opts(
-            underlying=symbol.upper(),
-            exchange=exchange.upper(),
+        from db.symbols_db import get_options as db_get_options
+
+        matches = db_get_options(
+            symbol=symbol,
+            exchange=exchange,
             expiry=expiry,
             strike=strike,
-            option_type=option_type.upper(),
+            option_type=option_type,
         )
         if matches:
-            return matches[0].get("FyersSymbol", "")
+            row = matches[0]
+            return row.get("fyers_symbol") or _default_fyers_symbol(exchange, row.get("trading_symbol", ""), row.get("symbol", ""))
     except Exception:
         pass
 
@@ -1172,44 +1540,11 @@ def build_option_trading_symbol(
 
 
 def get_instrument_count() -> int:
-    """Return total loaded instrument count across all brokers."""
-    total = 0
     try:
-        from scripts.fyers_scriptmaster import FYERS_SCRIPTMASTER
-        total += len(FYERS_SCRIPTMASTER)
+        from db.symbols_db import get_symbol_count
+        return get_symbol_count()
     except Exception:
-        pass
-    try:
-        from scripts.shoonya_scriptmaster import SHOONYA_UNIVERSAL
-        total += len(SHOONYA_UNIVERSAL)
-    except Exception:
-        pass
-    try:
-        from scripts.angelone_scriptmaster import ANGELONE_SCRIPTMASTER
-        total += len(ANGELONE_SCRIPTMASTER)
-    except Exception:
-        pass
-    try:
-        from scripts.dhan_scriptmaster import DHAN_SCRIPTMASTER
-        total += len(DHAN_SCRIPTMASTER)
-    except Exception:
-        pass
-    try:
-        from scripts.kite_scriptmaster import KITE_SCRIPTMASTER
-        total += len(KITE_SCRIPTMASTER)
-    except Exception:
-        pass
-    try:
-        from scripts.upstox_scriptmaster import UPSTOX_SCRIPTMASTER
-        total += len(UPSTOX_SCRIPTMASTER)
-    except Exception:
-        pass
-    try:
-        from scripts.groww_scriptmaster import GROWW_SCRIPTMASTER
-        total += len(GROWW_SCRIPTMASTER)
-    except Exception:
-        pass
-    return total
+        return 0
 
 
 # ── Date helpers ──────────────────────────────────────────────────────────────

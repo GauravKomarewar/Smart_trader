@@ -4,7 +4,8 @@ import logging
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Any, Optional, List
+import psycopg2.extras
 from sqlalchemy.orm import Session
 
 from broker.shoonya_client import get_best_session, register_user_session
@@ -14,6 +15,7 @@ from broker.symbol_normalizer import (
 )
 from core.deps import current_user
 from db.database import get_db, BrokerSession as DBSession, BrokerConfig
+from db.trading_db import get_trading_conn
 
 logger = logging.getLogger("smart_trader.orders")
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -79,6 +81,166 @@ class ModifyOrderRequest(BaseModel):
     triggerPrice: Optional[float] = None
     orderType: Optional[str] = None     # LMT / MKT / SL-LMT / SL-MKT
     validity: Optional[str] = None
+
+
+def _resolve_order_target(
+    user_id: str,
+    requested_account_id: Optional[str],
+    order_id: str,
+) -> tuple[Optional[str], Optional[str], bool]:
+    """Resolve an incoming dashboard order id to (config_id, broker_order_id, actionable)."""
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        if requested_account_id:
+            cur.execute(
+                """
+                SELECT config_id, order_id
+                FROM mgr_orders
+                WHERE user_id = %s AND config_id = %s AND order_id = %s
+                LIMIT 1
+                """,
+                (user_id, requested_account_id, order_id),
+            )
+            row = cur.fetchone()
+            if row:
+                return row["config_id"], row["order_id"], True
+
+        cur.execute(
+            """
+            SELECT config_id, order_id
+            FROM mgr_orders
+            WHERE user_id = %s AND order_id = %s
+            ORDER BY fetched_at DESC
+            LIMIT 1
+            """,
+            (user_id, order_id),
+        )
+        row = cur.fetchone()
+        if row:
+            return row["config_id"], row["order_id"], True
+
+        cur.execute(
+            """
+            SELECT command_id, broker_order_id
+            FROM orders
+            WHERE user_id = %s AND (command_id = %s OR broker_order_id = %s)
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (user_id, order_id, order_id),
+        )
+        record = cur.fetchone()
+        if not record:
+            return requested_account_id, order_id, bool(requested_account_id)
+
+        broker_order_id = record.get("broker_order_id")
+        if not broker_order_id:
+            return requested_account_id, None, False
+
+        cur.execute(
+            """
+            SELECT config_id
+            FROM mgr_orders
+            WHERE user_id = %s AND order_id = %s
+            ORDER BY fetched_at DESC
+            LIMIT 1
+            """,
+            (user_id, broker_order_id),
+        )
+        mgr_row = cur.fetchone()
+        resolved_account_id = requested_account_id or (mgr_row["config_id"] if mgr_row else None)
+        return resolved_account_id, broker_order_id, bool(resolved_account_id)
+    finally:
+        conn.close()
+
+
+def _update_mgr_order_cache(
+    user_id: str,
+    config_id: Optional[str],
+    order_id: str,
+    changes: dict[str, Any],
+) -> None:
+    if not config_id:
+        return
+
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT data
+            FROM mgr_orders
+            WHERE user_id = %s AND config_id = %s AND order_id = %s
+            LIMIT 1
+            """,
+            (user_id, config_id, order_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return
+        data = dict(row["data"] or {})
+        data.update({k: v for k, v in changes.items() if v is not None})
+        cur.execute(
+            """
+            UPDATE mgr_orders
+            SET data = %s, fetched_at = NOW()
+            WHERE user_id = %s AND config_id = %s AND order_id = %s
+            """,
+            (psycopg2.extras.Json(data), user_id, config_id, order_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.debug("mgr_orders cache update failed for %s/%s", config_id, order_id, exc_info=True)
+    finally:
+        conn.close()
+
+
+def _update_order_db(
+    user_id: str,
+    order_id: str,
+    *,
+    status: Optional[str] = None,
+    quantity: Optional[int] = None,
+    price: Optional[float] = None,
+    order_type: Optional[str] = None,
+) -> None:
+    set_parts = []
+    values: list[Any] = []
+    if status is not None:
+        set_parts.append("status = %s")
+        values.append(status)
+    if quantity is not None:
+        set_parts.append("quantity = %s")
+        values.append(quantity)
+    if price is not None:
+        set_parts.append("price = %s")
+        values.append(price)
+    if order_type is not None:
+        set_parts.append("order_type = %s")
+        values.append(order_type)
+    if not set_parts:
+        return
+
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            UPDATE orders
+            SET {", ".join(set_parts)}, updated_at = NOW()
+            WHERE user_id = %s AND (broker_order_id = %s OR command_id = %s)
+            """,
+            values + [user_id, order_id, order_id],
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.debug("orders table update failed for %s", order_id, exc_info=True)
+    finally:
+        conn.close()
 
 
 @router.post("/place")
@@ -303,9 +465,20 @@ async def cancel_order(
     """Cancel a single open order by order_id on the specified account."""
     from broker.multi_broker import registry
     user_id = payload["sub"]
-    result = registry.cancel_order(user_id, account_id, order_id)
+    resolved_account_id, broker_order_id, actionable = _resolve_order_target(user_id, account_id, order_id)
+    if not actionable or not resolved_account_id or not broker_order_id:
+        raise HTTPException(400, "Order is not yet available for broker-side cancellation")
+
+    result = registry.cancel_order(user_id, resolved_account_id, broker_order_id)
     if not result.get("success"):
         raise HTTPException(400, result.get("message", "Cancel failed"))
+    _update_mgr_order_cache(
+        user_id,
+        resolved_account_id,
+        broker_order_id,
+        {"status": "CANCELLED", "remarks": result.get("message") or "Cancelled"},
+    )
+    _update_order_db(user_id, broker_order_id, status="FAILED")
     return result
 
 
@@ -332,20 +505,44 @@ async def modify_order(
     """Modify an open order (price, quantity, order type)."""
     from broker.multi_broker import registry
     user_id = payload["sub"]
+    resolved_account_id, broker_order_id, actionable = _resolve_order_target(user_id, req.accountId, order_id)
+    if not actionable or not resolved_account_id or not broker_order_id:
+        raise HTTPException(400, "Order is not yet available for broker-side modification")
+
     params = {}
     if req.quantity is not None:
         params["quantity"] = req.quantity
+        params["qty"] = req.quantity
     if req.price is not None:
         params["price"] = req.price
     if req.triggerPrice is not None:
         params["trigger_price"] = req.triggerPrice
     if req.orderType is not None:
-        params["order_type"] = req.orderType
+        params["order_type"] = _order_type_map(req.orderType)
     if req.validity is not None:
         params["validity"] = req.validity
-    result = registry.modify_order(user_id, req.accountId, order_id, params)
+    result = registry.modify_order(user_id, resolved_account_id, broker_order_id, params)
     if not result.get("success"):
         raise HTTPException(400, result.get("message", "Modify failed"))
+    canonical_order_type = _order_type_map(req.orderType or "")
+    _update_mgr_order_cache(
+        user_id,
+        resolved_account_id,
+        broker_order_id,
+        {
+            "qty": req.quantity,
+            "price": req.price,
+            "trigger_price": req.triggerPrice,
+            "order_type": canonical_order_type if req.orderType else None,
+        },
+    )
+    _update_order_db(
+        user_id,
+        broker_order_id,
+        quantity=req.quantity,
+        price=req.price,
+        order_type=canonical_order_type if req.orderType else None,
+    )
     return result
 
 
@@ -564,13 +761,14 @@ def _normalize_db_order(rec, idx: int) -> dict:
         "EXECUTED": "COMPLETE", "FAILED": "REJECTED",
     }
     status = _st_map.get(rec.status, rec.status or "PENDING")
+    row_id = rec.broker_order_id or rec.command_id
     order_id = rec.broker_order_id or rec.command_id
     placed_at = rec.created_at or datetime.now().isoformat()
     prctyp  = _order_type_map(rec.order_type or "MARKET")
     prd     = _prd_map(rec.product or "MIS")
     return {
-        "id": order_id,
-        "accountId": rec.broker_user or "smart_trader",
+        "id": row_id,
+        "accountId": "",
         "orderId": order_id,
         "commandId": rec.command_id,
         "symbol": tsym,
@@ -592,6 +790,95 @@ def _normalize_db_order(rec, idx: int) -> dict:
         "placedAt": placed_at,
         "updatedAt": rec.updated_at or placed_at,
         "source": "smart_trader_db",
+    }
+
+
+def _normalize_holding(h: dict, idx: int) -> dict:
+    """Map broker holding data to the frontend Holding schema."""
+    symbol = h.get("symbol") or h.get("tsym") or h.get("tradingsymbol") or f"HOLDING{idx}"
+    exchange = _resolve_exchange(h.get("exchange") or h.get("exch") or "NSE", symbol)
+    account_id = h.get("account_id") or h.get("accountId") or h.get("actid") or "live"
+    quantity = int(float(h.get("qty") or h.get("holdqty") or h.get("quantity") or 0))
+    avg_cost = float(h.get("avg_price") or h.get("avgprc") or h.get("avgCost") or 0)
+    ltp = float(h.get("ltp") or h.get("lp") or 0)
+    invested = float(h.get("investedValue") or (avg_cost * quantity))
+    current = float(h.get("currentValue") or (ltp * quantity if ltp else invested))
+    pnl = float(h.get("pnl") if h.get("pnl") is not None else (current - invested))
+    pnl_pct = float(
+        h.get("pnl_pct")
+        if h.get("pnl_pct") is not None
+        else h.get("pnlPct")
+        if h.get("pnlPct") is not None
+        else ((pnl / invested) * 100 if invested else 0)
+    )
+    prev_close = float(
+        h.get("close")
+        or h.get("close_price")
+        or h.get("prev_close")
+        or h.get("previous_close")
+        or 0
+    )
+    day_change = float(
+        h.get("dayChange")
+        if h.get("dayChange") is not None
+        else (ltp - prev_close if ltp and prev_close else 0)
+    )
+    day_change_pct = float(
+        h.get("dayChangePct")
+        if h.get("dayChangePct") is not None
+        else ((day_change / prev_close) * 100 if prev_close else 0)
+    )
+
+    return {
+        "id": f"{account_id}:{exchange}:{symbol}",
+        "accountId": account_id,
+        "symbol": symbol,
+        "exchange": exchange,
+        "isin": h.get("isin") or "",
+        "quantity": quantity,
+        "avgCost": avg_cost,
+        "ltp": ltp,
+        "currentValue": current,
+        "investedValue": invested,
+        "pnl": pnl,
+        "pnlPct": pnl_pct,
+        "dayChange": day_change,
+        "dayChangePct": day_change_pct,
+    }
+
+
+def _normalize_trade(t: dict, idx: int) -> dict:
+    """Map broker trade data to the frontend Trade schema."""
+    symbol = t.get("tradingsymbol") or t.get("symbol") or t.get("tsym") or f"TRADE{idx}"
+    account_id = t.get("account_id") or t.get("accountId") or t.get("actid") or "live"
+    trade_id = str(t.get("trade_id") or t.get("tradeId") or t.get("fillid") or t.get("flid") or idx)
+    order_id = str(t.get("order_id") or t.get("orderId") or t.get("norenordno") or "")
+    quantity = int(float(t.get("qty") or t.get("quantity") or 0))
+    price = float(t.get("price") or t.get("flprc") or 0)
+    exchange = _resolve_exchange(t.get("exchange") or t.get("exch") or "NSE", symbol)
+    transaction_type = str(t.get("side") or t.get("transactionType") or "BUY").upper()
+    if transaction_type not in ("BUY", "SELL"):
+        transaction_type = "BUY" if transaction_type in ("B", "1") else "SELL"
+    product = _prd_map(t.get("product") or t.get("prd") or "MIS")
+    traded_at = t.get("tradedAt") or t.get("timestamp") or t.get("exch_tm") or ""
+    value = float(t.get("value") or (quantity * price))
+    charges = float(t.get("charges") or 0)
+
+    return {
+        "id": trade_id,
+        "accountId": account_id,
+        "orderId": order_id,
+        "tradeId": trade_id,
+        "symbol": symbol,
+        "tradingsymbol": symbol,
+        "exchange": exchange,
+        "transactionType": transaction_type,
+        "product": product,
+        "quantity": quantity,
+        "price": price,
+        "value": value,
+        "charges": charges,
+        "tradedAt": traded_at,
     }
 
 
@@ -715,7 +1002,8 @@ async def get_holdings(
     user_id = payload["sub"]
     from managers.supreme_manager import supreme
     rows = supreme.get_holdings(user_id, config_id=account_id)
-    holdings = [r["data"] if "data" in r else r for r in rows]
+    raw_holdings = [r["data"] if "data" in r else r for r in rows]
+    holdings = [_normalize_holding(h, i) for i, h in enumerate(raw_holdings)]
     return {"data": holdings, "count": len(holdings)}
 
 
@@ -753,7 +1041,8 @@ async def get_tradebook(
     user_id = payload["sub"]
     from managers.supreme_manager import supreme
     rows = supreme.get_tradebook(user_id, config_id=account_id)
-    trades = [r["data"] if "data" in r else r for r in rows]
+    raw_trades = [r["data"] if "data" in r else r for r in rows]
+    trades = [_normalize_trade(t, i) for i, t in enumerate(raw_trades)]
     return {"data": trades, "count": len(trades)}
 
 

@@ -22,16 +22,17 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import logging
 import re
 import threading
+import tempfile
 import zipfile
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from core.daily_refresh import current_refresh_cycle_start, now_ist
 
 logger = logging.getLogger("smart_trader.shoonya_scriptmaster")
 
@@ -48,11 +49,6 @@ SCRIPTMASTER_URLS: Dict[str, str] = {
     "MCX": f"{BASE_URL}/MCX_symbols.txt.zip",
     "CDS": f"{BASE_URL}/CDS_symbols.txt.zip",
 }
-
-_HERE = Path(__file__).resolve().parent
-DATA_DIR = _HERE / "data" / "shoonya_scriptmaster"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-META_FILE = DATA_DIR / "metadata.json"
 
 # ── Canonical instrument groups ───────────────────────────────────────────────
 
@@ -80,29 +76,18 @@ SHOONYA_UNIVERSAL: Dict[str, Dict[str, Any]] = {}
 EXPIRY_CALENDAR: Dict[str, Dict[str, Dict[str, List[str]]]] = {}
 
 _LOCK = threading.RLock()
-_last_refresh: Optional[str] = None
+_last_refresh: Optional[datetime] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _today_ist() -> str:
-    ist = timezone(timedelta(hours=5, minutes=30))
-    return datetime.now(ist).strftime("%Y-%m-%d")
+    return now_ist().strftime("%Y-%m-%d")
 
 
 def _needs_refresh() -> bool:
     global _last_refresh
-    if _last_refresh == _today_ist():
-        return False
-    if META_FILE.exists():
-        try:
-            meta = json.loads(META_FILE.read_text())
-            if meta.get("date") == _today_ist():
-                _last_refresh = _today_ist()
-                return False
-        except Exception:
-            pass
-    return True
+    return not (_last_refresh and _last_refresh >= current_refresh_cycle_start())
 
 
 def _extract_underlying(tradingsymbol: str, symbol: Optional[str] = None) -> str:
@@ -262,26 +247,23 @@ def refresh(force: bool = False) -> None:
     global _last_refresh
 
     if not force and not _needs_refresh():
-        logger.info("Shoonya scriptmaster up-to-date — loading from disk")
-        _load_from_disk()
+        logger.info("Shoonya scriptmaster already refreshed for current cycle — skipping download")
         return
 
     temp: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for exch, url in SCRIPTMASTER_URLS.items():
-        try:
-            logger.info("Downloading Shoonya scriptmaster: %s", exch)
-            resp = requests.get(url, timeout=30)
-            resp.raise_for_status()
-            # Save raw ZIP
-            zip_path = DATA_DIR / f"{exch}.zip"
-            zip_path.write_bytes(resp.content)
-            records = _parse_zip(resp.content, exch)
-            temp[exch] = records
-            # Delete ZIP after parsing
-            zip_path.unlink(missing_ok=True)
-            logger.info("Loaded %d symbols from Shoonya %s", len(records), exch)
-        except Exception as exc:
-            logger.error("Failed to load Shoonya %s: %s", exch, exc)
+    with tempfile.TemporaryDirectory(prefix="smart_trader_shoonya_") as temp_dir:
+        for exch, url in SCRIPTMASTER_URLS.items():
+            try:
+                logger.info("Downloading Shoonya scriptmaster: %s", exch)
+                resp = requests.get(url, timeout=30)
+                resp.raise_for_status()
+                zip_path = Path(temp_dir) / f"{exch}.zip"
+                zip_path.write_bytes(resp.content)
+                records = _parse_zip(zip_path.read_bytes(), exch)
+                temp[exch] = records
+                logger.info("Loaded %d symbols from Shoonya %s", len(records), exch)
+            except Exception as exc:
+                logger.error("Failed to load Shoonya %s: %s", exch, exc)
 
     if not temp:
         logger.error("No Shoonya scriptmaster data downloaded")
@@ -292,46 +274,15 @@ def refresh(force: bool = False) -> None:
         SHOONYA_SCRIPTMASTER.update(temp)
         _build_universal()
         _build_expiry_calendar()
-        _last_refresh = _today_ist()
+        _last_refresh = now_ist()
 
-    # Save processed data as JSON for fast disk load
-    for exch, data in temp.items():
-        json_path = DATA_DIR / f"{exch}.json"
-        json_path.write_text(json.dumps(data, default=str))
-
-    META_FILE.write_text(json.dumps({
-        "date": _today_ist(),
-        "version": SCRIPTMASTER_VERSION,
-        "exchanges": {exch: len(data) for exch, data in temp.items()},
-        "total": sum(len(d) for d in temp.values()),
-    }, indent=2))
     logger.info("Shoonya scriptmaster refreshed: %d total symbols",
                 sum(len(d) for d in temp.values()))
 
 
 def _load_from_disk() -> None:
-    """Load previously cached JSON files without re-downloading."""
-    temp: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for exch in SCRIPTMASTER_URLS:
-        json_path = DATA_DIR / f"{exch}.json"
-        if not json_path.exists():
-            continue
-        try:
-            temp[exch] = json.loads(json_path.read_text())
-        except Exception as exc:
-            logger.warning("Could not load Shoonya %s from disk: %s", exch, exc)
-
-    if not temp:
-        logger.warning("No cached Shoonya scriptmaster found — call refresh(force=True)")
-        return
-
-    with _LOCK:
-        SHOONYA_SCRIPTMASTER.clear()
-        SHOONYA_SCRIPTMASTER.update(temp)
-        _build_universal()
-        _build_expiry_calendar()
-    logger.info("Shoonya scriptmaster loaded from disk: %d symbols",
-                sum(len(d) for d in temp.values()))
+    """Persistent disk cache is disabled; runtime symbol lookups should use symbols_db."""
+    logger.debug("Shoonya disk cache disabled; no persistent scriptmaster files are loaded")
 
 
 # ── Query API ─────────────────────────────────────────────────────────────────

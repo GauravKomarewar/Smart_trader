@@ -23,16 +23,16 @@ from __future__ import annotations
 import logging
 import time
 import threading
-from datetime import datetime, timedelta, timezone, time as dtime
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
 import psycopg2.extras
+from core.daily_refresh import IST, current_refresh_cycle_start, next_refresh_time
 from db.trading_db import get_trading_conn
 
 logger = logging.getLogger("smart_trader.symbols_db")
 
-# IST = UTC+5:30
-_IST = timezone(timedelta(hours=5, minutes=30))
+_IST = IST
 
 # Track last successful population time (in IST)
 _last_populated_at: Optional[datetime] = None
@@ -114,7 +114,7 @@ def init_symbols_schema() -> None:
 _pop_lock = threading.Lock()
 
 
-def populate_symbols_db(force: bool = False) -> Dict[str, int]:
+def populate_symbols_db(force: bool = False, only_if_empty: bool = False) -> Dict[str, int]:
     """
     Populate the symbols table from all loaded ScriptMasters.
 
@@ -124,15 +124,6 @@ def populate_symbols_db(force: bool = False) -> Dict[str, int]:
     """
     global _last_populated_at
 
-    # Check if we can skip (already populated today after 8:45 IST)
-    if not force and _last_populated_at is not None:
-        now_ist = datetime.now(_IST)
-        today_845 = now_ist.replace(hour=8, minute=45, second=0, microsecond=0)
-        if _last_populated_at >= today_845:
-            logger.info("Symbols DB already fresh (populated at %s IST), skipping.",
-                        _last_populated_at.strftime("%Y-%m-%d %H:%M"))
-            return {}
-
     with _pop_lock:
         t0 = time.time()
         counts: Dict[str, int] = {}
@@ -140,6 +131,24 @@ def populate_symbols_db(force: bool = False) -> Dict[str, int]:
         conn = get_trading_conn()
         try:
             cur = conn.cursor()
+            total_rows, last_populated_at = _get_symbols_state(cur)
+
+            if only_if_empty and total_rows > 0:
+                logger.info(
+                    "Symbols DB already has %d rows (last updated %s IST) — startup rebuild skipped",
+                    total_rows,
+                    last_populated_at.strftime("%Y-%m-%d %H:%M") if last_populated_at else "unknown",
+                )
+                return {}
+
+            if not force and last_populated_at is not None:
+                cycle_start = current_refresh_cycle_start()
+                if last_populated_at >= cycle_start:
+                    logger.info(
+                        "Symbols DB already fresh for the current refresh cycle (last updated %s IST), skipping.",
+                        last_populated_at.strftime("%Y-%m-%d %H:%M"),
+                    )
+                    return {}
 
             # Use a temp table + swap for zero-downtime refresh
             cur.execute("CREATE TEMP TABLE _sym_staging (LIKE symbols INCLUDING DEFAULTS) ON COMMIT DROP")
@@ -185,6 +194,25 @@ def populate_symbols_db(force: bool = False) -> Dict[str, int]:
             conn.close()
 
         return counts
+
+
+def _get_symbols_state(cur) -> tuple[int, Optional[datetime]]:
+    """Return current row count and last population timestamp in IST."""
+    global _last_populated_at
+    cur.execute("SELECT COUNT(*), MAX(updated_at) FROM symbols")
+    total_rows, last_updated = cur.fetchone()
+    last_populated_at = _coerce_ist(last_updated)
+    if last_populated_at is not None:
+        _last_populated_at = last_populated_at
+    return int(total_rows or 0), last_populated_at
+
+
+def _coerce_ist(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc).astimezone(_IST)
+    return value.astimezone(_IST)
 
 
 def _load_fyers(cur) -> int:
@@ -613,6 +641,53 @@ def lookup_by_fyers_symbol(fyers_symbol: str) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+def lookup_by_components(
+    symbol: str,
+    exchange: str = "NFO",
+    instrument_type: str = "",
+    expiry: Optional[str] = None,
+    strike: Optional[float] = None,
+    option_type: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Lookup a symbol row by canonical components."""
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        conditions = ["exchange = %s", "UPPER(symbol) = %s"]
+        params: list[Any] = [exchange.upper(), symbol.upper().strip()]
+
+        if instrument_type:
+            conditions.append("instrument_type = %s")
+            params.append(instrument_type.upper().strip())
+
+        expiry_iso = _parse_expiry(expiry) if expiry else None
+        if expiry_iso:
+            conditions.append("expiry = %s")
+            params.append(expiry_iso)
+
+        if strike is not None:
+            conditions.append("ABS(strike - %s) < 0.001")
+            params.append(float(strike))
+
+        if option_type:
+            conditions.append("option_type = %s")
+            params.append(option_type.upper().strip())
+
+        cur.execute(
+            f"""
+            SELECT * FROM symbols
+            WHERE {' AND '.join(conditions)}
+            ORDER BY expiry NULLS LAST, strike, trading_symbol
+            LIMIT 1
+            """,
+            params,
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def search_symbols(
     query: str,
     exchange: str = "",
@@ -661,6 +736,162 @@ def search_symbols(
         return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
+
+def get_futures(symbol: str, exchange: str = "NFO") -> List[Dict[str, Any]]:
+    """Return futures rows for an underlying sorted by nearest expiry."""
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT * FROM symbols
+            WHERE exchange = %s
+              AND instrument_type = 'FUT'
+              AND UPPER(symbol) = %s
+              AND expiry IS NOT NULL
+              AND expiry >= CURRENT_DATE
+            ORDER BY expiry, trading_symbol
+            """,
+            (exchange.upper(), symbol.upper().strip()),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_future(symbol: str, exchange: str = "NFO", result: int = 0) -> Optional[Dict[str, Any]]:
+    """Return the Nth nearest futures row for an underlying."""
+    futures = get_futures(symbol, exchange)
+    return futures[result] if len(futures) > result else None
+
+
+def get_options(
+    symbol: str,
+    exchange: str = "NFO",
+    expiry: Optional[str] = None,
+    strike: Optional[float] = None,
+    option_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return option rows filtered by underlying and optional expiry/strike/type."""
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        conditions = [
+            "exchange = %s",
+            "instrument_type = 'OPT'",
+            "UPPER(symbol) = %s",
+            "expiry IS NOT NULL",
+            "expiry >= CURRENT_DATE",
+        ]
+        params: list[Any] = [exchange.upper(), symbol.upper().strip()]
+
+        expiry_iso = _parse_expiry(expiry) if expiry else None
+        if expiry_iso:
+            conditions.append("expiry = %s")
+            params.append(expiry_iso)
+
+        if strike is not None:
+            conditions.append("ABS(strike - %s) < 0.001")
+            params.append(float(strike))
+
+        if option_type:
+            conditions.append("option_type = %s")
+            params.append(option_type.upper().strip())
+
+        cur.execute(
+            f"""
+            SELECT * FROM symbols
+            WHERE {' AND '.join(conditions)}
+            ORDER BY expiry, strike, option_type, trading_symbol
+            """,
+            params,
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_expiry_list(symbol: str, exchange: str = "NFO", instrument_type: str = "OPT") -> List[str]:
+    """Return sorted ISO expiries for a symbol and instrument type."""
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT expiry
+            FROM symbols
+            WHERE exchange = %s
+              AND instrument_type = %s
+              AND UPPER(symbol) = %s
+              AND expiry IS NOT NULL
+              AND expiry >= CURRENT_DATE
+            ORDER BY expiry
+            """,
+            (exchange.upper(), instrument_type.upper().strip(), symbol.upper().strip()),
+        )
+        return [row[0].strftime("%Y-%m-%d") for row in cur.fetchall() if row and row[0]]
+    finally:
+        conn.close()
+
+
+def get_lot_size(symbol: str, exchange: str = "NFO") -> int:
+    """Return lot size for an underlying/trading symbol."""
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT lot_size
+            FROM symbols
+            WHERE exchange = %s
+              AND (UPPER(symbol) = %s OR UPPER(trading_symbol) = %s)
+              AND lot_size > 0
+            ORDER BY
+                CASE instrument_type
+                    WHEN 'FUT' THEN 0
+                    WHEN 'OPT' THEN 1
+                    WHEN 'IDX' THEN 2
+                    ELSE 3
+                END,
+                expiry NULLS LAST,
+                trading_symbol
+            LIMIT 1
+            """,
+            (exchange.upper(), symbol.upper().strip(), symbol.upper().strip()),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] else 1
+    finally:
+        conn.close()
+
+
+def get_broker_symbols_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Dict[str, str]:
+    """Resolve all broker symbol identifiers from a canonical trading symbol."""
+    rec = lookup_by_trading_symbol(trading_symbol, exchange)
+    if not rec:
+        clean = trading_symbol.split(":", 1)[-1] if ":" in trading_symbol else trading_symbol
+        return {
+            "fyers": f"{exchange.upper()}:{clean}" if exchange else clean,
+            "shoonya": clean,
+            "angelone": clean,
+            "dhan": clean,
+            "kite": clean,
+            "upstox": clean,
+            "groww": clean,
+        }
+
+    clean = rec.get("trading_symbol", "")
+    resolved_exchange = rec.get("exchange", exchange.upper())
+    return {
+        "fyers": rec.get("fyers_symbol") or f"{resolved_exchange}:{clean}",
+        "shoonya": rec.get("shoonya_tsym") or clean,
+        "angelone": rec.get("angelone_tsym") or clean,
+        "dhan": rec.get("dhan_security_id") or clean,
+        "kite": clean,
+        "upstox": rec.get("upstox_ikey") or clean,
+        "groww": clean,
+    }
 
 
 def get_symbol_count() -> int:
@@ -734,9 +965,7 @@ def _daily_refresh_loop():
     while True:
         try:
             now = datetime.now(_IST)
-            target = now.replace(hour=8, minute=45, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
+            target = next_refresh_time(now)
             wait_secs = (target - now).total_seconds()
             logger.info("Symbols DB next refresh at %s IST (in %.0f min)",
                         target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)

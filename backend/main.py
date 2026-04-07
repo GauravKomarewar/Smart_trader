@@ -160,25 +160,29 @@ async def on_startup():
         import logging
         logging.getLogger("smart_trader").warning("trading_db init failed: %s", exc)
 
-    # Load instrument master (unified: Fyers + Shoonya scriptmasters)
+    # Initialize and bootstrap the symbols DB once if it is empty.
     try:
+        from db.symbols_db import (
+            get_symbol_count,
+            init_symbols_schema,
+            populate_symbols_db,
+            start_daily_refresh_scheduler,
+        )
         from scripts.unified_scriptmaster import refresh_all
-        counts = refresh_all()
-        logger.info("Unified ScriptMaster loaded: Fyers=%d, Shoonya=%d",
-                     counts.get("fyers", 0), counts.get("shoonya", 0))
-    except Exception as exc:
-        logger.warning("Unified ScriptMaster load failed (will retry lazily): %s", exc)
 
-    # Populate unified symbols DB from loaded scriptmasters
-    try:
-        from db.symbols_db import init_symbols_schema, populate_symbols_db, start_daily_refresh_scheduler
-        init_symbols_schema()  # ensure table exists before populating
-        sym_counts = populate_symbols_db()
-        logger.info("Symbols DB populated: %s", sym_counts)
-        # Start daily 8:45 AM IST refresh scheduler
+        init_symbols_schema()
+        existing_symbols = get_symbol_count()
+        if existing_symbols <= 0:
+            logger.warning("Symbols DB empty — running one-time scriptmaster bootstrap")
+            refresh_counts = refresh_all(force=True)
+            logger.info("Bootstrap scriptmaster refresh completed: %s", refresh_counts)
+            sym_counts = populate_symbols_db(force=True)
+            logger.info("Symbols DB bootstrap population completed: %s", sym_counts)
+        else:
+            logger.info("Symbols DB already populated with %d rows — startup bootstrap skipped", existing_symbols)
         start_daily_refresh_scheduler()
     except Exception as exc:
-        logger.warning("Symbols DB population failed (non-fatal): %s", exc)
+        logger.warning("Symbols DB bootstrap failed (non-fatal): %s", exc)
 
     # Seed admin + demo users
     from db.database import SessionLocal, User
@@ -225,6 +229,14 @@ async def on_startup():
     except Exception as exc:
         logger.warning("Broker session restore failed (non-fatal): %s", exc)
 
+    # ── Start SupremeManager (DB-backed data managers) ───────────────────
+    try:
+        from managers.supreme_manager import supreme
+        supreme.start()
+        logger.info("SupremeManager started — all data managers active")
+    except Exception as exc:
+        logger.warning("SupremeManager start failed (non-fatal): %s", exc)
+
     # ── Start PositionWatcher (real-time risk monitoring) ────────────────────
     try:
         from trading.position_watcher import position_watcher
@@ -248,13 +260,6 @@ async def on_startup():
         logger.info("SessionScheduler started — auto-login@08:45 IST, auto-logout@23:55 IST")
     except Exception as exc:
         logger.warning("SessionScheduler start failed (non-fatal): %s", exc)
-    # ── Start SupremeManager (DB-backed data managers) ───────────────────
-    try:
-        from managers.supreme_manager import supreme
-        supreme.start()
-        logger.info("SupremeManager started — all data managers active")
-    except Exception as exc:
-        logger.warning("SupremeManager start failed (non-fatal): %s", exc)
 
     # ── Start LiveTickService (Fyers + Shoonya WebSocket dual pipeline) ───────
     try:

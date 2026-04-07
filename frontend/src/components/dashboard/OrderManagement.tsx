@@ -21,6 +21,17 @@ const STATUS_BADGE: Record<OrderStatus, string> = {
   TRIGGER_PENDING: 'badge-warn',
 }
 
+const ORDER_TYPE_TO_API: Record<string, string> = {
+  LIMIT: 'LMT',
+  MARKET: 'MKT',
+  SL: 'SL-LMT',
+  'SL-M': 'SL-MKT',
+  LMT: 'LMT',
+  MKT: 'MKT',
+  'SL-LMT': 'SL-LMT',
+  'SL-MKT': 'SL-MKT',
+}
+
 // Per-broker color palette (matches PositionManager)
 const BROKER_ROW_TINTS = [
   'border-l-[3px] border-l-[#3b9ede] bg-[#3b9ede]/[0.04]',
@@ -72,10 +83,15 @@ export default function OrderManagement() {
   const openCount = (data?.orders ?? []).filter(o => OPEN_STATUSES.includes(o.status)).length
 
   async function cancelOrder(order: Order) {
+    const requestOrderId = (order as any).orderId || order.id
+    const accountId = (order as any).accountId || (order as any).account_id || ''
+    if (!requestOrderId || !accountId) {
+      toast('This order is not yet ready for cancellation', 'warning')
+      return
+    }
     setCancelling(order.id)
     try {
-      const accountId = (order as any).accountId || (order as any).account_id || ''
-      await api.cancelOrder(order.id, accountId)
+      await api.cancelOrder(requestOrderId, accountId)
       toast(`Cancelled: ${order.tradingsymbol}`, 'success')
     } catch {
       toast('Failed to cancel order', 'error')
@@ -85,12 +101,33 @@ export default function OrderManagement() {
   }
 
   async function cancelAll() {
-    const accountId = openOrders[0] && ((openOrders[0] as any).accountId || (openOrders[0] as any).account_id || '')
-    if (!accountId) { toast('Cannot determine account for cancel-all', 'error'); return }
     setCancellingAll(true)
+    const byAccount: Record<string, Order[]> = {}
+    for (const order of openOrders) {
+      const accountId = (order as any).accountId || (order as any).account_id || ''
+      if (!accountId) continue
+      byAccount[accountId] = byAccount[accountId] ?? []
+      byAccount[accountId].push(order)
+    }
+    if (Object.keys(byAccount).length === 0) {
+      setCancellingAll(false)
+      toast('Cannot determine account for cancel-all', 'error')
+      return
+    }
     try {
-      const res: any = await api.cancelAllOrders(accountId)
-      toast(`Cancelled ${res.cancelled ?? 0} orders`, 'success')
+      let cancelled = 0
+      let errors = 0
+      for (const accountId of Object.keys(byAccount)) {
+        try {
+          const res: any = await api.cancelAllOrders(accountId)
+          cancelled += res.cancelled ?? 0
+          errors += res.errors?.length ?? 0
+        } catch {
+          errors += byAccount[accountId].length
+        }
+      }
+      if (errors > 0) toast(`Cancelled ${cancelled} orders, ${errors} failed`, 'warning')
+      else toast(`Cancelled ${cancelled} orders`, 'success')
     } catch {
       toast('Failed to cancel all orders', 'error')
     } finally {
@@ -103,7 +140,7 @@ export default function OrderManagement() {
       order,
       price: String(order.price ?? ''),
       qty: String(order.quantity ?? ''),
-      orderType: order.orderType ?? 'LMT',
+      orderType: ORDER_TYPE_TO_API[order.orderType ?? 'LIMIT'] ?? 'LMT',
       triggerPrice: String(order.triggerPrice ?? ''),
       validity: order.validity ?? 'DAY',
     })
@@ -113,8 +150,13 @@ export default function OrderManagement() {
     if (!modify) return
     setModifying(true)
     try {
+      const requestOrderId = (modify.order as any).orderId || modify.order.id
       const accountId = (modify.order as any).accountId || (modify.order as any).account_id || ''
-      await api.modifyOrder(modify.order.id, {
+      if (!requestOrderId || !accountId) {
+        toast('This order is not yet ready for modification', 'warning')
+        return
+      }
+      await api.modifyOrder(requestOrderId, {
         accountId,
         price: parseFloat(modify.price) || undefined,
         quantity: parseInt(modify.qty) || undefined,
@@ -192,6 +234,7 @@ export default function OrderManagement() {
                 const accountId = (o as any).accountId || (o as any).account_id || ''
                 const broker = brokerMap[accountId]
                 const bidx = broker?.idx ?? 0
+                const canAct = OPEN_STATUSES.includes(o.status) && !!accountId && !!((o as any).orderId || o.id)
                 return (
                 <tr key={o.id} className={cn('group transition-colors', BROKER_ROW_TINTS[bidx % BROKER_ROW_TINTS.length])}>
                   {/* Broker */}
@@ -239,7 +282,7 @@ export default function OrderManagement() {
                   </td>
                   <td className="px-3 py-2 text-[11px] text-text-muted tabular-nums">{fmtTime(o.placedAt)}</td>
                   <td className="px-3 py-2">
-                    {OPEN_STATUSES.includes(o.status) && (
+                    {canAct && (
                       <div className="flex gap-1">
                         <button
                           onClick={() => openModify(o)}
@@ -356,4 +399,3 @@ export default function OrderManagement() {
     </>
   )
 }
-

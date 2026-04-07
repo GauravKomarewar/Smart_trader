@@ -200,62 +200,49 @@ def from_broker_symbol(
     return broker_symbol, fallback_exchange
 
 
-# ── ScriptMaster-backed Search & Lookup ──────────────────────────────────────
-
-def _get_scriptmaster():
-    """Lazy-import ScriptMaster data. Returns (FYERS_SCRIPTMASTER dict, refresh fn)."""
-    try:
-        # Ensure unified scriptmaster is loaded (loads both Fyers + Shoonya)
-        from scripts.unified_scriptmaster import _ensure_loaded
-        _ensure_loaded()
-    except Exception:
-        pass
-    try:
-        from scripts.fyers_scriptmaster import FYERS_SCRIPTMASTER, refresh as sm_refresh
-        if not FYERS_SCRIPTMASTER:
-            sm_refresh()
-        return FYERS_SCRIPTMASTER
-    except Exception:
-        return {}
+# ── Symbols DB-backed Search & Lookup ────────────────────────────────────────
 
 
 def _record_to_normalized(rec: Dict[str, Any]) -> NormalizedInstrument:
-    """Convert a fyers_scriptmaster record to NormalizedInstrument."""
-    fyers_sym = rec.get("FyersSymbol", "")
-    # Strip exchange prefix for trading_symbol
-    tsym = fyers_sym.split(":", 1)[-1] if ":" in fyers_sym else fyers_sym
+    """Convert either a symbols DB row or scriptmaster-style record to NormalizedInstrument."""
+    fyers_sym = rec.get("FyersSymbol") or rec.get("fyers_symbol") or ""
+    tsym = (
+        rec.get("TradingSymbol")
+        or rec.get("trading_symbol")
+        or (fyers_sym.split(":", 1)[-1] if ":" in fyers_sym else fyers_sym)
+    )
 
-    raw_expiry = rec.get("Expiry", "")
-    iso_expiry = expiry_to_iso(raw_expiry) if raw_expiry else ""
+    raw_expiry = rec.get("Expiry") or rec.get("expiry") or ""
+    iso_expiry = expiry_to_iso(str(raw_expiry)) if raw_expiry else ""
 
-    instr = rec.get("Instrument", "")
+    instr = rec.get("Instrument") or rec.get("instrument_type") or ""
     itype = "EQ"
     if instr == "FUT":
         itype = "FUT"
     elif instr == "OPT":
         itype = "OPT"
-    elif "INDEX" in fyers_sym.upper():
+    elif instr == "IDX" or "INDEX" in fyers_sym.upper() or str(tsym).upper().endswith("-INDEX"):
         itype = "IDX"
 
-    strike = rec.get("StrikePrice")
+    strike = rec.get("StrikePrice") if "StrikePrice" in rec else rec.get("strike")
     if strike and float(strike) > 0:
         strike = float(strike)
     else:
         strike = 0.0
 
     return NormalizedInstrument(
-        symbol=rec.get("Underlying", "") or rec.get("Symbol", ""),
+        symbol=rec.get("Underlying") or rec.get("symbol") or rec.get("Symbol", ""),
         trading_symbol=tsym,
-        exchange=rec.get("Exchange", ""),
+        exchange=rec.get("Exchange") or rec.get("exchange") or "",
         instrument_type=itype,
         expiry=iso_expiry,
         strike=strike,
-        option_type=rec.get("OptionType", "") or "",
-        lot_size=int(rec.get("LotSize", 1) or 1),
-        tick_size=float(rec.get("TickSize", 0.05) or 0.05),
-        token=str(rec.get("Token", "")),
+        option_type=rec.get("OptionType") or rec.get("option_type") or "",
+        lot_size=int(rec.get("LotSize") or rec.get("lot_size") or 1),
+        tick_size=float(rec.get("TickSize") or rec.get("tick_size") or 0.05),
+        token=str(rec.get("Token") or rec.get("exchange_token") or ""),
         fyers_symbol=fyers_sym,
-        description=rec.get("Description", ""),
+        description=rec.get("Description") or rec.get("description") or rec.get("Name") or "",
     )
 
 
@@ -277,64 +264,15 @@ def search_instruments(
     Returns:
         List of NormalizedInstrument sorted by relevance.
     """
-    sm = _get_scriptmaster()
-    if not sm:
+    try:
+        from db.symbols_db import search_symbols
+
+        rows = search_symbols(query, exchange, instrument_type, limit)
+        if not rows:
+            return _fallback_search(query, limit)
+        return [_record_to_normalized(row) for row in rows[:limit]]
+    except Exception:
         return _fallback_search(query, limit)
-
-    q = query.upper().strip()
-    # Collect results in buckets by (priority, sub_type) to avoid early-exit bias.
-    # FO records appear first in the dict, so without buckets the early exit
-    # would miss EQ/IDX records that load later from CM CSVs.
-    buckets: Dict[tuple, List] = {}   # (priority, sub) → list of NormalizedInstrument
-    total_collected = 0
-
-    for key, rec in sm.items():
-        underlying = (rec.get("Underlying") or "").upper()
-        fyers_sym = (rec.get("FyersSymbol") or "").upper()
-        desc = (rec.get("Description") or "").upper()
-        instr = rec.get("Instrument", "")
-        exch = rec.get("Exchange", "")
-
-        # Exchange filter
-        if exchange:
-            exch_upper = exchange.upper()
-            if exch.upper() != exch_upper:
-                # Allow NSE↔NFO cross-match for underlying search
-                if not (exch_upper in ("NSE", "NFO") and exch.upper() in ("NSE", "NFO")):
-                    continue
-
-        # Instrument type filter
-        if instrument_type:
-            if instr.upper() != instrument_type.upper():
-                continue
-
-        # Match check
-        if q not in underlying and q not in fyers_sym and q not in desc:
-            continue
-
-        # Relevance scoring: exact underlying match > prefix > contains
-        priority = 3
-        if underlying == q:
-            priority = 0
-        elif underlying.startswith(q):
-            priority = 1
-        elif q in underlying:
-            priority = 2
-
-        # Within same priority, prefer: IDX > FUT > EQ > OPT
-        sub = {"IDX": 0, "FUT": 1, "EQ": 2, "OPT": 3}.get(instr, 4)
-        bucket_key = (priority, sub)
-        bucket = buckets.setdefault(bucket_key, [])
-        # Cap each bucket to avoid collecting thousands of options
-        if len(bucket) < limit:
-            bucket.append(_record_to_normalized(rec))
-            total_collected += 1
-
-    # Flatten buckets in sorted order
-    results = []
-    for bk in sorted(buckets.keys()):
-        results.extend(buckets[bk])
-    return results[:limit]
 
 
 # Well-known indices (always available even without ScriptMaster)
@@ -368,21 +306,13 @@ def lookup_by_trading_symbol(trading_symbol: str) -> Optional[NormalizedInstrume
 
     Returns NormalizedInstrument or None.
     """
-    sm = _get_scriptmaster()
-    if not sm:
+    try:
+        from db.symbols_db import lookup_by_trading_symbol as db_lookup
+
+        rec = db_lookup(trading_symbol)
+        return _record_to_normalized(rec) if rec else None
+    except Exception:
         return None
-
-    # Try direct key lookup (ScriptMaster keys include exchange prefix)
-    if trading_symbol in sm:
-        return _record_to_normalized(sm[trading_symbol])
-
-    # Try with common exchange prefixes
-    for prefix in ("NSE:", "NFO:", "BSE:", "BFO:", "MCX:", "CDS:"):
-        key = prefix + trading_symbol
-        if key in sm:
-            return _record_to_normalized(sm[key])
-
-    return None
 
 
 def lookup_instrument(
@@ -407,37 +337,44 @@ def lookup_instrument(
     Returns:
         NormalizedInstrument or None
     """
-    try:
-        from scripts.unified_scriptmaster import get_future, get_option
-    except ImportError:
-        return None
-
     if instrument_type == "FUT":
-        rec = get_future(symbol, exchange, result=0)
-        if isinstance(rec, dict) and rec.get("TradingSymbol"):
-            return _from_scriptmaster_standard(rec)
-        return None
+        try:
+            from db.symbols_db import get_future as db_get_future
+
+            rec = db_get_future(symbol, exchange, result=0)
+            return _record_to_normalized(rec) if rec else None
+        except Exception:
+            return None
 
     if instrument_type == "OPT":
         if not strike or not option_type:
             return None
-        broker_expiry = iso_to_broker_expiry(expiry) if expiry else ""
-        rec = get_option(symbol, exchange, broker_expiry, strike, option_type)
-        if isinstance(rec, dict) and rec.get("TradingSymbol"):
-            return _from_scriptmaster_standard(rec)
-        return None
+        try:
+            from db.symbols_db import lookup_by_components
 
-    # For EQ / IDX — search ScriptMaster directly
-    sm = _get_scriptmaster()
-    for key, rec in sm.items():
-        if (rec.get("Underlying", "").upper() == symbol.upper()
-                and rec.get("Exchange", "").upper() == exchange.upper()):
-            instr = rec.get("Instrument", "")
-            if instrument_type == "EQ" and instr in ("EQ", ""):
-                return _record_to_normalized(rec)
-            if instrument_type == "IDX" and "INDEX" in key.upper():
-                return _record_to_normalized(rec)
-    return None
+            rec = lookup_by_components(
+                symbol=symbol,
+                exchange=exchange,
+                instrument_type="OPT",
+                expiry=expiry,
+                strike=strike,
+                option_type=option_type,
+            )
+            return _record_to_normalized(rec) if rec else None
+        except Exception:
+            return None
+
+    try:
+        from db.symbols_db import lookup_by_components
+
+        rec = lookup_by_components(
+            symbol=symbol,
+            exchange=exchange,
+            instrument_type=instrument_type,
+        )
+        return _record_to_normalized(rec) if rec else None
+    except Exception:
+        return None
 
 
 def _from_scriptmaster_standard(rec: Dict[str, Any]) -> NormalizedInstrument:
@@ -488,23 +425,19 @@ def get_expiries(
     Returns sorted list of ISO date strings.
     """
     try:
-        from scripts.unified_scriptmaster import options_expiry, fut_expiry
-        if instrument_type == "FUT":
-            raw = fut_expiry(symbol, exchange)
-        else:
-            raw = options_expiry(symbol, exchange)
-        if isinstance(raw, list):
-            return sorted(set(expiry_to_iso(e) for e in raw if e))
-        return []
+        from db.symbols_db import get_expiry_list as db_get_expiry_list
+
+        return db_get_expiry_list(symbol, exchange, instrument_type)
     except Exception:
         return []
 
 
 def get_lot_size(symbol: str, exchange: str = "NFO") -> int:
-    """Get lot size for a symbol — delegates to unified scriptmaster."""
+    """Get lot size for a symbol from the symbols DB."""
     try:
-        from scripts.unified_scriptmaster import get_lot_size as _ugl
-        return _ugl(symbol, exchange)
+        from db.symbols_db import get_lot_size as db_get_lot_size
+
+        return db_get_lot_size(symbol, exchange)
     except Exception:
         return 1
 
@@ -656,37 +589,28 @@ def build_option_chain_from_scriptmaster(
         Option chain dict matching the frontend's expected format, or None.
     """
     try:
-        from scripts.unified_scriptmaster import options_expiry, get_lot_size as sm_lot_size
-        from scripts.fyers_scriptmaster import get_options, FYERS_SCRIPTMASTER
+        from db.symbols_db import get_expiry_list as db_get_expiry_list
+        from db.symbols_db import get_lot_size as db_get_lot_size
+        from db.symbols_db import get_options as db_get_options
     except ImportError:
         return None
 
     sym = symbol.upper()
 
     # ── Resolve expiry ──
-    all_expiries_raw = options_expiry(sym, exchange)
-    if not isinstance(all_expiries_raw, list) or not all_expiries_raw:
+    all_expiries_iso = db_get_expiry_list(sym, exchange, "OPT")
+    if not all_expiries_iso:
         return None
-
-    all_expiries_iso = sorted(set(expiry_to_iso(e) for e in all_expiries_raw if e))
 
     if expiry:
-        # Ensure passed expiry is in the list; convert back to broker format
-        broker_expiry = iso_to_broker_expiry(expiry)
+        expiry = expiry_to_iso(expiry)
+        if expiry not in all_expiries_iso:
+            return None
     else:
-        # Use the nearest expiry
-        broker_expiry = all_expiries_raw[0] if all_expiries_raw else ""
-        expiry = expiry_to_iso(broker_expiry) if broker_expiry else ""
-
-    if not broker_expiry:
-        return None
+        expiry = all_expiries_iso[0]
 
     # ── Fetch options for this expiry ──
-    options = get_options(
-        underlying=sym,
-        exchange=exchange,
-        expiry=broker_expiry,
-    )
+    options = db_get_options(symbol=sym, exchange=exchange, expiry=expiry)
 
     if not options:
         return None
@@ -694,8 +618,8 @@ def build_option_chain_from_scriptmaster(
     # ── Build strike map: {strike: {"CE": rec, "PE": rec}} ──
     by_strike: Dict[float, Dict[str, Dict]] = {}
     for rec in options:
-        strike = rec.get("StrikePrice")
-        otype = rec.get("OptionType", "")
+        strike = rec.get("strike")
+        otype = rec.get("option_type", "")
         if not strike or otype not in ("CE", "PE"):
             continue
         by_strike.setdefault(float(strike), {})[otype] = rec
@@ -722,7 +646,7 @@ def build_option_chain_from_scriptmaster(
     end_idx = min(len(all_strikes), atm_idx + strikes_per_side + 1)
     selected_strikes = all_strikes[start_idx:end_idx]
 
-    lot = sm_lot_size(sym, exchange)
+    lot = db_get_lot_size(sym, exchange)
 
     # ── Build rows ──
     rows = []
@@ -733,8 +657,10 @@ def build_option_chain_from_scriptmaster(
         if not ce_rec or not pe_rec:
             continue
 
-        ce_tsym = ce_rec.get("FyersSymbol", "").split(":", 1)[-1]
-        pe_tsym = pe_rec.get("FyersSymbol", "").split(":", 1)[-1]
+        ce_fyers = ce_rec.get("fyers_symbol") or f"{exchange}:{ce_rec.get('trading_symbol', '')}"
+        pe_fyers = pe_rec.get("fyers_symbol") or f"{exchange}:{pe_rec.get('trading_symbol', '')}"
+        ce_tsym = ce_rec.get("trading_symbol", "")
+        pe_tsym = pe_rec.get("trading_symbol", "")
 
         row = {
             "strike": int(strike) if strike == int(strike) else strike,
@@ -743,7 +669,7 @@ def build_option_chain_from_scriptmaster(
                 "ltp": 0, "iv": 0, "delta": 0, "gamma": 0, "theta": 0, "vega": 0,
                 "oi": 0, "oiChange": 0, "volume": 0, "bid": 0, "ask": 0,
                 "trading_symbol": ce_tsym,
-                "fyers_symbol": ce_rec.get("FyersSymbol", ""),
+                "fyers_symbol": ce_fyers,
                 "lot_size": lot,
                 "exchange": exchange,
                 "option_type": "CE",
@@ -754,7 +680,7 @@ def build_option_chain_from_scriptmaster(
                 "ltp": 0, "iv": 0, "delta": 0, "gamma": 0, "theta": 0, "vega": 0,
                 "oi": 0, "oiChange": 0, "volume": 0, "bid": 0, "ask": 0,
                 "trading_symbol": pe_tsym,
-                "fyers_symbol": pe_rec.get("FyersSymbol", ""),
+                "fyers_symbol": pe_fyers,
                 "lot_size": lot,
                 "exchange": exchange,
                 "option_type": "PE",

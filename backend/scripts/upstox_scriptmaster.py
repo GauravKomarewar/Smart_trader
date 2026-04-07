@@ -40,11 +40,13 @@ import gzip
 import json
 import logging
 import threading
-from datetime import datetime, timezone, timedelta
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from core.daily_refresh import current_refresh_cycle_start, now_ist
 
 logger = logging.getLogger("smart_trader.upstox_scriptmaster")
 
@@ -54,12 +56,6 @@ SCRIPTMASTER_VERSION = "1.0"
 SCRIPTMASTER_URL = (
     "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
 )
-
-_HERE = Path(__file__).resolve().parent
-DATA_DIR = _HERE / "data" / "upstox_scriptmaster"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-META_FILE = DATA_DIR / "metadata.json"
-CACHE_FILE = DATA_DIR / "complete.json"
 
 # ── Segment → canonical exchange ──────────────────────────────────────────────
 
@@ -107,29 +103,18 @@ UPSTOX_UNIVERSAL: Dict[str, Dict[str, Any]] = {}
 EXPIRY_CALENDAR: Dict[str, Dict[str, Dict[str, List[str]]]] = {}
 
 _LOCK = threading.RLock()
-_last_refresh: Optional[str] = None
+_last_refresh: Optional[datetime] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _today_ist() -> str:
-    ist = timezone(timedelta(hours=5, minutes=30))
-    return datetime.now(ist).strftime("%Y-%m-%d")
+    return now_ist().strftime("%Y-%m-%d")
 
 
 def _needs_refresh() -> bool:
     global _last_refresh
-    if _last_refresh == _today_ist():
-        return False
-    if META_FILE.exists():
-        try:
-            meta = json.loads(META_FILE.read_text())
-            if meta.get("date") == _today_ist():
-                _last_refresh = _today_ist()
-                return False
-        except Exception:
-            pass
-    return True
+    return not (_last_refresh and _last_refresh >= current_refresh_cycle_start())
 
 
 def _normalise_expiry(raw: str) -> str:
@@ -284,19 +269,19 @@ def refresh(force: bool = False) -> None:
     global _last_refresh
 
     if not force and not _needs_refresh():
-        logger.info("Upstox scriptmaster up-to-date — loading from disk")
-        _load_from_disk()
+        logger.info("Upstox scriptmaster already refreshed for current cycle — skipping download")
         return
 
     logger.info("Downloading Upstox scriptmaster from %s", SCRIPTMASTER_URL)
     try:
         resp = requests.get(SCRIPTMASTER_URL, timeout=60)
         resp.raise_for_status()
-        # Decompress gzip
-        raw_data = json.loads(gzip.decompress(resp.content))
+        with tempfile.TemporaryDirectory(prefix="smart_trader_upstox_") as temp_dir:
+            cache_path = Path(temp_dir) / "complete.json.gz"
+            cache_path.write_bytes(resp.content)
+            raw_data = json.loads(gzip.decompress(cache_path.read_bytes()))
     except Exception as exc:
         logger.error("Failed to download Upstox scriptmaster: %s", exc)
-        _load_from_disk()
         return
 
     records = _parse_json(raw_data)
@@ -304,38 +289,18 @@ def refresh(force: bool = False) -> None:
         logger.error("Upstox scriptmaster returned empty data")
         return
 
-    # Cache as JSON on disk
-    CACHE_FILE.write_text(json.dumps(raw_data, default=str))
-
     with _LOCK:
         UPSTOX_SCRIPTMASTER.clear()
         UPSTOX_SCRIPTMASTER.update(records)
         _build_indices()
-        _last_refresh = _today_ist()
+        _last_refresh = now_ist()
 
-    META_FILE.write_text(json.dumps({
-        "date": _today_ist(),
-        "version": SCRIPTMASTER_VERSION,
-        "total_symbols": len(records),
-    }, indent=2))
     logger.info("Upstox scriptmaster refreshed: %d symbols", len(records))
 
 
 def _load_from_disk() -> None:
-    """Load cached JSON from disk."""
-    if not CACHE_FILE.exists():
-        logger.warning("No cached Upstox scriptmaster found")
-        return
-    try:
-        raw_data = json.loads(CACHE_FILE.read_text())
-        records = _parse_json(raw_data)
-        with _LOCK:
-            UPSTOX_SCRIPTMASTER.clear()
-            UPSTOX_SCRIPTMASTER.update(records)
-            _build_indices()
-        logger.info("Upstox scriptmaster loaded from disk: %d symbols", len(records))
-    except Exception as exc:
-        logger.warning("Could not load Upstox scriptmaster from disk: %s", exc)
+    """Persistent disk cache is disabled; runtime symbol lookups should use symbols_db."""
+    logger.debug("Upstox disk cache disabled; no persistent scriptmaster files are loaded")
 
 
 def search(query: str, exchange: Optional[str] = None) -> List[Dict[str, Any]]:

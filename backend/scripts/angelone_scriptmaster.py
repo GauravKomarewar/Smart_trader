@@ -31,11 +31,13 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import datetime, timezone, timedelta
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from core.daily_refresh import current_refresh_cycle_start, now_ist
 
 logger = logging.getLogger("smart_trader.angelone_scriptmaster")
 
@@ -45,12 +47,6 @@ SCRIPTMASTER_VERSION = "1.0"
 SCRIPTMASTER_URL = (
     "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 )
-
-_HERE = Path(__file__).resolve().parent
-DATA_DIR = _HERE / "data" / "angelone_scriptmaster"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-META_FILE = DATA_DIR / "metadata.json"
-CACHE_FILE = DATA_DIR / "scripmaster.json"
 
 # ── Exchange segment normalisation ────────────────────────────────────────────
 
@@ -94,29 +90,18 @@ SYMBOL_INDEX: Dict[str, List[Dict[str, Any]]] = {}
 EXPIRY_CALENDAR: Dict[str, Dict[str, Dict[str, List[str]]]] = {}
 
 _LOCK = threading.RLock()
-_last_refresh: Optional[str] = None
+_last_refresh: Optional[datetime] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _today_ist() -> str:
-    ist = timezone(timedelta(hours=5, minutes=30))
-    return datetime.now(ist).strftime("%Y-%m-%d")
+    return now_ist().strftime("%Y-%m-%d")
 
 
 def _needs_refresh() -> bool:
     global _last_refresh
-    if _last_refresh == _today_ist():
-        return False
-    if META_FILE.exists():
-        try:
-            meta = json.loads(META_FILE.read_text())
-            if meta.get("date") == _today_ist():
-                _last_refresh = _today_ist()
-                return False
-        except Exception:
-            pass
-    return True
+    return not (_last_refresh and _last_refresh >= current_refresh_cycle_start())
 
 
 def _parse_expiry(expiry_str: str) -> str:
@@ -259,18 +244,19 @@ def refresh(force: bool = False) -> None:
     global _last_refresh
 
     if not force and not _needs_refresh():
-        logger.info("Angel One scriptmaster up-to-date — loading from disk")
-        _load_from_disk()
+        logger.info("Angel One scriptmaster already refreshed for current cycle — skipping download")
         return
 
     logger.info("Downloading Angel One scriptmaster from %s", SCRIPTMASTER_URL)
     try:
         resp = requests.get(SCRIPTMASTER_URL, timeout=60)
         resp.raise_for_status()
-        raw_data = resp.json()
+        with tempfile.TemporaryDirectory(prefix="smart_trader_angelone_") as temp_dir:
+            cache_path = Path(temp_dir) / "scripmaster.json"
+            cache_path.write_bytes(resp.content)
+            raw_data = json.loads(cache_path.read_text())
     except Exception as exc:
         logger.error("Failed to download Angel One scriptmaster: %s", exc)
-        _load_from_disk()
         return
 
     records = _parse_json(raw_data)
@@ -278,38 +264,18 @@ def refresh(force: bool = False) -> None:
         logger.error("Angel One scriptmaster returned empty data")
         return
 
-    # Save raw JSON to disk
-    CACHE_FILE.write_text(json.dumps(raw_data, default=str))
-
     with _LOCK:
         ANGELONE_SCRIPTMASTER.clear()
         ANGELONE_SCRIPTMASTER.update(records)
         _build_indices()
-        _last_refresh = _today_ist()
+        _last_refresh = now_ist()
 
-    META_FILE.write_text(json.dumps({
-        "date": _today_ist(),
-        "version": SCRIPTMASTER_VERSION,
-        "total_symbols": len(records),
-    }, indent=2))
     logger.info("Angel One scriptmaster refreshed: %d symbols", len(records))
 
 
 def _load_from_disk() -> None:
-    """Load cached JSON from disk."""
-    if not CACHE_FILE.exists():
-        logger.warning("No cached Angel One scriptmaster found")
-        return
-    try:
-        raw_data = json.loads(CACHE_FILE.read_text())
-        records = _parse_json(raw_data)
-        with _LOCK:
-            ANGELONE_SCRIPTMASTER.clear()
-            ANGELONE_SCRIPTMASTER.update(records)
-            _build_indices()
-        logger.info("Angel One scriptmaster loaded from disk: %d symbols", len(records))
-    except Exception as exc:
-        logger.warning("Could not load Angel One scriptmaster from disk: %s", exc)
+    """Persistent disk cache is disabled; runtime symbol lookups should use symbols_db."""
+    logger.debug("Angel One disk cache disabled; no persistent scriptmaster files are loaded")
 
 
 def search(query: str, exchange: Optional[str] = None) -> List[Dict[str, Any]]:

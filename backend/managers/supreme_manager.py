@@ -412,7 +412,13 @@ class SupremeManager:
         Includes BOTH active and closed positions (closed marked with status='CLOSED').
         Also merges Smart Trader DB orders so WS and REST return identical data.
         """
-        from routers.orders import _normalize_position, _normalize_order, _normalize_db_order
+        from routers.orders import (
+            _normalize_db_order,
+            _normalize_holding,
+            _normalize_order,
+            _normalize_position,
+            _normalize_trade,
+        )
 
         conn = get_trading_conn()
         try:
@@ -537,8 +543,31 @@ class SupremeManager:
         positions.sort(key=lambda p: (0 if p.get("status") == "OPEN" else 1,
                                        -(p.get("pnl") or 0)))
 
+        holdings = [_normalize_holding(h, i) for i, h in enumerate(all_holdings)]
+        holdings.sort(key=lambda h: (h.get("symbol") or "", h.get("accountId") or ""))
+
+        trades = [_normalize_trade(t, i) for i, t in enumerate(all_trades)]
+
+        def _parse_trade_time(trade: dict) -> float:
+            traded_at = trade.get("tradedAt", "")
+            if not traded_at:
+                return 0
+            try:
+                if "T" in str(traded_at):
+                    return datetime.fromisoformat(str(traded_at).replace("Z", "+00:00")).timestamp()
+                return datetime.strptime(str(traded_at), "%d-%b-%Y %H:%M:%S").timestamp()
+            except Exception:
+                return 0
+
+        trades.sort(key=lambda t: (_parse_trade_time(t), t.get("tradeId") or t.get("id")), reverse=True)
+
         # Normalize broker orders
         orders = [_normalize_order(o, i) for i, o in enumerate(all_orders)]
+        broker_order_accounts = {
+            o.get("orderId"): o.get("accountId")
+            for o in orders
+            if o.get("orderId") and o.get("accountId")
+        }
 
         # ── Merge Smart Trader DB orders (same for WS and REST) ──
         try:
@@ -549,7 +578,10 @@ class SupremeManager:
             for i, rec in enumerate(db_records):
                 if rec.broker_order_id and rec.broker_order_id in broker_ids:
                     continue
-                orders.append(_normalize_db_order(rec, len(orders) + i))
+                normalized = _normalize_db_order(rec, len(orders) + i)
+                if rec.broker_order_id and rec.broker_order_id in broker_order_accounts:
+                    normalized["accountId"] = broker_order_accounts[rec.broker_order_id]
+                orders.append(normalized)
         except Exception as e:
             logger.warning("get_dashboard: DB order merge failed: %s", e)
 
@@ -584,9 +616,9 @@ class SupremeManager:
 
         return {
             "positions": positions,
-            "holdings": all_holdings,
+            "holdings": holdings,
             "orders": orders,
-            "trades": all_trades,
+            "trades": trades,
             "riskMetrics": {
                 "accountId": "",
                 "dailyPnl": round(day_pnl, 2),
@@ -617,7 +649,7 @@ class SupremeManager:
     @staticmethod
     def get_broker_data(user_id: str, config_id: str) -> dict | None:
         """Build per-broker filtered data from DB."""
-        from routers.orders import _normalize_position, _normalize_order
+        from routers.orders import _normalize_holding, _normalize_order, _normalize_position, _normalize_trade
 
         conn = get_trading_conn()
         try:
@@ -661,6 +693,10 @@ class SupremeManager:
         positions.sort(key=lambda p: (0 if p.get("status") == "OPEN" else 1,
                                        -(p.get("pnl") or 0)))
         orders = [_normalize_order(o, i) for i, o in enumerate(raw_orders)]
+        holdings = [_normalize_holding(h, i) for i, h in enumerate(holdings)]
+        holdings.sort(key=lambda h: (h.get("symbol") or "", h.get("accountId") or ""))
+        trades = [_normalize_trade(t, i) for i, t in enumerate(trades)]
+        trades.sort(key=lambda t: t.get("tradedAt") or "", reverse=True)
 
         return {
             "positions": positions,

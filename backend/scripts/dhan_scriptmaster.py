@@ -21,14 +21,15 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import logging
 import threading
-from datetime import datetime, timezone, timedelta
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from core.daily_refresh import current_refresh_cycle_start, now_ist
 
 logger = logging.getLogger("smart_trader.dhan_scriptmaster")
 
@@ -36,12 +37,6 @@ logger = logging.getLogger("smart_trader.dhan_scriptmaster")
 
 SCRIPTMASTER_VERSION = "1.0"
 SCRIPTMASTER_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
-
-_HERE = Path(__file__).resolve().parent
-DATA_DIR = _HERE / "data" / "dhan_scriptmaster"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-META_FILE = DATA_DIR / "metadata.json"
-CACHE_FILE = DATA_DIR / "scripmaster.csv"
 
 # ── Segment → Exchange mapping ────────────────────────────────────────────────
 
@@ -79,29 +74,18 @@ SYMBOL_INDEX: Dict[str, Dict[str, Any]] = {}
 EXPIRY_CALENDAR: Dict[str, Dict[str, Dict[str, List[str]]]] = {}
 
 _LOCK = threading.RLock()
-_last_refresh: Optional[str] = None
+_last_refresh: Optional[datetime] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _today_ist() -> str:
-    ist = timezone(timedelta(hours=5, minutes=30))
-    return datetime.now(ist).strftime("%Y-%m-%d")
+    return now_ist().strftime("%Y-%m-%d")
 
 
 def _needs_refresh() -> bool:
     global _last_refresh
-    if _last_refresh == _today_ist():
-        return False
-    if META_FILE.exists():
-        try:
-            meta = json.loads(META_FILE.read_text())
-            if meta.get("date") == _today_ist():
-                _last_refresh = _today_ist()
-                return False
-        except Exception:
-            pass
-    return True
+    return not (_last_refresh and _last_refresh >= current_refresh_cycle_start())
 
 
 def _normalise_expiry(raw: str) -> str:
@@ -248,18 +232,19 @@ def refresh(force: bool = False) -> None:
     global _last_refresh
 
     if not force and not _needs_refresh():
-        logger.info("Dhan scriptmaster up-to-date — loading from disk")
-        _load_from_disk()
+        logger.info("Dhan scriptmaster already refreshed for current cycle — skipping download")
         return
 
     logger.info("Downloading Dhan scriptmaster from %s", SCRIPTMASTER_URL)
     try:
         resp = requests.get(SCRIPTMASTER_URL, timeout=60)
         resp.raise_for_status()
-        content = resp.text
+        with tempfile.TemporaryDirectory(prefix="smart_trader_dhan_") as temp_dir:
+            cache_path = Path(temp_dir) / "scripmaster.csv"
+            cache_path.write_text(resp.text)
+            content = cache_path.read_text()
     except Exception as exc:
         logger.error("Failed to download Dhan scriptmaster: %s", exc)
-        _load_from_disk()
         return
 
     records = _parse_csv(content)
@@ -267,37 +252,18 @@ def refresh(force: bool = False) -> None:
         logger.error("Dhan scriptmaster returned empty data")
         return
 
-    CACHE_FILE.write_text(content)
-
     with _LOCK:
         DHAN_SCRIPTMASTER.clear()
         DHAN_SCRIPTMASTER.update(records)
         _build_indices()
-        _last_refresh = _today_ist()
+        _last_refresh = now_ist()
 
-    META_FILE.write_text(json.dumps({
-        "date": _today_ist(),
-        "version": SCRIPTMASTER_VERSION,
-        "total_symbols": len(records),
-    }, indent=2))
     logger.info("Dhan scriptmaster refreshed: %d symbols", len(records))
 
 
 def _load_from_disk() -> None:
-    """Load cached CSV from disk."""
-    if not CACHE_FILE.exists():
-        logger.warning("No cached Dhan scriptmaster found")
-        return
-    try:
-        content = CACHE_FILE.read_text()
-        records = _parse_csv(content)
-        with _LOCK:
-            DHAN_SCRIPTMASTER.clear()
-            DHAN_SCRIPTMASTER.update(records)
-            _build_indices()
-        logger.info("Dhan scriptmaster loaded from disk: %d symbols", len(records))
-    except Exception as exc:
-        logger.warning("Could not load Dhan scriptmaster from disk: %s", exc)
+    """Persistent disk cache is disabled; runtime symbol lookups should use symbols_db."""
+    logger.debug("Dhan disk cache disabled; no persistent scriptmaster files are loaded")
 
 
 def search(query: str, exchange: Optional[str] = None) -> List[Dict[str, Any]]:
