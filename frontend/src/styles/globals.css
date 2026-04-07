@@ -317,3 +317,12 @@ html[data-theme="light"] body {
 [data-tooltip] {
   position: relative;
 }
+
+/* ── Option Chain value-change flash ── */
+@keyframes oc-value-flash {
+  0%   { background-color: rgba(0, 194, 255, 0.35); }
+  100% { background-color: transparent; }
+}
+.oc-flash {
+  animation: oc-value-flash 0.8s ease-out;
+}

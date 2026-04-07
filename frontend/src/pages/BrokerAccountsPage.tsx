@@ -4,14 +4,14 @@
    Row highlighting by broker / position side
    ═══════════════════════════════════════════════════════════════════ */
 import { useState, useEffect, useRef } from 'react'
-import { cn, fmtINR, fmtNum, pnlClass, pnlSign } from '../lib/utils'
+import { cn, fmtINR, fmtNum, fmtTime, pnlClass, pnlSign } from '../lib/utils'
 import { ws } from '../lib/ws'
 import { useBrokerAccountsStore, useToastStore } from '../stores'
 import type { BrokerAccountWS } from '../stores'
 import { api } from '../lib/api'
 import {
   WalletCards, Wifi, WifiOff, Layers, FileText, BarChart2, Package,
-  RefreshCw, AlertCircle, XCircle,
+  RefreshCw, AlertCircle, XCircle, PenLine, ShieldCheck, X,
 } from 'lucide-react'
 
 type DashTab = 'positions' | 'holdings' | 'orders' | 'trades'
@@ -202,8 +202,8 @@ export default function BrokerAccountsPage() {
                   toast={toast}
                 />
               )}
-              {activeTab === 'holdings'  && <BrokerHoldingsTable  data={brokerData?.holdings ?? []} />}
-              {activeTab === 'orders'    && <BrokerOrdersTable    data={brokerData?.orders ?? []} />}
+              {activeTab === 'holdings'  && <BrokerHoldingsTable  data={brokerData?.holdings ?? []} accountId={selectedId ?? ''} toast={toast} />}
+              {activeTab === 'orders'    && <BrokerOrdersTable    data={brokerData?.orders ?? []} accountId={selectedId ?? ''} toast={toast} />}
               {activeTab === 'trades'    && <BrokerTradesTable    data={brokerData?.trades ?? []} />}
             </div>
           </div>
@@ -345,8 +345,39 @@ function BrokerPositionsTable({
   )
 }
 
-function BrokerHoldingsTable({ data }: { data: any[] }) {
+function BrokerHoldingsTable({ data, accountId, toast }: { data: any[]; accountId: string; toast: (m: string, t: 'success'|'error'|'warning'|'info') => void }) {
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [edits, setEdits] = useState<Record<string, Record<string, string>>>({})
+  const [managed, setManaged] = useState<Record<string, Record<string, any>>>({})
+
   if (data.length === 0) return <EmptyState msg="No holdings for this broker" />
+
+  function setField(sym: string, field: string, val: string) {
+    setEdits(prev => ({ ...prev, [sym]: { ...(prev[sym] ?? {}), [field]: val } }))
+  }
+
+  async function activate(h: any, sym: string) {
+    const e = edits[sym] ?? {}
+    const settings = {
+      stop_loss:      e.stop_loss      ? parseFloat(e.stop_loss)      : managed[sym]?.stop_loss,
+      target:         e.target         ? parseFloat(e.target)         : managed[sym]?.target,
+      trailing_value: e.trailing_value ? parseFloat(e.trailing_value) : managed[sym]?.trailing_value,
+      trail_when:     e.trail_when     ? parseFloat(e.trail_when)     : managed[sym]?.trail_when,
+    }
+    setManaged(prev => ({ ...prev, [sym]: { active: true, ...settings } }))
+    setEdits(prev => { const n = { ...prev }; delete n[sym]; return n })
+    try {
+      await api.setSLSettings({ configId: accountId, posKey: `${sym}|CNC`, active: true, stopLoss: settings.stop_loss || null, target: settings.target || null, trailingValue: settings.trailing_value || null, trailWhen: settings.trail_when || null })
+      toast(`SL/TG active for ${sym}`, 'success')
+    } catch { toast('Failed to save SL settings', 'error') }
+  }
+
+  async function deactivate(sym: string) {
+    setManaged(prev => { const n = { ...prev }; delete n[sym]; return n })
+    try { await api.setSLSettings({ configId: accountId, posKey: `${sym}|CNC`, active: false }) } catch { /* non-fatal */ }
+    toast(`SL/TG deactivated for ${sym}`, 'info')
+  }
+
   return (
     <div className="overflow-auto max-h-[600px]">
       <table className="data-table">
@@ -358,17 +389,26 @@ function BrokerHoldingsTable({ data }: { data: any[] }) {
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">LTP</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Invested</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">P&L</th>
+            <th className="px-3 py-2 w-10"></th>
           </tr>
         </thead>
         <tbody>
           {data.map((h, i) => {
-            const qty = parseFloat(h.quantity ?? h.holdingQty ?? h.hldqty ?? 0)
-            const avg = parseFloat(h.avgPrice ?? h.average_price ?? h.upldprc ?? 0)
-            const ltp = parseFloat(h.ltp ?? h.last_price ?? h.lp ?? 0)
-            const pnl = parseFloat(h.pnl ?? h.profitAndLoss ?? 0) || (ltp - avg) * qty
+            const sym  = h.symbol ?? h.tradingSymbol ?? h.tsym ?? `H${i}`
+            const qty  = parseFloat(h.quantity ?? h.holdingQty ?? h.hldqty ?? 0)
+            const avg  = parseFloat(h.avgPrice ?? h.average_price ?? h.upldprc ?? 0)
+            const ltp  = parseFloat(h.ltp ?? h.last_price ?? h.lp ?? 0)
+            const pnl  = parseFloat(h.pnl ?? h.profitAndLoss ?? 0) || (ltp - avg) * qty
+            const isMgd    = !!managed[sym]
+            const isExpanded = expanded === sym
+            const e    = edits[sym] ?? {}
             return (
-              <tr key={i} className="hover:bg-bg-hover">
-                <td className="px-3 py-2 font-medium text-[12px] text-text-bright">{h.symbol ?? h.tradingSymbol ?? h.tsym ?? '—'}</td>
+              <>
+              <tr key={`${sym}-${i}`} className="group hover:bg-bg-hover">
+                <td className="px-3 py-2">
+                  <div className="font-medium text-[12px] text-text-bright">{sym}</div>
+                  {isMgd && <span className="text-[9px] text-profit font-bold">● SL/TG</span>}
+                </td>
                 <td className="px-3 py-2 text-right font-mono text-[12px]">{qty}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px] text-text-sec">{fmtINR(avg)}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px] text-text-bright">{fmtINR(ltp)}</td>
@@ -376,7 +416,48 @@ function BrokerHoldingsTable({ data }: { data: any[] }) {
                 <td className={cn('px-3 py-2 text-right font-mono font-semibold text-[12px]', pnlClass(pnl))}>
                   {pnlSign(pnl)}{fmtINR(Math.abs(pnl))}
                 </td>
+                <td className="px-3 py-2">
+                  <button onClick={() => setExpanded(isExpanded ? null : sym)}
+                    className={cn('btn-ghost btn-xs !px-1.5 !py-1 transition-opacity', isMgd ? 'text-profit' : 'opacity-0 group-hover:opacity-100')}
+                    title="SL/TG/Trail">
+                    <ShieldCheck className="w-3 h-3" />
+                  </button>
+                </td>
               </tr>
+              {isExpanded && (
+                <tr key={`${sym}-sl`} className="bg-bg-elevated/40 border-t border-brand/20">
+                  <td colSpan={7} className="px-3 py-2">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <span className="text-[10px] font-semibold text-text-muted uppercase">SL/TG/Trail</span>
+                      {(['stop_loss', 'target', 'trailing_value', 'trail_when'] as const).map(field => (
+                        <div key={field} className="flex items-center gap-1">
+                          <label className="text-[10px] text-text-muted capitalize">{field.replace(/_/g,' ')}</label>
+                          <input type="number" step="any"
+                            value={e[field] ?? (managed[sym]?.[field] != null ? String(managed[sym][field]) : '')}
+                            onChange={ev => setField(sym, field, ev.target.value)}
+                            placeholder="—"
+                            className="w-20 bg-bg-surface border border-border text-[11px] font-mono px-1.5 py-1 rounded text-text-bright focus:outline-none focus:border-brand"
+                          />
+                        </div>
+                      ))}
+                      <button onClick={() => activate(h, sym)}
+                        className="text-[10px] px-2 py-1 rounded border border-brand/60 text-brand hover:bg-brand/10 font-medium">
+                        {isMgd ? 'Update' : 'Activate'}
+                      </button>
+                      {isMgd && (
+                        <button onClick={() => deactivate(sym)}
+                          className="text-[10px] px-2 py-1 rounded border border-loss/40 text-loss hover:bg-loss/10 font-medium">
+                          Deactivate
+                        </button>
+                      )}
+                      <button onClick={() => setExpanded(null)} className="ml-auto btn-ghost btn-xs">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )}
+              </>
             )
           })}
         </tbody>
@@ -385,10 +466,71 @@ function BrokerHoldingsTable({ data }: { data: any[] }) {
   )
 }
 
-function BrokerOrdersTable({ data }: { data: any[] }) {
+const OPEN_STATUSES_STR = ['OPEN', 'PENDING', 'AMO', 'TRIGGER_PENDING']
+
+function BrokerOrdersTable({ data, accountId, toast }: { data: any[]; accountId: string; toast: (m: string, t: 'success'|'error'|'warning'|'info') => void }) {
+  const [cancelling, setCancelling] = useState<string | null>(null)
+  const [cancellingAll, setCancellingAll] = useState(false)
+  const [modify, setModify] = useState<{ order: any; price: string; qty: string; orderType: string } | null>(null)
+  const [modifying, setModifying] = useState(false)
+  const [showOpenOnly, setShowOpenOnly] = useState(false)
+
+  const openOrders = data.filter(o => OPEN_STATUSES_STR.includes((o.status ?? '').toUpperCase()))
+  const displayed  = showOpenOnly ? openOrders : data
+
+  async function cancelOne(o: any) {
+    const oid = o.id ?? o.orderId ?? o.order_id
+    const acct = o.accountId ?? o.account_id ?? accountId
+    setCancelling(oid)
+    try {
+      await api.cancelOrder(oid, acct)
+      toast(`Cancelled: ${o.tradingsymbol ?? o.symbol}`, 'success')
+    } catch { toast('Failed to cancel order', 'error') }
+    finally { setCancelling(null) }
+  }
+
+  async function cancelAll() {
+    if (!accountId) { toast('Cannot determine account', 'error'); return }
+    setCancellingAll(true)
+    try {
+      const res: any = await api.cancelAllOrders(accountId)
+      toast(`Cancelled ${res.cancelled ?? 0} orders`, 'success')
+    } catch { toast('Failed to cancel all', 'error') }
+    finally { setCancellingAll(false) }
+  }
+
+  async function submitModify() {
+    if (!modify) return
+    setModifying(true)
+    const oid = modify.order.id ?? modify.order.orderId ?? modify.order.order_id
+    try {
+      await api.modifyOrder(oid, { price: parseFloat(modify.price), quantity: parseInt(modify.qty), orderType: modify.orderType })
+      toast(`Modified: ${modify.order.tradingsymbol ?? modify.order.symbol}`, 'success')
+      setModify(null)
+    } catch { toast('Failed to modify order', 'error') }
+    finally { setModifying(false) }
+  }
+
   if (data.length === 0) return <EmptyState msg="No orders for this broker" />
+
   return (
-    <div className="overflow-auto max-h-[600px]">
+    <>
+    <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-bg-elevated/30">
+      <button onClick={() => setShowOpenOnly(v => !v)}
+        className={cn('text-[11px] px-2.5 py-1 rounded border font-medium transition-colors',
+          showOpenOnly ? 'bg-brand border-brand text-white' : 'border-border text-text-muted hover:border-brand/40')}>
+        Open Only
+      </button>
+      {openOrders.length > 0 && (
+        <button onClick={cancelAll} disabled={cancellingAll}
+          className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded border border-loss/60 text-loss hover:bg-loss/10 font-bold disabled:opacity-50">
+          {cancellingAll ? <RefreshCw className="w-3 h-3 animate-spin" /> : <XCircle className="w-3 h-3" />}
+          Cancel All ({openOrders.length})
+        </button>
+      )}
+      <span className="ml-auto text-[10px] text-text-muted">{displayed.length} orders</span>
+    </div>
+    <div className="overflow-auto max-h-[560px]">
       <table className="data-table">
         <thead className="sticky top-0 bg-bg-card z-10">
           <tr>
@@ -400,22 +542,25 @@ function BrokerOrdersTable({ data }: { data: any[] }) {
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Price</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Avg Fill</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Status</th>
+            <th className="px-3 py-2 w-24"></th>
           </tr>
         </thead>
         <tbody>
-          {data.map((o, i) => {
-            const side = (o.side ?? o.transactionType ?? o.trantype ?? '').toUpperCase()
-            const isBuy = side === 'BUY' || side === 'B'
+          {displayed.map((o, i) => {
+            const side   = (o.transactionType ?? o.side ?? o.trantype ?? '').toUpperCase()
+            const isBuy  = side === 'BUY' || side === 'B'
             const status = (o.status ?? o.orderStatus ?? '').toUpperCase()
+            const isOpen = OPEN_STATUSES_STR.includes(status)
+            const oid    = o.id ?? o.orderId ?? o.order_id ?? String(i)
             return (
-              <tr key={i} className="hover:bg-bg-hover">
-                <td className="px-3 py-2 text-text-muted text-[10px] whitespace-nowrap">{o.orderTime ?? o.order_timestamp ?? o.norentm ?? '—'}</td>
-                <td className="px-3 py-2 font-medium text-[12px] text-text-bright">{o.symbol ?? o.tradingSymbol ?? o.tsym ?? '—'}</td>
+              <tr key={oid} className="hover:bg-bg-hover">
+                <td className="px-3 py-2 text-text-muted text-[10px] whitespace-nowrap">{fmtTime(o.placedAt ?? o.orderTime ?? o.timestamp ?? '')}</td>
+                <td className="px-3 py-2 font-medium text-[12px] text-text-bright">{o.tradingsymbol ?? o.symbol ?? o.tsym ?? '—'}</td>
                 <td className="px-3 py-2"><span className={cn('badge text-[9px]', isBuy ? 'badge-buy' : 'badge-sell')}>{isBuy ? 'BUY' : 'SELL'}</span></td>
                 <td className="px-3 py-2 text-[11px] text-text-sec">{o.orderType ?? o.order_type ?? o.prctyp ?? '—'}</td>
-                <td className="px-3 py-2 text-right font-mono text-[12px]">{o.qty ?? o.quantity ?? o.totalQty ?? 0}</td>
+                <td className="px-3 py-2 text-right font-mono text-[12px]">{o.quantity ?? o.qty ?? 0}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px] text-text-sec">{fmtINR(o.price ?? 0)}</td>
-                <td className="px-3 py-2 text-right font-mono text-[12px]">{fmtINR(o.averagePrice ?? o.avgprc ?? o.fillPrice ?? 0)}</td>
+                <td className="px-3 py-2 text-right font-mono text-[12px]">{fmtINR(o.avgPrice ?? o.averagePrice ?? o.avgprc ?? 0)}</td>
                 <td className="px-3 py-2">
                   <span className={cn('badge text-[9px]',
                     status.includes('COMPLETE') || status.includes('FILLED') ? 'badge-success' :
@@ -423,12 +568,61 @@ function BrokerOrdersTable({ data }: { data: any[] }) {
                     status.includes('OPEN') || status.includes('PENDING') ? 'badge-warning' : 'badge-neutral'
                   )}>{status || '—'}</span>
                 </td>
+                <td className="px-3 py-2">
+                  {isOpen && (
+                    <div className="flex gap-1">
+                      <button onClick={() => setModify({ order: o, price: String(o.price ?? ''), qty: String(o.quantity ?? o.qty ?? ''), orderType: o.orderType ?? o.order_type ?? 'LMT' })}
+                        className="btn-ghost btn-xs !px-1.5 !py-1 text-text-muted hover:text-brand" title="Modify">
+                        <PenLine className="w-3 h-3" />
+                      </button>
+                      <button onClick={() => cancelOne(o)} disabled={cancelling === oid}
+                        className="btn-ghost btn-xs !px-1.5 !py-1 text-text-muted hover:text-loss" title="Cancel">
+                        {cancelling === oid ? <RefreshCw className="w-3 h-3 animate-spin" /> : <XCircle className="w-3 h-3" />}
+                      </button>
+                    </div>
+                  )}
+                </td>
               </tr>
             )
           })}
         </tbody>
       </table>
     </div>
+
+    {modify && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setModify(null)}>
+        <div className="bg-bg-card border border-border rounded-xl p-5 w-80 space-y-3 shadow-2xl" onClick={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between">
+            <span className="text-[13px] font-semibold text-text-bright">Modify Order</span>
+            <button onClick={() => setModify(null)} className="btn-ghost btn-xs"><X className="w-3.5 h-3.5" /></button>
+          </div>
+          <div className="text-[11px] text-text-muted">{modify.order.tradingsymbol ?? modify.order.symbol} · {modify.order.transactionType ?? modify.order.side}</div>
+          {(['Price', 'Qty'] as const).map(label => (
+            <div key={label} className="flex flex-col gap-1">
+              <label className="text-[10px] text-text-muted uppercase">{label}</label>
+              <input type="number" step="any"
+                value={label === 'Price' ? modify.price : modify.qty}
+                onChange={e => setModify(prev => prev ? { ...prev, [label === 'Price' ? 'price' : 'qty']: e.target.value } : null)}
+                className="bg-bg-surface border border-border rounded px-2 py-1.5 text-[12px] font-mono text-text-bright focus:outline-none focus:border-brand"
+              />
+            </div>
+          ))}
+          <div className="flex flex-col gap-1">
+            <label className="text-[10px] text-text-muted uppercase">Order Type</label>
+            <select value={modify.orderType} onChange={e => setModify(prev => prev ? { ...prev, orderType: e.target.value } : null)}
+              className="bg-bg-surface border border-border rounded px-2 py-1.5 text-[12px] text-text-bright focus:outline-none focus:border-brand">
+              {['LMT', 'MKT', 'SL', 'SL-M'].map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <button onClick={submitModify} disabled={modifying}
+            className="w-full btn-primary text-[12px] py-2 disabled:opacity-50 flex items-center justify-center gap-2">
+            {modifying && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+            Confirm Modify
+          </button>
+        </div>
+      </div>
+    )}
+    </>
   )
 }
 
@@ -445,20 +639,28 @@ function BrokerTradesTable({ data }: { data: any[] }) {
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase">Side</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Qty</th>
             <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Price</th>
+            <th className="px-3 py-2 text-[10px] font-medium text-text-muted uppercase text-right">Value</th>
           </tr>
         </thead>
         <tbody>
           {data.map((t, i) => {
-            const side = (t.side ?? t.transactionType ?? t.trantype ?? '').toUpperCase()
+            const side  = (t.side ?? t.transactionType ?? t.trantype ?? '').toUpperCase()
             const isBuy = side === 'BUY' || side === 'B'
+            const qty   = t.qty ?? t.quantity ?? t.fillShares ?? 0
+            const price = t.price ?? t.averagePrice ?? t.flprc ?? 0
+            const value = t.value != null ? t.value : qty * price
             return (
-              <tr key={i} className="hover:bg-bg-hover">
-                <td className="px-3 py-2 text-text-muted text-[10px] whitespace-nowrap">{t.fillTime ?? t.trade_timestamp ?? t.norentm ?? '—'}</td>
-                <td className="px-3 py-2 font-medium text-[12px] text-text-bright">{t.symbol ?? t.tradingSymbol ?? t.tsym ?? '—'}</td>
+              <tr key={t.trade_id ?? t.tradeId ?? i} className="hover:bg-bg-hover">
+                <td className="px-3 py-2 text-text-muted text-[10px] whitespace-nowrap">{fmtTime(t.tradedAt ?? t.timestamp ?? t.fillTime ?? t.trade_timestamp ?? t.norentm ?? '')}</td>
+                <td className="px-3 py-2">
+                  <div className="font-medium text-[12px] text-text-bright">{t.symbol ?? t.tradingSymbol ?? t.tsym ?? '—'}</div>
+                  {t.trade_id && <div className="text-[9px] text-text-muted font-mono">#{t.trade_id}</div>}
+                </td>
                 <td className="px-3 py-2 text-[11px] text-text-sec">{t.exchange ?? t.exch ?? '—'}</td>
                 <td className="px-3 py-2"><span className={cn('badge text-[9px]', isBuy ? 'badge-buy' : 'badge-sell')}>{isBuy ? 'BUY' : 'SELL'}</span></td>
-                <td className="px-3 py-2 text-right font-mono text-[12px]">{t.qty ?? t.quantity ?? t.fillShares ?? 0}</td>
-                <td className="px-3 py-2 text-right font-mono text-[12px]">{fmtINR(t.price ?? t.averagePrice ?? t.flprc ?? 0)}</td>
+                <td className="px-3 py-2 text-right font-mono text-[12px]">{qty}</td>
+                <td className="px-3 py-2 text-right font-mono text-[12px]">{fmtINR(price)}</td>
+                <td className="px-3 py-2 text-right font-mono text-[12px] text-text-sec">{fmtINR(value)}</td>
               </tr>
             )
           })}

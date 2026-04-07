@@ -132,6 +132,8 @@ class UpdateBrokerRequest(BaseModel):
 
 class RiskConfigUpdate(BaseModel):
     max_daily_loss:        Optional[float] = None
+    trail_stop_loss:       Optional[float] = None   # trail amount below peak profit
+    trail_when_pnl:        Optional[float] = None   # start trailing once PnL >= this
     max_order_value:       Optional[float] = None
     max_qty_per_order:     Optional[int]   = None
     max_open_positions:    Optional[int]   = None
@@ -583,11 +585,12 @@ def update_account_risk_config(
 
     new_cfg = AccountRiskConfig(
         max_daily_loss        = updates.get("max_daily_loss",        current.max_daily_loss),
+        trail_stop_loss       = updates.get("trail_stop_loss",       current.trail_stop_loss),
+        trail_when_pnl        = updates.get("trail_when_pnl",        current.trail_when_pnl),
         max_order_value       = updates.get("max_order_value",       current.max_order_value),
         max_qty_per_order     = updates.get("max_qty_per_order",     current.max_qty_per_order),
         max_open_positions    = updates.get("max_open_positions",    current.max_open_positions),
         warning_threshold_pct = updates.get("warning_threshold_pct", current.warning_threshold_pct),
-        trail_step            = current.trail_step,
         allowed_exchanges     = current.allowed_exchanges,
         state_dir             = current.state_dir,
     )
@@ -732,8 +735,44 @@ def env_preview(
         display   = (val[:2] + "***") if (is_secret and len(val) > 2) else val
         lines.append(f"{key}={display}   # {label}")
 
-    return {"preview": "\n".join(lines), "broker_id": cfg.broker_id,
-            "client_id": cfg.client_id}
+    return {"env_content": "\n".join(lines), "warning": "",
+            "broker_id": cfg.broker_id, "client_id": cfg.client_id}
+
+
+@router.get("/configs/{config_id}/edit-creds")
+def edit_creds(
+    config_id: str,
+    payload: dict = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Return stored credentials for the edit form.
+    Non-sensitive fields are returned in plain text.
+    Sensitive (password) fields return '__SAVED__' when a value is stored,
+    so the frontend can show a placeholder without exposing the secret.
+    """
+    user_id = payload["sub"]
+    cfg = db.query(BrokerConfig).filter(
+        BrokerConfig.id == config_id,
+        BrokerConfig.user_id == user_id,
+    ).first()
+    if not cfg:
+        raise HTTPException(404, "Broker config not found")
+
+    creds = _safe_decrypt(cfg, db)
+    result: dict = {}
+    for field_def in BROKER_FIELD_DEFS.get(cfg.broker_id, []):
+        key = field_def["key"]
+        is_sensitive = field_def.get("type") == "password"
+        val = creds.get(key, "")
+        result[key] = "__SAVED__" if (is_sensitive and val) else val
+
+    return {
+        "fields":    result,
+        "broker_id": cfg.broker_id,
+        "client_id": cfg.client_id,
+        "nickname":  cfg.broker_name,
+    }
 
 
 # ── Connect implementations ────────────────────────────────────────────────────
@@ -871,14 +910,19 @@ def _connect_shoonya(
 
     # ── Step 8: Initialise per-account risk manager ───────────────────────────
     try:
-        from broker.account_risk import get_account_risk
+        from broker.account_risk import get_account_risk, AccountRiskConfig
+        _risk_cfg = AccountRiskConfig.from_credentials(creds)
         rm = get_account_risk(
             user_id   = user_id,
             config_id = cfg.id,
             broker_id = cfg.broker_id,
             client_id = client_id,
+            config    = _risk_cfg,
         )
-        log.info("Account risk manager ready — max_loss=%s", rm._config.max_daily_loss)
+        log.info(
+            "Account risk manager ready — max_loss=%.0f trail_stop=%.0f trail_when=%.0f",
+            rm._config.max_daily_loss, rm._config.trail_stop_loss, rm._config.trail_when_pnl,
+        )
     except Exception as e:
         log.warning("Could not init account risk manager: %s", e)
 
@@ -914,9 +958,15 @@ def _connect_paper(
 
     _upsert_session(db, cfg, user_id, mode="paper", token=None, logged_in=True)
 
-    from broker.account_risk import get_account_risk
-    get_account_risk(user_id=user_id, config_id=cfg.id,
-                     broker_id="paper_trade", client_id="PAPER")
+    from broker.account_risk import get_account_risk, AccountRiskConfig
+    _risk_cfg = AccountRiskConfig.from_credentials(creds)
+    get_account_risk(
+        user_id   = user_id,
+        config_id = cfg.id,
+        broker_id = "paper_trade",
+        client_id = "PAPER",
+        config    = _risk_cfg,
+    )
 
     log.info("Paper trading activated — starting_capital=%s", capital)
     _audit(db, user_id, "broker_connect", "paper_trade:PAPER",
@@ -1046,9 +1096,15 @@ def _connect_fyers(
 
     log.info("Step 6: Initialising Fyers risk manager")
     try:
-        from broker.account_risk import AccountRiskManager
-        risk = AccountRiskManager(user_id=user_id, config_id=cfg.id, broker_id="fyers")
-        risk.activate()
+        from broker.account_risk import get_account_risk, AccountRiskConfig
+        _risk_cfg = AccountRiskConfig.from_credentials(creds)
+        get_account_risk(
+            user_id   = user_id,
+            config_id = cfg.id,
+            broker_id = "fyers",
+            client_id = client_id,
+            config    = _risk_cfg,
+        )
     except Exception as _re:
         log.warning("AccountRiskManager init failed (non-fatal): %s", _re)
 

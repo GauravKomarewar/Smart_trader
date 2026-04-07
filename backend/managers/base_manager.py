@@ -15,13 +15,17 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from db.trading_db import get_trading_conn
 import psycopg2.extras
 
 logger = logging.getLogger("smart_trader.managers.base")
+
+# Shared thread pool for all managers (bounded to avoid thread explosion)
+_MANAGER_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="mgr-pool")
 
 
 class BaseManager(ABC):
@@ -30,6 +34,7 @@ class BaseManager(ABC):
     # Subclasses must set these
     MANAGER_NAME: str = "base"
     REFRESH_INTERVAL: float = 2.0  # seconds between refresh cycles
+    SESSION_TIMEOUT: float = 10.0  # max seconds to wait for one broker session
 
     def __init__(self):
         self._thread: Optional[threading.Thread] = None
@@ -40,6 +45,9 @@ class BaseManager(ABC):
         self._last_error: Optional[str] = None
         self._last_run_ms = 0
         self._log = logging.getLogger(f"smart_trader.mgr.{self.MANAGER_NAME}")
+        # Track per-session data counts to guard against transient empty results
+        # Key: "user_id:config_id" → last known row count
+        self._prev_data_counts: Dict[str, int] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -101,7 +109,7 @@ class BaseManager(ABC):
             self._stop_event.wait(timeout=remaining)
 
     def _do_refresh(self):
-        """Fetch from all live broker sessions and write to DB."""
+        """Fetch from all live broker sessions and write to DB (concurrent per user)."""
         from broker.multi_broker import registry as mb
 
         all_sessions = mb.get_all_sessions()
@@ -112,17 +120,71 @@ class BaseManager(ABC):
                 continue
             user_sessions.setdefault(sess.user_id, []).append(sess)
 
-        for user_id, sessions in user_sessions.items():
+        if not user_sessions:
+            return
+
+        # Process all users concurrently
+        futures = {
+            _MANAGER_POOL.submit(self.refresh_user, user_id, sessions): user_id
+            for user_id, sessions in user_sessions.items()
+        }
+        for f in as_completed(futures, timeout=self.SESSION_TIMEOUT + 5):
             try:
-                self.refresh_user(user_id, sessions)
+                f.result()
             except Exception as e:
-                self._log.debug("Refresh failed user=%s: %s", user_id[:8], e)
+                uid = futures[f]
+                self._log.debug("Refresh failed user=%s: %s", uid[:8], e)
 
     @abstractmethod
     def refresh_user(self, user_id: str, sessions: list):
         """Fetch data for one user from all their broker sessions and upsert to DB.
         Subclasses must implement this."""
         ...
+
+    # ── Concurrent session helpers ─────────────────────────────────────────
+
+    def _refresh_sessions_concurrent(self, user_id: str, sessions: list,
+                                      per_session_fn):
+        """Run per_session_fn(user_id, sess) concurrently for all live sessions."""
+        live = [s for s in sessions if s.is_live]
+        if not live:
+            return
+        if len(live) == 1:
+            # Single session — no need for threads
+            try:
+                per_session_fn(user_id, live[0])
+            except Exception as e:
+                self._log.debug("Session refresh failed %s/%s: %s",
+                                live[0].broker_id, live[0].client_id, e)
+            return
+        futures = {
+            _MANAGER_POOL.submit(per_session_fn, user_id, sess): sess
+            for sess in live
+        }
+        for f in as_completed(futures, timeout=self.SESSION_TIMEOUT):
+            try:
+                f.result()
+            except Exception as e:
+                sess = futures[f]
+                self._log.debug("Session refresh failed %s/%s: %s",
+                                sess.broker_id, sess.client_id, e)
+
+    def _should_delete_stale(self, user_id: str, config_id: str,
+                              current_count: int) -> bool:
+        """Return True if it's safe to delete stale rows for this session.
+        
+        Guards against transient empty results: if the previous cycle had data
+        but this cycle has zero rows, skip deletion this cycle. Two consecutive
+        empties are treated as genuine (positions really closed / orders done).
+        """
+        key = f"{user_id}:{config_id}"
+        prev = self._prev_data_counts.get(key, -1)  # -1 = first cycle
+        self._prev_data_counts[key] = current_count
+        if current_count == 0 and prev > 0:
+            self._log.debug("Skipping stale-delete for %s:%s (transient empty, prev=%d)",
+                            user_id[:8], config_id[:8], prev)
+            return False
+        return True
 
     # ── Health reporting ───────────────────────────────────────────────────
 

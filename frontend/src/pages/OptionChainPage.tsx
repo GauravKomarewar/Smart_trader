@@ -2,7 +2,7 @@
    Option Chain Page
    Full chain + analytics + basket order
    ════════════════════════════════════════════ */
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useOptionChain } from '../hooks'
 import { useOptionChainStore, useUIStore, useToastStore } from '../stores'
 import { cn, fmtNum, fmtOI, fmtINR, ivColor } from '../lib/utils'
@@ -185,11 +185,55 @@ function ColumnSelector({ visible, onChange }: {
   )
 }
 
+// ── Value-change flash helper ──────────────────
+type SnapKey = string  // "strike:side:field"
+type SnapMap = Map<SnapKey, number>
+
+function useValueFlash(rows: any[] | undefined) {
+  const prevRef = useRef<SnapMap>(new Map())
+  const [flashSet, setFlashSet] = useState<Set<SnapKey>>(new Set())
+
+  useEffect(() => {
+    if (!rows || rows.length === 0) return
+    const prev = prevRef.current
+    const next: SnapMap = new Map()
+    const flashing = new Set<SnapKey>()
+
+    for (const row of rows) {
+      for (const side of ['call', 'put'] as const) {
+        for (const field of ['ltp', 'oi', 'volume', 'iv'] as const) {
+          const key: SnapKey = `${row.strike}:${side}:${field}`
+          const val = row[side]?.[field] ?? 0
+          next.set(key, val)
+          const oldVal = prev.get(key)
+          if (oldVal !== undefined && oldVal !== val && val !== 0) {
+            flashing.add(key)
+          }
+        }
+      }
+    }
+    prevRef.current = next
+
+    if (flashing.size > 0) {
+      setFlashSet(flashing)
+      const timer = setTimeout(() => setFlashSet(new Set()), 800)
+      return () => clearTimeout(timer)
+    }
+  }, [rows])
+
+  return flashSet
+}
+
 // ── Full Option Chain Table ────────────────────────
 function OptionChainTable() {
-  const { data, addToBasket } = useOptionChainStore()
+  const { data, addToBasket, isLoading } = useOptionChainStore()
   const { openOrderModal } = useUIStore()
   const [highlightOI, setHighlightOI] = useState(true)
+  const flashSet = useValueFlash(data?.rows)
+
+  // Helper: returns flash CSS class if this cell's value just changed
+  const flashCls = (strike: number, side: 'call' | 'put', field: string) =>
+    flashSet.has(`${strike}:${side}:${field}`) ? 'oc-flash' : ''
 
   // Persistent column visibility
   const [visibleCols, setVisibleCols] = useState<Set<string>>(() => {
@@ -231,13 +275,13 @@ function OptionChainTable() {
         </td>
       )
       case 'oi': return (
-        <td key={col.id} className="px-2 py-1.5 text-right font-mono text-text-sec bg-profit/3 relative">
+        <td key={col.id} className={cn('px-2 py-1.5 text-right font-mono text-text-sec bg-profit/3 relative', flashCls(row.strike, 'call', 'oi'))}>
           {highlightOI && <div className="absolute inset-y-0 right-0 bg-profit/12 transition-all" style={{ width: `${(c.oi / maxCallOI) * 100}%` }} />}
           <span className="relative z-10">{fmtOI(c.oi)}</span>
         </td>
       )
-      case 'volume': return <td key={col.id} className="px-2 py-1.5 text-right font-mono text-text-muted bg-profit/3">{fmtOI(c.volume)}</td>
-      case 'iv':     return <td key={col.id} className={cn('px-2 py-1.5 text-right font-mono font-semibold bg-profit/3', ivColor(c.iv))}>{c.iv?.toFixed(1) ?? '—'}</td>
+      case 'volume': return <td key={col.id} className={cn('px-2 py-1.5 text-right font-mono text-text-muted bg-profit/3', flashCls(row.strike, 'call', 'volume'))}>{fmtOI(c.volume)}</td>
+      case 'iv':     return <td key={col.id} className={cn('px-2 py-1.5 text-right font-mono font-semibold bg-profit/3', ivColor(c.iv), flashCls(row.strike, 'call', 'iv'))}>{c.iv?.toFixed(1) ?? '—'}</td>
       case 'delta':  return <td key={col.id} className="px-2 py-1.5 text-right font-mono text-text-sec bg-profit/3">{(c.delta ?? 0).toFixed(3)}</td>
       case 'gamma':  return <td key={col.id} className="px-2 py-1.5 text-right font-mono text-text-muted bg-profit/3">{(c.gamma ?? 0).toFixed(5)}</td>
       case 'theta':  return <td key={col.id} className={cn('px-2 py-1.5 text-right font-mono bg-profit/3', (c.theta ?? 0) < 0 ? 'text-loss/70' : 'text-text-muted')}>{(c.theta ?? 0).toFixed(2)}</td>
@@ -255,13 +299,13 @@ function OptionChainTable() {
         </td>
       )
       case 'oi': return (
-        <td key={col.id} className="px-2 py-1.5 text-left font-mono text-text-sec bg-loss/3 relative">
+        <td key={col.id} className={cn('px-2 py-1.5 text-left font-mono text-text-sec bg-loss/3 relative', flashCls(row.strike, 'put', 'oi'))}>
           {highlightOI && <div className="absolute inset-y-0 left-0 bg-loss/12 transition-all" style={{ width: `${(p.oi / maxPutOI) * 100}%` }} />}
           <span className="relative z-10">{fmtOI(p.oi)}</span>
         </td>
       )
-      case 'volume': return <td key={col.id} className="px-2 py-1.5 text-left font-mono text-text-muted bg-loss/3">{fmtOI(p.volume)}</td>
-      case 'iv':     return <td key={col.id} className={cn('px-2 py-1.5 text-left font-mono font-semibold bg-loss/3', ivColor(p.iv))}>{p.iv?.toFixed(1) ?? '—'}</td>
+      case 'volume': return <td key={col.id} className={cn('px-2 py-1.5 text-left font-mono text-text-muted bg-loss/3', flashCls(row.strike, 'put', 'volume'))}>{fmtOI(p.volume)}</td>
+      case 'iv':     return <td key={col.id} className={cn('px-2 py-1.5 text-left font-mono font-semibold bg-loss/3', ivColor(p.iv), flashCls(row.strike, 'put', 'iv'))}>{p.iv?.toFixed(1) ?? '—'}</td>
       case 'delta':  return <td key={col.id} className="px-2 py-1.5 text-left font-mono text-text-sec bg-loss/3">{(p.delta ?? 0).toFixed(3)}</td>
       case 'gamma':  return <td key={col.id} className="px-2 py-1.5 text-left font-mono text-text-muted bg-loss/3">{(p.gamma ?? 0).toFixed(5)}</td>
       case 'theta':  return <td key={col.id} className={cn('px-2 py-1.5 text-left font-mono bg-loss/3', (p.theta ?? 0) < 0 ? 'text-loss/70' : 'text-text-muted')}>{(p.theta ?? 0).toFixed(2)}</td>
@@ -271,7 +315,16 @@ function OptionChainTable() {
   }
 
   return (
-    <div className="bg-bg-card border border-border rounded-lg overflow-hidden">
+    <div className="bg-bg-card border border-border rounded-lg overflow-hidden relative">
+      {/* Loading overlay during expiry switch */}
+      {isLoading && (
+        <div className="absolute inset-0 z-20 bg-bg-base/60 backdrop-blur-[1px] flex items-center justify-center">
+          <div className="flex items-center gap-2 px-4 py-2 bg-bg-card border border-border rounded-lg shadow-lg">
+            <RefreshCw className="w-4 h-4 text-brand animate-spin" />
+            <span className="text-[12px] text-text-sec">Loading option chain...</span>
+          </div>
+        </div>
+      )}
       <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border">
         <span className="text-[12px] text-text-sec">{data.rows.length} strikes</span>
         <label className="flex items-center gap-2 text-[11px] text-text-sec cursor-pointer">
@@ -315,7 +368,7 @@ function OptionChainTable() {
                   {callCols.map(col => renderCallCell(col, row))}
                   {/* Call LTP (always visible) */}
                   <td
-                    className="px-2 py-1.5 text-right font-mono font-bold text-profit bg-profit/5 cursor-pointer hover:underline"
+                    className={cn('px-2 py-1.5 text-right font-mono font-bold text-profit bg-profit/5 cursor-pointer hover:underline', flashCls(row.strike, 'call', 'ltp'))}
                     onClick={() => openOrderModal((row.call as any)?.trading_symbol || data.underlying + `${row.strike}CE`, (data as any)?.exchange || UNDERLYING_MAP[data.underlying] || 'NFO')}
                   >
                     {fmtNum(row.call.ltp)}
@@ -330,7 +383,7 @@ function OptionChainTable() {
 
                   {/* PUT LTP (always visible) */}
                   <td
-                    className="px-2 py-1.5 text-left font-mono font-bold text-loss bg-loss/5 cursor-pointer hover:underline"
+                    className={cn('px-2 py-1.5 text-left font-mono font-bold text-loss bg-loss/5 cursor-pointer hover:underline', flashCls(row.strike, 'put', 'ltp'))}
                     onClick={() => openOrderModal((row.put as any)?.trading_symbol || data.underlying + `${row.strike}PE`, (data as any)?.exchange || UNDERLYING_MAP[data.underlying] || 'NFO')}
                   >
                     {fmtNum(row.put.ltp)}

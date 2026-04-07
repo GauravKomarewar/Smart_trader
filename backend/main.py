@@ -169,6 +169,17 @@ async def on_startup():
     except Exception as exc:
         logger.warning("Unified ScriptMaster load failed (will retry lazily): %s", exc)
 
+    # Populate unified symbols DB from loaded scriptmasters
+    try:
+        from db.symbols_db import init_symbols_schema, populate_symbols_db, start_daily_refresh_scheduler
+        init_symbols_schema()  # ensure table exists before populating
+        sym_counts = populate_symbols_db()
+        logger.info("Symbols DB populated: %s", sym_counts)
+        # Start daily 8:45 AM IST refresh scheduler
+        start_daily_refresh_scheduler()
+    except Exception as exc:
+        logger.warning("Symbols DB population failed (non-fatal): %s", exc)
+
     # Seed admin + demo users
     from db.database import SessionLocal, User
     from core.config import config
@@ -222,6 +233,14 @@ async def on_startup():
     except Exception as exc:
         logger.warning("PositionWatcher start failed (non-fatal): %s", exc)
 
+    # ── Start PositionSLManager (per-position SL/TG/trailing engine) ─────────
+    try:
+        from trading.position_sl_manager import position_sl_manager
+        position_sl_manager.start()
+        logger.info("PositionSLManager started — SL/TG/Trail execution active")
+    except Exception as exc:
+        logger.warning("PositionSLManager start failed (non-fatal): %s", exc)
+
     # ── Start SessionScheduler (SEBI daily login/logout) ─────────────────────
     try:
         from trading.session_scheduler import session_scheduler
@@ -236,6 +255,17 @@ async def on_startup():
         logger.info("SupremeManager started — all data managers active")
     except Exception as exc:
         logger.warning("SupremeManager start failed (non-fatal): %s", exc)
+
+    # ── Start LiveTickService (Fyers + Shoonya WebSocket dual pipeline) ───────
+    try:
+        import asyncio
+        from broker.live_tick_service import get_tick_service
+        loop = asyncio.get_event_loop()
+        svc = get_tick_service()
+        svc.set_event_loop(loop)
+        logger.info("LiveTickService started — Fyers+Shoonya dual pipeline active")
+    except Exception as exc:
+        logger.warning("LiveTickService start failed (non-fatal): %s", exc)
 
 def _restore_broker_sessions():
     """
@@ -367,6 +397,13 @@ async def on_shutdown():
     try:
         from trading.position_watcher import position_watcher
         position_watcher.stop()
+    except Exception:
+        pass
+
+    # Stop PositionSLManager
+    try:
+        from trading.position_sl_manager import position_sl_manager
+        position_sl_manager.stop()
     except Exception:
         pass
 

@@ -372,6 +372,8 @@ class SupremeManager:
                     "client_id": clid,
                     "is_live": True,
                     "mode": sess.get("mode", "live"),
+                    "state": sess.get("state", "live"),
+                    "data_stale": sess.get("state") == "stale",
                     "connected_at": sess.get("connected_at"),
                     "cash": cash,
                     "collateral": collateral,

@@ -72,6 +72,15 @@ class PlaceOrderRequest(BaseModel):
     trailingValue: Optional[float] = None
 
 
+class ModifyOrderRequest(BaseModel):
+    accountId: str                      # config_id of the broker account
+    quantity: Optional[int] = None
+    price: Optional[float] = None
+    triggerPrice: Optional[float] = None
+    orderType: Optional[str] = None     # LMT / MKT / SL-LMT / SL-MKT
+    validity: Optional[str] = None
+
+
 @router.post("/place")
 async def place_order(
     req: PlaceOrderRequest,
@@ -283,6 +292,106 @@ async def squareoff_all(
         "placed": success_count,
         "errors": errors,
     }
+
+
+@router.delete("/{order_id}")
+async def cancel_order(
+    order_id: str,
+    account_id: str,
+    payload: dict = Depends(current_user),
+):
+    """Cancel a single open order by order_id on the specified account."""
+    from broker.multi_broker import registry
+    user_id = payload["sub"]
+    result = registry.cancel_order(user_id, account_id, order_id)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("message", "Cancel failed"))
+    return result
+
+
+@router.delete("/cancel-all/{account_id}")
+async def cancel_all_orders(
+    account_id: str,
+    payload: dict = Depends(current_user),
+):
+    """Cancel all open orders on the specified broker account."""
+    from broker.multi_broker import registry
+    user_id = payload["sub"]
+    result = registry.cancel_all_orders(user_id, account_id)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("message", "Cancel all failed"))
+    return result
+
+
+@router.patch("/{order_id}")
+async def modify_order(
+    order_id: str,
+    req: ModifyOrderRequest,
+    payload: dict = Depends(current_user),
+):
+    """Modify an open order (price, quantity, order type)."""
+    from broker.multi_broker import registry
+    user_id = payload["sub"]
+    params = {}
+    if req.quantity is not None:
+        params["quantity"] = req.quantity
+    if req.price is not None:
+        params["price"] = req.price
+    if req.triggerPrice is not None:
+        params["trigger_price"] = req.triggerPrice
+    if req.orderType is not None:
+        params["order_type"] = req.orderType
+    if req.validity is not None:
+        params["validity"] = req.validity
+    result = registry.modify_order(user_id, req.accountId, order_id, params)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("message", "Modify failed"))
+    return result
+
+
+# ── Position SL/TG/Trail settings ─────────────────────────────────────────────
+
+class SLSettingsRequest(BaseModel):
+    configId: str               # broker account config_id
+    posKey: str                 # "SYMBOL|PRODUCT" e.g. "GOLDPETAL30APR26|M"
+    active: bool = True
+    stopLoss: Optional[float] = None
+    target: Optional[float] = None
+    trailingValue: Optional[float] = None
+    trailWhen: Optional[float] = None
+
+
+@router.put("/positions/sl-settings")
+async def set_position_sl_settings(
+    req: SLSettingsRequest,
+    payload: dict = Depends(current_user),
+):
+    """Save or update SL/TG/Trail settings for a position. Triggers live monitoring."""
+    from trading.position_sl_manager import PositionSLManager
+    user_id = payload["sub"]
+    result = PositionSLManager.save_settings(
+        user_id=user_id,
+        config_id=req.configId,
+        pos_key=req.posKey,
+        active=req.active,
+        stop_loss=req.stopLoss,
+        target=req.target,
+        trailing_value=req.trailingValue,
+        trail_when=req.trailWhen,
+    )
+    return {"success": True, "settings": result}
+
+
+@router.get("/positions/sl-settings")
+async def get_position_sl_settings(
+    payload: dict = Depends(current_user),
+):
+    """Return all active SL/TG/Trail settings for the current user."""
+    from trading.position_sl_manager import PositionSLManager
+    user_id = payload["sub"]
+    settings = PositionSLManager.get_settings(user_id)
+    return {"data": settings, "count": len(settings)}
+
 
 
 @router.get("/book")

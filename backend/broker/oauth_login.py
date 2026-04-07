@@ -22,6 +22,26 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+
+# ── Token result helper ──────────────────────────────────────────────────────
+
+class _TokenResult(str):
+    """str subclass that also carries access_token for Bearer auth."""
+    access_token: str = ""
+    userid: str = ""
+    actid: str = ""
+
+
+def _make_token_result(susertoken: str, access_token: str = "",
+                       userid: str = "", actid: str = "") -> "_TokenResult":
+    """Build a _TokenResult from components (used when loading from cache)."""
+    tr = _TokenResult(susertoken)
+    tr.access_token = access_token or ""
+    tr.userid = userid or ""
+    tr.actid = actid or userid or ""
+    return tr
+
+
 # ── Selenium (lazy import) ───────────────────────────────────────────────────
 try:
     from selenium import webdriver as _webdriver
@@ -180,6 +200,20 @@ def _capture_auth_code(driver, creds: dict) -> Optional[str]:
                 logger.info("Auth code captured from redirect URL")
                 return code
 
+        # Shoonya redirects headless sessions to /GetAuthCode — code is in the JSON body
+        if "GetAuthCode" in current_url or "getauthcode" in current_url.lower():
+            try:
+                import json as _json, re as _re
+                page_src = driver.page_source
+                body_text = _re.sub(r"<[^>]+>", "", page_src).strip()
+                result = _json.loads(body_text)
+                code = result.get("code")
+                if code:
+                    logger.info("Auth code captured from GetAuthCode page source")
+                    return code
+            except Exception as _e:
+                logger.debug("GetAuthCode page source parse failed: %s", _e)
+
         if time.time() - start > 60:
             if otp_value and creds.get("totp_key"):
                 new_otp = pyotp.TOTP(creds["totp_key"]).now()
@@ -205,7 +239,7 @@ def _capture_auth_code(driver, creds: dict) -> Optional[str]:
 
 # ── Main OAuth flow ───────────────────────────────────────────────────────────
 
-def run_oauth_login(config=None) -> Optional[str]:
+def run_oauth_login(config=None):
     """
     Execute the daily Shoonya OAuth login flow (SEBI compliance).
 
@@ -214,6 +248,10 @@ def run_oauth_login(config=None) -> Optional[str]:
                 oauth_secret attributes. If None, reads from environment.
 
     Returns:
+        Tuple (susertoken, access_token) on success, (None, None) on failure.
+        For backwards compatibility callers that expect a plain string:
+        the returned object is a str subclass equal to susertoken but with an
+        extra `access_token` attribute when access_token is also available.
         Access token string on success, None on failure.
     """
     if config is not None:
@@ -265,26 +303,30 @@ def run_oauth_login(config=None) -> Optional[str]:
     ).hexdigest()
 
     # Call GenAcsTok to complete activation
-    payload = f'jData={{"code":"{auth_code}","checksum":"{checksum}"}}'
-    headers = {"Authorization": f"Bearer {checksum}"}
+    # uid field is required — server returns empty body (→ JSONDecodeError) without it
+    payload = f'jData={{"code":"{auth_code}","uid":"{creds["user_id"]}","checksum":"{checksum}"}}'
 
     try:
-        resp = requests.post(_TOKEN_URL, data=payload, headers=headers, timeout=30)
+        resp = requests.post(_TOKEN_URL, data=payload, timeout=30)
         result = resp.json()
         logger.info("GenAcsTok: stat=%s", result.get("stat"))
+        logger.info("GenAcsTok fields: stat=%s susertoken=%s access_token=%s USERID=%s actid=%s",
+                    result.get("stat"), bool(result.get("susertoken")),
+                    bool(result.get("access_token")), result.get("USERID"), result.get("actid"))
 
-        if result.get("stat") == "Ok":
-            token = (
-                result.get("ActTok")
-                or result.get("access_token")
-                or result.get("susertoken")
-            )
-            if token:
-                logger.info("✅ Daily OAuth login successful (SEBI compliant)")
-                return token
-            logger.warning("OAuth response OK but no token found: %s", result)
-        else:
-            logger.error("GenAcsTok error: %s", result)
+        # New Shoonya OAuth returns access_token + susertoken (Bearer auth required)
+        # Older flow returned stat=Ok + susertoken (jKey auth)
+        susertoken = result.get("susertoken")
+        access_token = result.get("access_token")
+        userid = result.get("USERID") or result.get("uid") or creds["user_id"]
+        actid = result.get("actid") or userid
+
+        success = (result.get("stat") == "Ok" or "access_token" in result) and susertoken
+
+        if success:
+            logger.info("✅ Daily OAuth login successful (SEBI compliant)")
+            return _make_token_result(susertoken, access_token or "", userid, actid)
+        logger.warning("OAuth response missing tokens: %s", result)
 
     except Exception as exc:
         logger.exception("GenAcsTok request failed: %s", exc)

@@ -67,7 +67,7 @@ function SummaryKPIs({ strategies }: { strategies: any[] }) {
    Strategy Card (rich card with metrics & actions)
    ════════════════════════════════════════════════ */
 function StrategyCardItem({
-  s, isSelected, onSelect, onRun, onStop, onEdit, onDelete,
+  s, isSelected, onSelect, onRun, onStop, onEdit, onDelete, onToggleMode,
 }: {
   s: any
   isSelected: boolean
@@ -76,6 +76,7 @@ function StrategyCardItem({
   onStop: (name: string) => void
   onEdit: (name: string) => void
   onDelete: (name: string) => void
+  onToggleMode: (name: string) => void
 }) {
   const isRunning = s.status === 'running'
   const isError   = s.status === 'error'
@@ -106,10 +107,19 @@ function StrategyCardItem({
                 <TypeIcon className={cn('w-3.5 h-3.5', typeConf.color)} />
               </div>
               <span className="text-[13px] font-semibold text-text-bright truncate capitalize">{displayName}</span>
-              <span className={cn('badge text-[9px]',
-                s.paper_mode ? 'badge-brand' : 'badge-danger')}>
-                {s.paper_mode ? 'PAPER' : 'LIVE'}
-              </span>
+              <button
+                onClick={e => { e.stopPropagation(); if (!isRunning) onToggleMode(s.name) }}
+                title={isRunning ? 'Stop strategy to switch mode' : `Switch to ${s.paper_mode ? 'LIVE' : 'PAPER'} mode`}
+                className={cn(
+                  'text-[9px] px-1.5 py-0.5 rounded font-semibold border transition-colors',
+                  s.paper_mode
+                    ? 'bg-brand/15 text-brand border-brand/30 hover:bg-brand/25'
+                    : 'bg-loss/15 text-loss border-loss/30 hover:bg-loss/25',
+                  isRunning && 'opacity-50 cursor-not-allowed'
+                )}
+              >
+                {s.paper_mode ? '📋 PAPER' : '🔴 LIVE'}
+              </button>
               <span className="badge badge-neutral text-[9px]">{typeConf.label}</span>
             </div>
             <p className="text-[11px] text-text-muted mt-1 line-clamp-2">{s.description || 'No description'}</p>
@@ -895,6 +905,20 @@ export default function StrategyPage() {
     }
   }
 
+  async function handleToggleMode(name: string) {
+    try {
+      const cfg = await api.strategyConfig(name)
+      if (!cfg) { toast('Config not found', 'error'); return }
+      const newMode = !cfg.identity?.paper_mode
+      cfg.identity = { ...cfg.identity, paper_mode: newMode }
+      await api.saveStrategyConfig(cfg)
+      toast(`"${name}" switched to ${newMode ? 'PAPER' : 'LIVE'} mode`, newMode ? 'info' : 'warning')
+      loadSaved()
+    } catch (e: any) {
+      toast(e?.message || 'Failed to toggle mode', 'error')
+    }
+  }
+
   const filtered = savedStrategies.filter((s: any) => {
     if (tab === 'live')  return !s.paper_mode
     if (tab === 'paper') return s.paper_mode
@@ -977,6 +1001,7 @@ export default function StrategyPage() {
                     onStop={handleStop}
                     onEdit={name => navigate(`/app/strategy-builder?name=${encodeURIComponent(name)}`)}
                     onDelete={handleDelete}
+                    onToggleMode={handleToggleMode}
                   />
                 ))}
                 {filtered.length === 0 && (

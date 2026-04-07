@@ -43,17 +43,21 @@ export default function AppLayout() {
 
   // ── Sound alerts: watch order statuses ──
   const prevOrdersRef = useRef<string[]>([])
+  const soundReadyRef  = useRef(false)  // skip first render to avoid replaying old orders
   useEffect(() => {
     if (!settings.soundAlerts || !data?.orders) return
     const current = data.orders
     const prevIds = prevOrdersRef.current
-    current.forEach(o => {
-      if (!prevIds.includes(o.id)) {
-        // new order appeared or status changed
-        if (o.status === 'COMPLETE') playOrderFill()
-        else if (o.status === 'REJECTED' || o.status === 'CANCELLED') playOrderReject()
-      }
-    })
+    if (soundReadyRef.current) {
+      current.forEach(o => {
+        // key = id+status — only triggers when status actually changes
+        if (!prevIds.includes(o.id + o.status)) {
+          if (o.status === 'COMPLETE') playOrderFill()
+          else if (o.status === 'REJECTED' || o.status === 'CANCELLED') playOrderReject()
+        }
+      })
+    }
+    soundReadyRef.current = true
     prevOrdersRef.current = current.map(o => o.id + o.status)
   }, [data?.orders, settings.soundAlerts])
 

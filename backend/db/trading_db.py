@@ -184,6 +184,66 @@ CREATE TABLE IF NOT EXISTS risk_state (
 );
 """
 
+_CREATE_POSITION_SL_SETTINGS = """
+CREATE TABLE IF NOT EXISTS position_sl_settings (
+    user_id         TEXT NOT NULL,
+    config_id       TEXT NOT NULL,
+    pos_key         TEXT NOT NULL,
+    active          BOOLEAN NOT NULL DEFAULT TRUE,
+    stop_loss       DOUBLE PRECISION,
+    target          DOUBLE PRECISION,
+    trailing_value  DOUBLE PRECISION,
+    trail_when      DOUBLE PRECISION,
+    trail_stop      DOUBLE PRECISION,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, config_id, pos_key)
+);
+"""
+
+_CREATE_MARKET_TICKS = """
+CREATE TABLE IF NOT EXISTS market_ticks (
+    id          BIGSERIAL PRIMARY KEY,
+    symbol      VARCHAR(50)  NOT NULL,
+    exchange    VARCHAR(10)  NOT NULL DEFAULT 'NSE',
+    token       VARCHAR(30),
+    ltp         DOUBLE PRECISION NOT NULL,
+    bid         DOUBLE PRECISION,
+    ask         DOUBLE PRECISION,
+    volume      BIGINT,
+    oi          BIGINT,
+    open_price  DOUBLE PRECISION,
+    high_price  DOUBLE PRECISION,
+    low_price   DOUBLE PRECISION,
+    close_price DOUBLE PRECISION,
+    tick_time   TIMESTAMPTZ NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source      VARCHAR(20)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ticks_sym_time ON market_ticks(symbol, tick_time DESC);
+CREATE INDEX IF NOT EXISTS idx_ticks_received  ON market_ticks(received_at DESC);
+"""
+
+_CREATE_MARKET_OHLCV = """
+CREATE TABLE IF NOT EXISTS market_ohlcv (
+    id          BIGSERIAL PRIMARY KEY,
+    symbol      VARCHAR(50) NOT NULL,
+    exchange    VARCHAR(10) NOT NULL DEFAULT 'NSE',
+    timeframe   VARCHAR(5)  NOT NULL,
+    bar_time    TIMESTAMPTZ NOT NULL,
+    open        DOUBLE PRECISION NOT NULL,
+    high        DOUBLE PRECISION NOT NULL,
+    low         DOUBLE PRECISION NOT NULL,
+    close       DOUBLE PRECISION NOT NULL,
+    volume      BIGINT NOT NULL DEFAULT 0,
+    oi          BIGINT,
+    UNIQUE(symbol, exchange, timeframe, bar_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ohlcv_sym_tf_time ON market_ohlcv(symbol, timeframe, bar_time DESC);
+"""
+
 # ─── Connection factory ─────────────────────────────────────────────────────
 
 def get_trading_conn():
@@ -243,6 +303,9 @@ def init_trading_db():
         _CREATE_OPTION_CHAIN,
         _CREATE_COPY_TRADE_CONFIG,
         _CREATE_RISK_STATE,
+        _CREATE_POSITION_SL_SETTINGS,
+        _CREATE_MARKET_TICKS,
+        _CREATE_MARKET_OHLCV,
     ]
     with get_trading_conn() as conn:
         cur = conn.cursor()

@@ -171,3 +171,10 @@ def init_manager_schema():
         raise
     finally:
         conn.close()
+
+    # Also init the unified symbols schema
+    try:
+        from db.symbols_db import init_symbols_schema
+        init_symbols_schema()
+    except Exception as e:
+        logger.warning("Symbols schema init failed (non-fatal): %s", e)

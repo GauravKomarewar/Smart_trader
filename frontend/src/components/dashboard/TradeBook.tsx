@@ -37,24 +37,34 @@ export default function TradeBook() {
               </tr>
             </thead>
             <tbody>
-              {trades.map(t => (
-                <tr key={t.id}>
+              {trades.map((t, i) => {
+                const sym      = (t as any).tradingsymbol ?? (t as any).symbol ?? '—'
+                const side     = ((t as any).transactionType ?? (t as any).side ?? '').toUpperCase()
+                const qty      = (t as any).quantity ?? (t as any).qty ?? 0
+                const price    = (t as any).price ?? 0
+                const value    = (t as any).value != null ? (t as any).value : qty * price
+                const charges  = (t as any).charges ?? 0
+                const tradedAt = (t as any).tradedAt ?? (t as any).timestamp ?? ''
+                const tid      = (t as any).id ?? (t as any).trade_id ?? String(i)
+                return (
+                <tr key={tid}>
                   <td className="px-3 py-2">
-                    <div className="text-[12px] font-medium text-text-bright truncate max-w-[130px]">{t.tradingsymbol}</div>
-                    <div className="text-[10px] text-text-muted">{t.exchange} · {t.product}</div>
+                    <div className="text-[12px] font-medium text-text-bright truncate max-w-[130px]">{sym}</div>
+                    <div className="text-[10px] text-text-muted">{(t as any).exchange} · {(t as any).product}</div>
                   </td>
                   <td className="px-3 py-2">
-                    <span className={cn('badge', t.transactionType === 'BUY' ? 'badge-buy' : 'badge-sell')}>
-                      {t.transactionType}
+                    <span className={cn('badge', side === 'BUY' ? 'badge-buy' : 'badge-sell')}>
+                      {side || '—'}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-[12px] font-mono text-right text-text-pri">{t.quantity}</td>
-                  <td className="px-3 py-2 text-[12px] font-mono text-right text-text-bright">{fmtNum(t.price)}</td>
-                  <td className="px-3 py-2 text-[12px] font-mono text-right text-text-pri">{fmtINR(t.value)}</td>
-                  <td className="px-3 py-2 text-[11px] font-mono text-right text-loss">{fmtINR(t.charges)}</td>
-                  <td className="px-3 py-2 text-[11px] text-text-muted tabular-nums">{fmtTime(t.tradedAt)}</td>
+                  <td className="px-3 py-2 text-[12px] font-mono text-right text-text-pri">{qty}</td>
+                  <td className="px-3 py-2 text-[12px] font-mono text-right text-text-bright">{fmtNum(price)}</td>
+                  <td className="px-3 py-2 text-[12px] font-mono text-right text-text-pri">{fmtINR(value)}</td>
+                  <td className="px-3 py-2 text-[11px] font-mono text-right text-loss">{fmtINR(charges)}</td>
+                  <td className="px-3 py-2 text-[11px] text-text-muted tabular-nums">{fmtTime(tradedAt)}</td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         )}

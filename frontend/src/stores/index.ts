@@ -333,6 +333,8 @@ export interface BrokerAccountWS {
   risk_force_exit: boolean
   error: string | null
   raw_limits: Record<string, any>
+  state?: string
+  data_stale?: boolean
 }
 
 interface BrokerDataWS {

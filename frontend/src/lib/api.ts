@@ -91,6 +91,7 @@ export const api = {
   connectBroker: (id: string) => api.post<any>(`/broker/configs/${id}/connect`, {}),
   disconnectBroker: (id: string) => api.post<any>(`/broker/configs/${id}/disconnect`, {}),
   brokerEnvPreview: (id: string) => api.get<{ env_content: string; warning: string }>(`/broker/configs/${id}/env-preview`),
+  brokerEditCreds: (id: string) => api.get<{ fields: Record<string, string>; broker_id: string; nickname: string }>(`/broker/configs/${id}/edit-creds`),
 
   // ── OMS ──
   omsOrders: () => api.get<any[]>('/oms/orders'),
@@ -128,16 +129,19 @@ export const api = {
   dashboard: (accountId: string) => api.get(`/dashboard/${accountId}`),
 
   // ── Orders ──
-  orders:       (accountId: string) => api.get(`/orders?account=${accountId}`),
-  placeOrder:   (data: unknown)     => api.post('/orders/place', data),
-  cancelOrder:  (id: string)        => api.delete(`/orders/${id}`),
-  modifyOrder:  (id: string, data: unknown) => api.patch(`/orders/${id}`, data),
+  orders:           (accountId: string) => api.get(`/orders?account=${accountId}`),
+  placeOrder:       (data: unknown)     => api.post('/orders/place', data),
+  cancelOrder:      (id: string, accountId: string) => api.delete(`/orders/${id}?account_id=${accountId}`),
+  cancelAllOrders:  (accountId: string) => api.delete(`/orders/cancel-all/${accountId}`),
+  modifyOrder:      (id: string, data: unknown) => api.patch(`/orders/${id}`, data),
 
   // ── Positions ──
-  positions:      (accountId: string) => api.get(`/positions?account=${accountId}`),
-  squareOff:      (data: { symbol: string; exchange: string; product: string; quantity: number; side: string; accountId: string }) =>
+  positions:       (accountId: string) => api.get(`/positions?account=${accountId}`),
+  squareOff:       (data: { symbol: string; exchange: string; product: string; quantity: number; side: string; accountId: string }) =>
     api.post('/orders/squareoff', data),
-  squareOffAll:   (accountId: string)  => api.post('/orders/squareoff-all', { accountId }),
+  squareOffAll:    (accountId: string)  => api.post('/orders/squareoff-all', { accountId }),
+  setSLSettings:   (data: unknown)      => api.put('/orders/positions/sl-settings', data),
+  getSLSettings:   ()                   => api.get('/orders/positions/sl-settings'),
 
   // ── Holdings ──
   holdings: (accountId: string) => api.get(`/holdings?account=${accountId}`),
@@ -162,6 +166,13 @@ export const api = {
   },
   history:    (token: string, interval: string, from: string, to: string) =>
     api.get(`/market/history?token=${token}&interval=${interval}&from=${from}&to=${to}`),
+  marketOhlcv: (symbol: string, timeframe = '1m', exchange = 'NSE', limit = 500) =>
+    api.get<{ symbol: string; exchange: string; timeframe: string; candles: any[] }>(
+      `/market/ohlcv/${encodeURIComponent(symbol)}?timeframe=${timeframe}&exchange=${exchange}&limit=${limit}`
+    ),
+  subscribeSymbols: (symbols: string[]) => api.post('/market/subscribe', { symbols }),
+  latestTick: (symbol: string, exchange = 'NSE') =>
+    api.get<{ symbol: string; tick: any; source: string }>(`/market/tick/${encodeURIComponent(symbol)}?exchange=${exchange}`),
   screener:   (params: Record<string, string>) => {
     const qs = new URLSearchParams(params).toString()
     return api.get(`/market/screener?${qs}`)

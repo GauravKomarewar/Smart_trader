@@ -125,11 +125,36 @@ class BrokerAccountSession:
                         host=min_cfg.shoonya_host,
                         websocket=min_cfg.shoonya_websocket,
                     )
-                self._client.set_session(
-                    userid=creds.get("USER_ID", ""),
-                    password="",
-                    usertoken=token,
-                )
+                # Extract access_token if token is a _TokenResult (from OAuth flow)
+                _access_token = getattr(token, "access_token", None)
+                _oauth_userid = getattr(token, "userid", None) or creds.get("USER_ID", "")
+                _oauth_actid  = getattr(token, "actid",  None) or _oauth_userid
+
+                # Support both NorenRestApiPy 3-arg (usertoken) and 4-arg (+ accesstoken) versions
+                import inspect as _ins
+                _ss_params = list(_ins.signature(self._client.set_session).parameters)
+                if len(_ss_params) >= 4 and "accesstoken" in _ss_params:
+                    self._client.set_session(
+                        userid=creds.get("USER_ID", ""),
+                        password="",
+                        usertoken=str(token),
+                        accesstoken=_access_token or str(token),
+                    )
+                else:
+                    self._client.set_session(
+                        userid=creds.get("USER_ID", ""),
+                        password="",
+                        usertoken=str(token),
+                    )
+
+                # Shoonya requires Bearer auth for all API calls.
+                # Use susertoken (str(token)) as Bearer — proven to work with Shoonya API.
+                # access_token from OAuth GenAcsTok may be a different JWT not accepted by data endpoints.
+                _bearer = str(token) or _access_token or ""
+                if _bearer and hasattr(self._client, "injectOAuthHeader"):
+                    self._client.injectOAuthHeader(_bearer, _oauth_userid, _oauth_actid)
+                    self._log.info("Bearer OAuth header injected for user=%s (using susertoken)", _oauth_userid)
+
                 self.mode          = "live"
                 self.connected_at  = datetime.now(timezone.utc)
                 self.last_heartbeat = self.connected_at
@@ -154,6 +179,9 @@ class BrokerAccountSession:
             except Exception as _ae:
                 self._log.warning("ShoonyaAdapter init failed (non-fatal): %s", _ae)
 
+            # Reset circuit-breaker so data calls flow immediately after token refresh
+            self._consecutive_data_failures = 0
+            self._stale_since = None
             self._log.info("inject_shoonya_token succeeded — mode=live")
             return True
         except Exception as e:
@@ -445,6 +473,11 @@ class BrokerAccountSession:
             return False
         return True
 
+    @property
+    def is_data_stale(self) -> bool:
+        """Public read-only check for managers — True if session circuit is open."""
+        return self._stale_since is not None
+
     def _record_data_success(self):
         """Reset failure counter on successful data fetch."""
         if self._stale_since is not None:
@@ -592,8 +625,10 @@ class BrokerAccountSession:
     _TOKEN_CACHE_FILE = "/home/ubuntu/.shoonya_token.json"
     _TOKEN_MAX_AGE_HOURS = 5  # Shoonya tokens valid ~6h; use within 5h
 
-    def _load_cached_shoonya_token(self, user_id: str) -> str | None:
-        """Load a previously-saved Shoonya token from the shared cache file."""
+    def _load_cached_shoonya_token(self, user_id: str):
+        """Load a previously-saved Shoonya token from the shared cache file.
+        Returns a _TokenResult (str subclass) with .access_token attribute, or None.
+        """
         import json as _json, os as _os
         from datetime import datetime, timedelta
         try:
@@ -608,32 +643,46 @@ class BrokerAccountSession:
             if age > timedelta(hours=self._TOKEN_MAX_AGE_HOURS):
                 self._log.info("Cached Shoonya token expired (%.1fh old)", age.total_seconds() / 3600)
                 return None
-            token = data.get("token", "")
-            if not token:
+            susertoken = data.get("token", "")
+            if not susertoken:
                 return None
+            access_token = data.get("access_token", "") or ""
             # Validate the token with a lightweight API call
-            if self._validate_shoonya_token(user_id, token):
+            if self._validate_shoonya_token(user_id, susertoken, access_token=access_token):
                 self._log.info("Cached Shoonya token is VALID (%.1fh old, source=%s)",
                                age.total_seconds() / 3600, data.get("source", "unknown"))
-                return token
+                from broker.oauth_login import _make_token_result
+                return _make_token_result(susertoken, access_token, user_id, user_id)
             self._log.info("Cached Shoonya token INVALID (session expired)")
             return None
         except Exception as e:
             self._log.debug("Could not load cached Shoonya token: %s", e)
             return None
 
-    def _validate_shoonya_token(self, user_id: str, token: str) -> bool:
-        """Quick validation — call Limits endpoint to check if token is alive."""
+    def _validate_shoonya_token(self, user_id: str, token: str, access_token: str = "") -> bool:
+        """Quick validation — call Limits endpoint to check if token is alive.
+        Tries Bearer auth first (OAuth v2), falls back to jKey (direct login).
+        """
         import json as _json, requests
         try:
             payload = _json.dumps({"uid": user_id, "actid": user_id})
             for host in ["https://api.shoonya.com/NorenWClientAPI", "https://trade.shoonya.com/NorenWClientAPI"]:
                 try:
-                    resp = requests.post(
-                        f"{host}/Limits",
-                        data="jData=" + payload + f"&jKey={token}",
-                        timeout=8,
-                    )
+                    # Try Bearer auth if access_token is available (OAuth v2 sessions)
+                    if access_token:
+                        resp = requests.post(
+                            f"{host}/Limits",
+                            data="jData=" + payload,
+                            headers={"Authorization": f"Bearer {access_token}",
+                                     "Content-Type": "application/json; charset=utf-8"},
+                            timeout=8,
+                        )
+                    else:
+                        resp = requests.post(
+                            f"{host}/Limits",
+                            data="jData=" + payload + f"&jKey={token}",
+                            timeout=8,
+                        )
                     if resp.status_code == 200:
                         result = _json.loads(resp.text)
                         if result.get("stat") == "Ok":
@@ -648,20 +697,25 @@ class BrokerAccountSession:
         except Exception:
             return False
 
-    def _save_cached_shoonya_token(self, user_id: str, token: str, source: str = "direct_api"):
-        """Save token to shared cache file for cross-platform reuse."""
+    def _save_cached_shoonya_token(self, user_id: str, token, source: str = "direct_api"):
+        """Save token to shared cache file for cross-platform reuse.
+        token may be a _TokenResult (has .access_token) or plain str.
+        """
         import json as _json
         from datetime import datetime
         try:
+            access_token = getattr(token, "access_token", "") or ""
             data = {
                 "user_id": user_id,
-                "token": token,
+                "token": str(token),
+                "access_token": access_token,
                 "timestamp": datetime.now().isoformat(),
                 "source": source,
             }
             with open(self._TOKEN_CACHE_FILE, "w") as f:
                 _json.dump(data, f)
-            self._log.info("Saved Shoonya token to cache file (source=%s)", source)
+            self._log.info("Saved Shoonya token to cache file (source=%s, has_access_token=%s)",
+                           source, bool(access_token))
         except Exception as e:
             self._log.debug("Could not save Shoonya token cache: %s", e)
 
@@ -1508,6 +1562,95 @@ class MultiAccountRegistry:
                 "message": f"No active session for account {config_id}. Please connect first.",
             }
         return sess.place_order(order)
+
+    def cancel_order(
+        self,
+        user_id:   str,
+        config_id: str,
+        order_id:  str,
+    ) -> dict:
+        """Cancel a single open order on the specified broker account."""
+        sess = self.get_session(user_id, config_id)
+        if not sess:
+            return {"success": False, "message": f"No active session for account {config_id}"}
+        if not sess.is_live:
+            return {"success": False, "message": "Session not live"}
+        try:
+            if sess._adapter is not None:
+                result = sess._call_with_relogin(sess._adapter.cancel_order, order_id)
+                if isinstance(result, dict):
+                    return result
+                return {"success": True, "order_id": order_id}
+            return {"success": False, "message": "Adapter not available"}
+        except Exception as e:
+            logger.error("cancel_order error config=%s order=%s: %s", config_id, order_id, e)
+            return {"success": False, "message": str(e)}
+
+    def cancel_all_orders(
+        self,
+        user_id:   str,
+        config_id: str,
+    ) -> dict:
+        """Cancel all open orders on the specified broker account."""
+        sess = self.get_session(user_id, config_id)
+        if not sess:
+            return {"success": False, "message": f"No active session for account {config_id}"}
+        if not sess.is_live:
+            return {"success": False, "message": "Session not live"}
+        try:
+            # Get current open orders
+            orders = sess.get_order_book()
+            open_orders = [o for o in orders
+                           if str(o.get("status", "")).upper() in ("OPEN", "PENDING", "TRIGGER PENDING", "AMO REQ RECEIVED", "VALIDATION PENDING")]
+            if not open_orders:
+                return {"success": True, "cancelled": 0, "message": "No open orders"}
+
+            cancelled = 0
+            errors = []
+            for o in open_orders:
+                oid = str(o.get("order_id") or o.get("norenordno") or o.get("id") or "")
+                if not oid:
+                    continue
+                try:
+                    if sess._adapter is not None:
+                        sess._call_with_relogin(sess._adapter.cancel_order, oid)
+                        cancelled += 1
+                except Exception as e:
+                    errors.append(f"{oid}: {e}")
+
+            return {
+                "success": True,
+                "cancelled": cancelled,
+                "errors": errors,
+                "message": f"Cancelled {cancelled}/{len(open_orders)} orders",
+            }
+        except Exception as e:
+            logger.error("cancel_all_orders error config=%s: %s", config_id, e)
+            return {"success": False, "message": str(e)}
+
+    def modify_order(
+        self,
+        user_id:   str,
+        config_id: str,
+        order_id:  str,
+        params:    dict,
+    ) -> dict:
+        """Modify an open order on the specified broker account."""
+        sess = self.get_session(user_id, config_id)
+        if not sess:
+            return {"success": False, "message": f"No active session for account {config_id}"}
+        if not sess.is_live:
+            return {"success": False, "message": "Session not live"}
+        try:
+            if sess._adapter is not None:
+                result = sess._call_with_relogin(sess._adapter.modify_order, order_id, params)
+                if isinstance(result, dict):
+                    return result
+                return {"success": True, "order_id": order_id}
+            return {"success": False, "message": "Adapter not available"}
+        except Exception as e:
+            logger.error("modify_order error config=%s order=%s: %s", config_id, order_id, e)
+            return {"success": False, "message": str(e)}
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

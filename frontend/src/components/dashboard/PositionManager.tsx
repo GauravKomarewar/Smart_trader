@@ -150,26 +150,41 @@ export default function PositionManager() {
   }
 
   // PM: activate/update managed exit for a row
-  function activateManaged(posKey: string) {
+  async function activateManaged(posKey: string, accountId: string) {
     const edits = pmEdits[posKey] ?? {}
+    const settings = {
+      stop_loss:      edits.stop_loss      ? parseFloat(edits.stop_loss)      : managed[posKey]?.stop_loss,
+      target:         edits.target         ? parseFloat(edits.target)         : managed[posKey]?.target,
+      trailing_value: edits.trailing_value ? parseFloat(edits.trailing_value) : managed[posKey]?.trailing_value,
+      trail_when:     edits.trail_when     ? parseFloat(edits.trail_when)     : managed[posKey]?.trail_when,
+    }
     setManaged(prev => ({
       ...prev,
-      [posKey]: {
-        active: true,
-        stop_loss:      edits.stop_loss      ? parseFloat(edits.stop_loss)      : prev[posKey]?.stop_loss,
-        target:         edits.target         ? parseFloat(edits.target)         : prev[posKey]?.target,
-        trailing_value: edits.trailing_value ? parseFloat(edits.trailing_value) : prev[posKey]?.trailing_value,
-        trail_when:     edits.trail_when     ? parseFloat(edits.trail_when)     : prev[posKey]?.trail_when,
-      },
+      [posKey]: { active: true, ...settings },
     }))
-    // Clear pending edits for this row
     setPmEdits(prev => { const n = { ...prev }; delete n[posKey]; return n })
-    toast(`Position manager activated`, 'success')
+    try {
+      await api.setSLSettings({
+        configId: accountId,
+        posKey,
+        active: true,
+        stopLoss: settings.stop_loss || null,
+        target: settings.target || null,
+        trailingValue: settings.trailing_value || null,
+        trailWhen: settings.trail_when || null,
+      })
+      toast(`Position manager ACTIVE — SL/TG/Trail monitoring started`, 'success')
+    } catch {
+      toast('Failed to save SL settings to server', 'error')
+    }
   }
 
-  function deactivateManaged(posKey: string) {
+  async function deactivateManaged(posKey: string, accountId: string) {
     setManaged(prev => { const n = { ...prev }; delete n[posKey]; return n })
     setPmEdits(prev => { const n = { ...prev }; delete n[posKey]; return n })
+    try {
+      await api.setSLSettings({ configId: accountId, posKey, active: false })
+    } catch { /* non-fatal */ }
     toast(`Position manager deactivated`, 'info')
   }
 
@@ -352,12 +367,12 @@ export default function PositionManager() {
                       </td>
                       <td className="px-2 py-1.5">
                         <div className="flex items-center gap-1">
-                          <button onClick={() => activateManaged(posKey)}
+                          <button onClick={() => activateManaged(posKey, accountId)}
                             className="text-[10px] px-2 py-1 rounded border border-brand/60 text-brand hover:bg-brand/10 transition-colors font-medium whitespace-nowrap">
                             {isMgd ? 'Update' : 'Activate'}
                           </button>
                           {isMgd && (
-                            <button onClick={() => deactivateManaged(posKey)}
+                            <button onClick={() => deactivateManaged(posKey, accountId)}
                               className="text-[10px] px-2 py-1 rounded border border-loss/40 text-loss hover:bg-loss/10 transition-colors font-medium">
                               Off
                             </button>

@@ -172,6 +172,11 @@ function BrokerAccountCard({ acc }: { acc: BrokerAccountInfo }) {
               {acc.risk_status ? 'Risk OK' : 'Risk Halt'}
             </span>
           )}
+          {isLive && acc.data_stale && (
+            <span className="text-[9px] font-medium px-1.5 py-0.5 rounded border text-warning border-warning/30 bg-warning/10">
+              ⚠ Stale data
+            </span>
+          )}
         </div>
       </div>
 

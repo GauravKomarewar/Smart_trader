@@ -20,6 +20,8 @@ Funds:     fund_limit list: [{title, equityAmount}]
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from broker.adapters.base import BrokerAdapter, Funds, Holding, Order, Position, Trade
@@ -86,6 +88,12 @@ class FyersAdapter(BrokerAdapter):
         self._token  = token
         self._client: Optional[Any] = None   # FyersBrokerClient instance
         self._connected = False
+        self._lock = threading.RLock()
+        # ── Circuit breaker (prevents thundering herd on -429) ──
+        self._cb_lock = threading.Lock()  # dedicated lock for circuit state
+        self._cb_open_until: float = 0.0  # monotonic; 0 = circuit closed
+        self._cb_half_open = False         # True = one probe call in flight
+        self._cb_backoff: float = 120.0    # doubles on each failure, max 600s
 
         if token:
             self._build_client(token)
@@ -114,13 +122,27 @@ class FyersAdapter(BrokerAdapter):
             raw_access_token = token
 
         try:
-            self._client = FyersModel(
+            new_client = FyersModel(
                 client_id=app_id,
                 token=raw_access_token,
                 log_level="ERROR",
             )
-            self._connected = True
+            with self._lock:
+                self._client = new_client
+                self._connected = True
+            # Circuit is CLOSED after a fresh login — allow all calls through.
+            # The half-open probe is only used when recovering from a rate-limit.
+            with self._cb_lock:
+                self._cb_open_until = 0.0    # circuit closed
+                self._cb_half_open = False   # no probe in flight
+                self._cb_backoff = 120.0
             logger.info("Fyers client initialised for client=%s", client_id)
+            # Share the valid token with the global FyersDataClient (market data)
+            try:
+                from broker.fyers_client import get_fyers_client
+                get_fyers_client().inject_token(app_id, raw_access_token)
+            except Exception as _inj_err:
+                logger.debug("Could not inject token into data client: %s", _inj_err)
         except Exception as e:
             logger.error("FyersModel init failed: %s", e)
 
@@ -129,22 +151,68 @@ class FyersAdapter(BrokerAdapter):
     # ── Connection ─────────────────────────────────────────────────────────────
 
     def is_connected(self) -> bool:
-        return self._connected and self._client is not None
+        with self._lock:
+            return self._connected and self._client is not None
+
+    def _circuit_allow(self) -> bool:
+        """Return True if this call may proceed (CLOSED or HALF-OPEN probe).
+
+        CLOSED     → allow all.
+        HALF-OPEN  → block all while a probe is in flight.
+        OPEN       → block until backoff expires, then let EXACTLY ONE probe through.
+        """
+        with self._cb_lock:
+            # If a probe is already in flight, block all others regardless of state
+            if self._cb_half_open:
+                return False
+            now = time.monotonic()
+            if self._cb_open_until == 0.0:      # CLOSED → allow all
+                return True
+            if now >= self._cb_open_until:      # Backoff expired → single probe
+                self._cb_half_open = True
+                return True
+            return False                        # OPEN → still waiting
+
+    def _circuit_success(self) -> None:
+        """Call after a successful Fyers API response to close the circuit."""
+        with self._cb_lock:
+            self._cb_open_until = 0.0
+            self._cb_half_open = False
+            self._cb_backoff = 120.0  # reset for next failure
+
+    def _circuit_trip(self) -> None:
+        """Call on -429 to open the circuit with exponential backoff."""
+        with self._cb_lock:
+            backoff = self._cb_backoff
+            self._cb_open_until = time.monotonic() + backoff
+            self._cb_half_open = False
+            self._cb_backoff = min(backoff * 2, 600.0)  # cap at 10 min
+        logger.warning("Fyers rate limit — circuit open for %.0fs (client=%s)",
+                       backoff, self.client_id)
 
     # ── Positions ──────────────────────────────────────────────────────────────
 
     def get_positions(self) -> List[Position]:
-        if not self.is_connected():
-            return []
-        assert self._client is not None  # guaranteed by is_connected()
-        try:
-            resp = self._client.positions()
-            if not isinstance(resp, dict) or resp.get("s") != "ok":
+        with self._lock:
+            if not (self._connected and self._client is not None):
                 return []
+            client = self._client
+        if not self._circuit_allow():
+            return []
+        try:
+            resp = client.positions()
+            if not isinstance(resp, dict) or resp.get("s") != "ok":
+                if isinstance(resp, dict) and resp.get("code") == -429:
+                    self._circuit_trip()
+                return []
+            self._circuit_success()
             raw_list = resp.get("netPositions") or []
             return [self._enrich(self._map_position(p)) for p in raw_list]
         except Exception as e:
-            logger.error("get_positions error: %s", e)
+            if "429" in str(e):
+                self._circuit_trip()
+            else:
+                logger.error("get_positions error: %s", e)
             return []
 
     @staticmethod
@@ -185,17 +253,26 @@ class FyersAdapter(BrokerAdapter):
     # ── Order book ─────────────────────────────────────────────────────────────
 
     def get_order_book(self) -> List[Order]:
-        if not self.is_connected():
-            return []
-        assert self._client is not None  # guaranteed by is_connected()
-        try:
-            resp = self._client.orderbook()
-            if not isinstance(resp, dict) or resp.get("s") != "ok":
+        with self._lock:
+            if not (self._connected and self._client is not None):
                 return []
+            client = self._client
+        if not self._circuit_allow():
+            return []
+        try:
+            resp = client.orderbook()
+            if not isinstance(resp, dict) or resp.get("s") != "ok":
+                if isinstance(resp, dict) and resp.get("code") == -429:
+                    self._circuit_trip()
+                return []
+            self._circuit_success()
             raw_list = resp.get("orderBook") or []
             return [self._enrich(self._map_order(o)) for o in raw_list]
         except Exception as e:
-            logger.error("get_order_book error: %s", e)
+            if "429" in str(e):
+                self._circuit_trip()
+            else:
+                logger.error("get_order_book error: %s", e)
             return []
 
     @staticmethod
@@ -239,13 +316,19 @@ class FyersAdapter(BrokerAdapter):
     # ── Funds ──────────────────────────────────────────────────────────────────
 
     def get_funds(self) -> Funds:
-        if not self.is_connected():
-            return self._enrich(Funds(available_cash=0.0))
-        assert self._client is not None  # guaranteed by is_connected()
-        try:
-            resp = self._client.funds()
-            if not isinstance(resp, dict) or resp.get("s") != "ok":
+        with self._lock:
+            if not (self._connected and self._client is not None):
                 return self._enrich(Funds(available_cash=0.0))
+            client = self._client
+        if not self._circuit_allow():
+            return self._enrich(Funds(available_cash=0.0))
+        try:
+            resp = client.funds()
+            if not isinstance(resp, dict) or resp.get("s") != "ok":
+                if isinstance(resp, dict) and resp.get("code") == -429:
+                    self._circuit_trip()
+                return self._enrich(Funds(available_cash=0.0))
+            self._circuit_success()
             # fund_limit is a list of dicts with 'title' and 'equityAmount' keys
             fund_list = resp.get("fund_limit") or []
             fund_map = {item.get("title", ""): item for item in fund_list}
@@ -258,23 +341,35 @@ class FyersAdapter(BrokerAdapter):
                 total_balance=total,
             ))
         except Exception as e:
-            logger.error("get_funds error: %s", e)
+            if "429" in str(e):
+                self._circuit_trip()
+            else:
+                logger.error("get_funds error: %s", e)
             return self._enrich(Funds(available_cash=0.0))
 
     # ── Holdings ───────────────────────────────────────────────────────────────
 
     def get_holdings(self) -> List[Holding]:
-        if not self.is_connected():
-            return []
-        assert self._client is not None  # guaranteed by is_connected()
-        try:
-            resp = self._client.holdings()
-            if not isinstance(resp, dict) or resp.get("s") != "ok":
+        with self._lock:
+            if not (self._connected and self._client is not None):
                 return []
+            client = self._client
+        if not self._circuit_allow():
+            return []
+        try:
+            resp = client.holdings()
+            if not isinstance(resp, dict) or resp.get("s") != "ok":
+                if isinstance(resp, dict) and resp.get("code") == -429:
+                    self._circuit_trip()
+                return []
+            self._circuit_success()
             raw_list = resp.get("holdings") or []
             return [self._enrich(self._map_holding(h)) for h in raw_list]
         except Exception as e:
-            logger.warning("get_holdings error: %s", e)
+            if "429" in str(e):
+                self._circuit_trip()
+            else:
+                logger.warning("get_holdings error: %s", e)
             return []
 
     @staticmethod
@@ -299,17 +394,29 @@ class FyersAdapter(BrokerAdapter):
     # ── Tradebook ──────────────────────────────────────────────────────────────
 
     def get_tradebook(self) -> List[Trade]:
-        if not self.is_connected():
-            return []
-        assert self._client is not None  # guaranteed by is_connected()
-        try:
-            resp = self._client.tradebook()
-            if not isinstance(resp, dict) or resp.get("s") != "ok":
+        with self._lock:
+            if not (self._connected and self._client is not None):
                 return []
+            client = self._client
+        if not self._circuit_allow():
+            return []
+        try:
+            resp = client.tradebook()
+            if not isinstance(resp, dict) or resp.get("s") != "ok":
+                code = resp.get("code") if isinstance(resp, dict) else None
+                if code == -429:
+                    self._circuit_trip()
+                    return []
+                logger.warning("get_tradebook non-ok response: %s", resp)
+                return []
+            self._circuit_success()
             raw_list = resp.get("tradeBook") or []
             return [self._enrich(self._map_trade(t)) for t in raw_list]
         except Exception as e:
-            logger.warning("get_tradebook error: %s", e)
+            if "429" in str(e):
+                self._circuit_trip()
+            else:
+                logger.warning("get_tradebook error: %s", e)
             return []
 
     @staticmethod
@@ -348,8 +455,10 @@ class FyersAdapter(BrokerAdapter):
             price       → limitPrice
             trigger_price → stopPrice
         """
-        if not self.is_connected():
-            return {"success": False, "message": "Not connected"}
+        with self._lock:
+            if not (self._connected and self._client is not None):
+                return {"success": False, "message": "Not connected"}
+            client = self._client
         try:
             sym = order.get("symbol", "")
             exch = order.get("exchange", "NSE")
@@ -378,7 +487,7 @@ class FyersAdapter(BrokerAdapter):
                 "offlineOrder":  False,
             }
 
-            result = self._client.place_order(data=fyers_order)
+            result = client.place_order(data=fyers_order)
             # FyersModel.place_order returns dict: {"s": "ok", "id": "...", "code": 1101, "message": "..."}
             if isinstance(result, dict):
                 ok = result.get("s") == "ok"
@@ -396,11 +505,13 @@ class FyersAdapter(BrokerAdapter):
 
     def get_ltp(self, exchange: str, symbol: str) -> Optional[float]:
         """Fetch last traded price via Fyers quotes API."""
-        if not self.is_connected():
-            return None
+        with self._lock:
+            if not (self._connected and self._client is not None):
+                return None
+            client = self._client
         try:
             fyers_sym = f"{exchange}:{symbol}" if ":" not in symbol else symbol
-            resp = self._client.quotes({"symbols": fyers_sym})
+            resp = client.quotes({"symbols": fyers_sym})
             if isinstance(resp, dict) and resp.get("s") == "ok":
                 data_list = resp.get("d", [])
                 if data_list:
@@ -413,11 +524,12 @@ class FyersAdapter(BrokerAdapter):
             return None
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
-        if not self.is_connected():
-            return {"success": False, "message": "Not connected"}
-        assert self._client is not None  # guaranteed by is_connected()
+        with self._lock:
+            if not (self._connected and self._client is not None):
+                return {"success": False, "message": "Not connected"}
+            client = self._client
         try:
-            result = self._client.cancel_order(data={"id": order_id})
+            result = client.cancel_order(data={"id": order_id})
             if isinstance(result, dict):
                 ok = result.get("s") == "ok"
                 return {"success": ok, "message": result.get("message", "")}
@@ -427,12 +539,13 @@ class FyersAdapter(BrokerAdapter):
             return {"success": False, "message": str(e)}
 
     def modify_order(self, order_id: str, modifications: Dict[str, Any]) -> Dict[str, Any]:
-        if not self.is_connected():
-            return {"success": False, "message": "Not connected"}
-        assert self._client is not None  # guaranteed by is_connected()
+        with self._lock:
+            if not (self._connected and self._client is not None):
+                return {"success": False, "message": "Not connected"}
+            client = self._client
         try:
             modify_data = {"id": order_id, **modifications}
-            result = self._client.modify_order(data=modify_data)
+            result = client.modify_order(data=modify_data)
             if isinstance(result, dict):
                 ok = result.get("s") == "ok"
                 return {"success": ok, "message": result.get("message", "")}

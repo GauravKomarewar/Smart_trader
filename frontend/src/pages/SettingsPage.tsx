@@ -267,7 +267,19 @@ function BrokersSection() {
         sensitive: f.sensitive ?? (f.type === 'password'),
       })))
     } catch { setFields([]) }
-    setEditCreds({})
+
+    // Pre-populate from saved credentials
+    try {
+      const saved = await api.brokerEditCreds(cfg.id)
+      // __SAVED__ means sensitive field has a value — show blank with placeholder
+      const prefilled: Record<string, string> = {}
+      for (const [k, v] of Object.entries(saved.fields ?? {})) {
+        prefilled[k] = v === '__SAVED__' ? '' : v
+      }
+      setEditCreds(prefilled)
+    } catch {
+      setEditCreds({})
+    }
   }
 
   async function handleEditSave(e: React.FormEvent) {
@@ -517,7 +529,7 @@ function BrokersSection() {
                 <TextInput value={editNickname} onChange={setEditNickname} />
               </div>
               <div className="text-[11px] text-text-muted">
-                Leave credential fields blank to keep existing values.
+                Leave sensitive fields blank to keep existing encrypted values.
               </div>
               {fields.map((f: any) => (
                 <div key={f.id}>
@@ -528,7 +540,7 @@ function BrokersSection() {
                     value={editCreds[f.id] ?? ''}
                     onChange={v => setEditCreds(prev => ({ ...prev, [f.id]: v }))}
                     type={f.sensitive ? 'password' : 'text'}
-                    placeholder={`Leave blank to keep ${f.sensitive ? 'encrypted' : 'existing'} value`}
+                    placeholder={f.sensitive ? '(saved — leave blank to keep)' : (f.placeholder ?? '')}
                   />
                 </div>
               ))}

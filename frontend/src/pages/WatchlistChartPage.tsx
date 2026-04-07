@@ -8,6 +8,7 @@ import { useWatchlistStore, useToastStore, useUIStore } from '../stores'
 import { useInstrumentSearch, useKeyboard } from '../hooks'
 import { cn, fmtNum, changeCls, fmtVol } from '../lib/utils'
 import { api } from '../lib/api'
+import { marketWs, type MarketTick } from '../lib/ws'
 import {
   Search, Plus, X, BarChart2, BookOpen, ChevronDown,
   TrendingUp, TrendingDown, Trash2, MoreHorizontal,
@@ -15,21 +16,36 @@ import {
 } from 'lucide-react'
 import type { WatchlistItem, ChartInterval } from '../types'
 
-// ── Live quote cache (fetched from API) ──────────────────
-const _quoteCache: Record<string, { ltp: number; changePct: number; change: number; volume: number }> = {}
+// ── Live quote cache (from /ws/market) ───────────────
+const _liveQuotes: Record<string, { ltp: number; changePct: number; change: number; volume: number }> = {}
 
-function getCachedQuote(symbol: string) {
-  return _quoteCache[symbol] ?? { ltp: 0, changePct: 0, change: 0, volume: 0 }
+/** Normalize a symbol for comparison: strip exchange prefix, suffixes, and spaces. */
+function normSym(s: string): string {
+  const stripped = s.toUpperCase().split(':').pop() ?? s.toUpperCase()
+  return stripped
+    .replace(/-INDEX$/, '')
+    .replace(/-EQ$/, '')
+    .replace(/-BE$/, '')
+    .replace(/\s+/g, '')
 }
 
-async function fetchQuote(symbol: string) {
+// Kick off connection once the module is loaded
+marketWs.connect()
+
+async function fetchRestQuote(symbol: string) {
   try {
     const res = await api.get(`/market/quote/${encodeURIComponent(symbol)}`) as any
     if (res && res.ltp) {
-      _quoteCache[symbol] = { ltp: res.ltp, changePct: res.changePct ?? 0, change: res.change ?? 0, volume: res.volume ?? 0 }
+      _liveQuotes[normSym(symbol)] = {
+        ltp: res.ltp, changePct: res.changePct ?? 0,
+        change: res.change ?? 0, volume: res.volume ?? 0,
+      }
     }
   } catch { /* silent */ }
-  return getCachedQuote(symbol)
+}
+
+function getLiveQuote(symbol: string) {
+  return _liveQuotes[normSym(symbol)] ?? { ltp: 0, changePct: 0, change: 0, volume: 0 }
 }
 
 const CHART_INTERVALS: ChartInterval[] = ['1m','3m','5m','15m','30m','1h','4h','D','W']
@@ -126,6 +142,14 @@ function WatchlistPanel({ selected, onSelect }: {
   // Keyboard: '/' to open search
   useKeyboard('/', () => setShowSearch(true))
 
+  // Subscribe all watchlist symbols to MarketWS when the watchlist loads
+  useEffect(() => {
+    const items = activeWL?.items ?? []
+    if (items.length) {
+      marketWs.subscribe(items.map(i => i.symbol))
+    }
+  }, [activeWL?.items?.length])
+
   return (
     <>
       {/* Header */}
@@ -171,9 +195,9 @@ function WatchlistPanel({ selected, onSelect }: {
           </div>
         )}
 
-        {/* Search bar */}
+        {/* Search bar + results */}
         <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-muted" />
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-muted z-10" />
           <input
             ref={searchRef}
             value={search}
@@ -184,41 +208,41 @@ function WatchlistPanel({ selected, onSelect }: {
             placeholder="Search & add (press /)"
           />
           {search && (
-            <button onClick={() => setSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-text-muted">
+            <button onClick={() => setSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-text-muted z-10">
               <X className="w-3.5 h-3.5" />
             </button>
           )}
-        </div>
 
-        {/* Search results dropdown */}
-        {showSearch && search.length >= 2 && (
-          <div className="absolute left-3 right-3 top-[calc(100%+2px)] z-50 bg-bg-elevated border border-border rounded-lg shadow-modal overflow-hidden">
-            {loading ? (
-              <div className="p-3 text-[11px] text-text-muted text-center">Searching…</div>
-            ) : results.length === 0 ? (
-              <div className="p-3 text-[11px] text-text-muted text-center">No results</div>
-            ) : (
-              <div className="max-h-60 overflow-y-auto">
-                {results.map((r: any, i) => (
-                  <button
-                    key={i}
-                    onMouseDown={() => {
-                      addItem(activeId, { symbol: r.symbol, tradingsymbol: r.tradingsymbol, exchange: r.exchange, type: r.type })
-                      setSearch('')
-                    }}
-                    className="w-full flex items-center gap-3 px-3 py-2 hover:bg-bg-hover text-left transition-colors"
-                  >
-                    <div className="flex-1">
-                      <div className="text-[12px] font-medium text-text-bright">{r.symbol}</div>
-                      <div className="text-[10px] text-text-muted">{r.exchange} · {r.type}</div>
-                    </div>
-                    <Plus className="w-3.5 h-3.5 text-brand" />
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+          {/* Search results dropdown */}
+          {showSearch && search.length >= 2 && (
+            <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-bg-elevated border border-border rounded-lg shadow-modal overflow-hidden">
+              {loading ? (
+                <div className="p-3 text-[11px] text-text-muted text-center">Searching…</div>
+              ) : results.length === 0 ? (
+                <div className="p-3 text-[11px] text-text-muted text-center">No results</div>
+              ) : (
+                <div className="max-h-60 overflow-y-auto">
+                  {results.map((r: any, i) => (
+                    <button
+                      key={i}
+                      onMouseDown={() => {
+                        addItem(activeId, { symbol: r.symbol, tradingsymbol: r.tradingsymbol, exchange: r.exchange, type: r.type })
+                        setSearch('')
+                      }}
+                      className="w-full flex items-center gap-3 px-3 py-2 hover:bg-bg-hover text-left transition-colors"
+                    >
+                      <div className="flex-1">
+                        <div className="text-[12px] font-medium text-text-bright">{r.symbol}</div>
+                        <div className="text-[10px] text-text-muted">{r.exchange} · {r.type}</div>
+                      </div>
+                      <Plus className="w-3.5 h-3.5 text-brand" />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Items list */}
@@ -244,27 +268,36 @@ function WatchlistPanel({ selected, onSelect }: {
   )
 }
 
+
+// ── Watchlist Row ─────────────────────────────────
 function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
   item: WatchlistItem
   isSelected: boolean
   onSelect: () => void
   onRemove: () => void
 }) {
-  const [quote, setQuote] = useState(getCachedQuote(item.symbol))
   const { openOrderModal } = useUIStore()
+  const [quote, setQuote] = useState(getLiveQuote(item.symbol))
   const [hover, setHover] = useState(false)
 
   useEffect(() => {
-    fetchQuote(item.symbol).then(setQuote)
-    const t = setInterval(() => fetchQuote(item.symbol).then(setQuote), 5000)
-    return () => clearInterval(t)
+    fetchRestQuote(item.symbol).then(() => setQuote(getLiveQuote(item.symbol)))
+    marketWs.subscribe([item.symbol])
+    return marketWs.onTick((tick) => {
+      if (normSym(tick.symbol) === normSym(item.symbol)) {
+        const q = { ltp: tick.ltp, changePct: tick.changePct ?? 0, change: tick.change ?? 0, volume: tick.volume ?? 0 }
+        _liveQuotes[normSym(item.symbol)] = q
+        setQuote(q)
+      }
+    })
   }, [item.symbol])
 
   return (
     <div
       className={cn(
-        'flex items-center px-3 py-2.5 border-b border-border/40 cursor-pointer group transition-colors',
-        isSelected ? 'bg-brand/8 border-l-2 border-l-brand' : 'hover:bg-bg-hover'
+        'flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors border-b border-border/40',
+        'hover:bg-bg-hover',
+        isSelected && 'bg-brand/10 border-l-2 border-l-brand'
       )}
       onClick={onSelect}
       onMouseEnter={() => setHover(true)}
@@ -313,14 +346,20 @@ function ChartPanel({ symbol }: { symbol: string }) {
   const [interval, setInterval] = useState<ChartInterval>('5m')
   const { openOrderModal, openChartModal } = useUIStore()
 
-  const [quote, setQuote] = useState(getCachedQuote(symbol))
+  const [quote, setQuote] = useState(getLiveQuote(symbol))
 
+  // Live tick subscription for quote header
   useEffect(() => {
-    fetchQuote(symbol).then(setQuote)
-    const t = window.setInterval(() => fetchQuote(symbol).then(setQuote), 5000)
-    return () => clearInterval(t)
+    fetchRestQuote(symbol).then(() => setQuote(getLiveQuote(symbol)))
+    marketWs.subscribe([symbol])
+    return marketWs.onTick((tick) => {
+      if (normSym(tick.symbol) === normSym(symbol)) {
+        setQuote({ ltp: tick.ltp, changePct: tick.changePct ?? 0, change: tick.change ?? 0, volume: tick.volume ?? 0 })
+      }
+    })
   }, [symbol])
 
+  // Load historical OHLCV candles; update last candle with live ticks — runs inside chart init effect below
   useEffect(() => {
     if (!containerRef.current) return
 
@@ -361,12 +400,36 @@ function ChartPanel({ symbol }: { symbol: string }) {
     })
     volSeriesRef.current = volSeries
 
-    // No candle data available — chart will be empty until live data source is connected
-    // Show a single point at current LTP if available
-    if (quote.ltp > 0) {
-      const now = Math.floor(Date.now() / 1000) as UTCTimestamp
-      series.setData([{ time: now, open: quote.ltp, high: quote.ltp, low: quote.ltp, close: quote.ltp }])
-    }
+    // Load OHLCV history and subscribe to live tick updates
+    api.marketOhlcv(symbol, interval, 'NSE', 500)
+      .then((res: any) => {
+        if (!chartRef.current) return
+        if (res?.candles?.length) {
+          series.setData(res.candles.map((c: any) => ({
+            time: c.time as UTCTimestamp,
+            open: c.open, high: c.high, low: c.low, close: c.close,
+          })))
+          volSeries.setData(res.candles.map((c: any) => ({
+            time: c.time as UTCTimestamp, value: c.volume ?? 0,
+          })))
+          chart.timeScale().fitContent()
+        }
+      })
+      .catch(() => {
+        const q = getLiveQuote(symbol)
+        if (q.ltp > 0 && chartRef.current) {
+          const now = Math.floor(Date.now() / 1000) as UTCTimestamp
+          series.setData([{ time: now, open: q.ltp, high: q.ltp, low: q.ltp, close: q.ltp }])
+        }
+      })
+
+    const unsubTick = marketWs.onTick((tick) => {
+      if (normSym(tick.symbol) !== normSym(symbol)) return
+      const now = Math.floor(Date.now() / 60000) * 60 as UTCTimestamp
+      try { series.update({ time: now, open: tick.ltp, high: tick.ltp, low: tick.ltp, close: tick.ltp }) }
+      catch { /* bar exists */ }
+    })
+
     chart.timeScale().fitContent()
 
     const ro = new ResizeObserver(() => {
@@ -377,6 +440,7 @@ function ChartPanel({ symbol }: { symbol: string }) {
     ro.observe(containerRef.current)
 
     return () => {
+      unsubTick()
       ro.disconnect()
       chart.remove()
       chartRef.current = null

@@ -1,71 +1,87 @@
 """
-Smart Trader — Per-Account Risk Manager
-=========================================
+Smart Trader — Per-Account Risk Manager  (v3)
+================================================
 
-Each broker account (user_id + config_id) gets its own independent
-risk manager.  This ensures risk limits are enforced per-account and
-trading on one account does not affect another.
+Design
+------
+Every broker account (user_id + config_id) gets its own independent
+AccountRiskManager.  Risk params are loaded from the account's
+*credentials dict* stored in broker_configs (the "ENV" for that account).
 
-Risk checks happen at two points:
-  1. PRE-TRADE  — validate_order() before sending to broker
-  2. REAL-TIME  — on_pnl_update() called by PnL feed / positions poller
+Risk param keys in credentials
+-------------------------------
+  DAILY_STOP_LOSS       absolute loss limit e.g.  5000  (stored as positive, internally negative)
+  TRAIL_STOP_LOSS       trail the limit below peak profit e.g. 1000
+  TRAIL_WHEN_PNL        start trailing once PnL >= this value  e.g. 2000
+  WARNING_PCT           warn at this fraction of limit (default 0.80)
+  MAX_ORDER_VALUE       single-order rupee cap     (default 500000)
+  MAX_QTY_PER_ORDER     single-order qty cap       (default 1800)
 
-Architecture (ported from shoonya_platform SupremeRiskManager):
-  • Daily P&L monitoring with trailing max-loss
-  • Configurable warning threshold (default 80%)
-  • Consecutive loss-day tracking
-  • Force-exit callback when limits breached
-  • Cooldown period after breach
-  • State persisted to JSON per account
+State files
+-----------
+  logs/risk/state_{config_id[:8]}.json   — today's live risk state
+  logs/risk/history_{config_id[:8]}.json — daily stats log (appended each night)
 
-Usage:
-    from broker.account_risk import get_account_risk
+Consecutive-loss lockout
+------------------------
+  If 3 consecutive trading days hit max-loss, account is locked for 4
+  calendar days.  Lockout is stored in the state file so it survives
+  service restarts.
 
-    risk = get_account_risk(user_id, config_id)
-    allowed, reason = risk.validate_order(order_dict)
-    if not allowed:
-        raise HTTPException(400, reason)
+PnL calculation
+---------------
+  Realised + Unrealised across ALL open products including CNC/delivery.
+  The heartbeat() method computes this from positions every 1-2 s.
 
-    # Called periodically or on tick:
-    risk.on_pnl_update(current_pnl)
-
-    status = risk.get_status()  # dict for API response
+Post-breach enforcement
+------------------------
+  After breach, every heartbeat re-checks if new positions exist on the
+  broker (from direct terminal trades) and kills them immediately.
 """
 
 import threading
 import logging
 import json
-import os
-import time
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, Callable, Dict, Any, List
+from typing import Optional, Callable, Dict, List
 from dataclasses import dataclass, field, asdict
 
 logger = logging.getLogger("smart_trader.account_risk")
+
+# ── How many consecutive loss days before lockout ─────────────────────────────
+CONSEC_LOSS_DAYS_FOR_LOCKOUT = 3
+LOCKOUT_CALENDAR_DAYS        = 4
+
 
 # ── Risk Configuration ────────────────────────────────────────────────────────
 
 @dataclass
 class AccountRiskConfig:
     """
-    Risk parameters for a single broker account.
-    Defaults are conservative — admin/user can override via API.
+    Per-account risk parameters.
+    Loaded from the account credentials dict so each broker account can have
+    its own limits set at registration time via the Settings UI.
     """
     # P&L limits
-    max_daily_loss:         float = -2500.0   # must be negative, e.g. -2500
-    trail_step:             float = 100.0     # raise trailing limit by this on profit
-    warning_threshold_pct:  float = 0.80      # warn at 80% of max_daily_loss
-    max_consecutive_loss_days: int = 3
+    max_daily_loss:         float = -2500.0   # negative; absolute floor e.g. -5000
+    trail_stop_loss:        float = 0.0       # trail by this amount below peak profit
+    trail_when_pnl:         float = 0.0       # only start trailing once PnL >= this
+    warning_threshold_pct:  float = 0.80      # warn at 80% of limit
 
     # Order-level guards
-    max_order_value:        float = 500_000.0  # single order max ₹ value
-    max_qty_per_order:      int   = 1800       # single order max qty (1 lot NIFTY = 75)
-    max_open_positions:     int   = 20         # max open legs simultaneously
+    max_order_value:        float = 500_000.0
+    max_qty_per_order:      int   = 1800
+    max_open_positions:     int   = 20
     allowed_exchanges:      tuple = ("NSE", "BSE", "NFO", "BFO", "MCX", "CDS")
 
-    # State persistence
-    state_dir: str = "logs/risk"
+    # Consecutive-loss lockout
+    consec_loss_threshold:  int   = CONSEC_LOSS_DAYS_FOR_LOCKOUT
+    lockout_days:           int   = LOCKOUT_CALENDAR_DAYS
+
+    # State persistence dirs
+    state_dir:   str = "logs/risk"
+    history_dir: str = "logs/risk"
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -74,32 +90,77 @@ class AccountRiskConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "AccountRiskConfig":
-        d2 = dict(d)
+        d2 = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         if "allowed_exchanges" in d2:
             d2["allowed_exchanges"] = tuple(d2["allowed_exchanges"])
-        return cls(**{k: v for k, v in d2.items() if k in cls.__dataclass_fields__})
+        return cls(**d2)
+
+    @classmethod
+    def from_credentials(cls, creds: dict, defaults: Optional["AccountRiskConfig"] = None) -> "AccountRiskConfig":
+        """
+        Build an AccountRiskConfig from a broker credentials dict.
+
+        Keys read (case-insensitive):
+          DAILY_STOP_LOSS, TRAIL_STOP_LOSS, TRAIL_WHEN_PNL,
+          WARNING_PCT, MAX_ORDER_VALUE, MAX_QTY_PER_ORDER
+        """
+        base = defaults or cls()
+
+        def _f(key: str, default: float) -> float:
+            val = creds.get(key) or creds.get(key.lower())
+            if val is None:
+                return default
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return default
+
+        def _i(key: str, default: int) -> int:
+            return int(_f(key, float(default)))
+
+        max_loss = _f("DAILY_STOP_LOSS", abs(base.max_daily_loss))
+        # Ensure negative internally
+        if max_loss > 0:
+            max_loss = -max_loss
+
+        return cls(
+            max_daily_loss        = max_loss,
+            trail_stop_loss       = abs(_f("TRAIL_STOP_LOSS", base.trail_stop_loss)),
+            trail_when_pnl        = _f("TRAIL_WHEN_PNL",    base.trail_when_pnl),
+            warning_threshold_pct = _f("WARNING_PCT",        base.warning_threshold_pct),
+            max_order_value       = _f("MAX_ORDER_VALUE",    base.max_order_value),
+            max_qty_per_order     = _i("MAX_QTY_PER_ORDER",  base.max_qty_per_order),
+            max_open_positions    = base.max_open_positions,
+            allowed_exchanges     = base.allowed_exchanges,
+            consec_loss_threshold = base.consec_loss_threshold,
+            lockout_days          = base.lockout_days,
+            state_dir             = base.state_dir,
+            history_dir           = base.history_dir,
+        )
 
 
 # ── Risk Status ───────────────────────────────────────────────────────────────
 
 @dataclass
 class AccountRiskStatus:
-    account_id:           str   = ""
-    broker_id:            str   = ""
-    client_id:            str   = ""
-    daily_pnl:            float = 0.0
-    dynamic_max_loss:     float = 0.0
-    highest_profit:       float = 0.0
-    daily_loss_hit:       bool  = False
-    warning_sent:         bool  = False
-    cooldown_until:       Optional[str] = None
-    consecutive_loss_days: int  = 0
-    force_exit_triggered: bool  = False
-    trading_allowed:      bool  = True
-    halt_reason:          str   = ""
-    checked_at:           str   = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    account_id:            str   = ""
+    broker_id:             str   = ""
+    client_id:             str   = ""
+    daily_pnl:             float = 0.0
+    dynamic_max_loss:      float = 0.0
+    highest_profit:        float = 0.0
+    daily_loss_hit:        bool  = False
+    warning_sent:          bool  = False
+    lockout_until:         Optional[str] = None
+    consecutive_loss_days: int   = 0
+    force_exit_triggered:  bool  = False
+    trading_allowed:       bool  = True
+    halt_reason:           str   = ""
+    checked_at:            str   = ""
+
+    def __post_init__(self):
+        if not self.checked_at:
+            self.checked_at = datetime.now(timezone.utc).isoformat()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -111,10 +172,15 @@ class AccountRiskManager:
     """
     Thread-safe, state-persistent risk manager for one broker account.
 
-    Ported from shoonya_platform SupremeRiskManager and extended with:
-    - Per-account identity (user_id, config_id, client_id)
-    - Pre-trade order validation (value, qty, exchange guards)
-    - Force-exit callback for integration with order execution
+    Key design:
+      - heartbeat(session) called every ~1-2 s by PositionWatcher
+      - PnL = ALL positions realised + unrealised (including CNC/delivery)
+      - Trail logic: once PnL >= trail_when_pnl, dynamic limit trails
+        (peak_pnl - trail_stop_loss) but never below max_daily_loss floor
+      - Breach: kills ALL open positions + orders, blocks new orders
+      - Post-breach: every heartbeat re-checks for new positions and
+        kills them immediately (catches direct broker terminal trades)
+      - 3 consecutive breach days -> 4-day lockout
     """
 
     def __init__(
@@ -132,424 +198,492 @@ class AccountRiskManager:
         self._config   = config or AccountRiskConfig()
         self._lock     = threading.RLock()
 
-        # State
-        self._daily_pnl:      float = 0.0
-        self._highest_profit: float = 0.0
-        self._dynamic_max_loss: float = self._config.max_daily_loss
-        self._daily_loss_hit: bool = False
-        self._warning_sent:   bool = False
-        self._cooldown_until: Optional[datetime] = None
+        # ── Live state ────────────────────────────────────────────────────
+        self._daily_pnl:          float = 0.0
+        self._highest_profit:     float = 0.0
+        self._dynamic_max_loss:   float = self._config.max_daily_loss
+        self._daily_loss_hit:     bool  = False
+        self._warning_sent:       bool  = False
+        self._lockout_until:      Optional[datetime] = None
         self._consecutive_loss_days: int = 0
-        self._force_exit_triggered: bool = False
-        self._today: date = date.today()
+        self._force_exit_triggered:  bool = False
+        self._today:              date = date.today()
 
-        # Callbacks
+        # ── Callbacks ─────────────────────────────────────────────────────
         self._force_exit_cb: Optional[Callable] = None
         self._warning_cb:    Optional[Callable] = None
 
-        # Heartbeat state
+        # Guard against stale empty-positions reads during close
         self._last_known_pnl: float = 0.0
-        self._force_exit_in_progress: bool = False
 
-        # Setup logging with context
+        # ── Logging adapter ───────────────────────────────────────────────
         self._log = logging.LoggerAdapter(
             logging.getLogger("smart_trader.account_risk"),
             {"user_id": user_id[:8], "broker": broker_id, "client": client_id},
         )
 
-        # Ensure state directory exists
-        state_dir = Path(self._config.state_dir)
+        # ── File paths ────────────────────────────────────────────────────
+        state_dir   = Path(self._config.state_dir)
+        history_dir = Path(self._config.history_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
-        self._state_file = state_dir / f"risk_{config_id[:8]}.json"
+        history_dir.mkdir(parents=True, exist_ok=True)
+
+        _slug = config_id[:8]
+        self._state_file   = state_dir   / f"state_{_slug}.json"
+        self._history_file = history_dir / f"history_{_slug}.json"
 
         self._load_state()
-        self._log.info("Risk manager initialised — max_loss=%s", self._config.max_daily_loss)
+        self._log.info(
+            "Risk manager ready — max_loss=%.0f trail_stop=%.0f trail_when=%.0f",
+            self._config.max_daily_loss,
+            self._config.trail_stop_loss,
+            self._config.trail_when_pnl,
+        )
 
     # ── Callback registration ─────────────────────────────────────────────────
 
     def set_force_exit_callback(self, fn: Callable) -> None:
-        """Called with (user_id, config_id, reason) when risk limit breached."""
         self._force_exit_cb = fn
 
     def set_warning_callback(self, fn: Callable) -> None:
-        """Called with (user_id, config_id, pnl, limit) at warning threshold."""
         self._warning_cb = fn
 
     # ── Pre-trade validation ──────────────────────────────────────────────────
 
-    def validate_order(self, order: dict) -> tuple[bool, str]:
+    def validate_order(self, order: dict) -> tuple:
         """
-        Pre-trade risk check.
+        Pre-trade gate.  Returns (True, "") if allowed, else (False, reason).
 
-        Returns (True, "") if allowed, or (False, reason_string) if blocked.
-        EXIT orders (SELL on a position) are never blocked.
+        EXIT / COVER orders are always allowed so we can close positions
+        even after a breach.
         """
-        tag = order.get("tag", "").upper()
+        tag = (order.get("tag") or "").upper()
+        txn = (order.get("transaction_type") or order.get("side") or "").upper()
 
-        # EXIT orders are always allowed (never block covers)
-        if "EXIT" in tag or order.get("transaction_type", "").upper() in ("S", "SELL"):
-            return True, ""
+        # Never block exit/cover orders
+        is_exit = "EXIT" in tag or "RMS" in tag or txn in ("S", "SELL")
 
         with self._lock:
             self._maybe_roll_day()
 
-            # 1. Trading halted?
-            if self._daily_loss_hit:
+            # Multi-day lockout check
+            if self._lockout_until:
+                now = datetime.now(timezone.utc)
+                if now < self._lockout_until:
+                    days_left = max(0, (self._lockout_until.date() - date.today()).days)
+                    reason = (
+                        f"Account {self.client_id} locked for {days_left} more day(s) "
+                        f"after {self._config.consec_loss_threshold} consecutive loss days. "
+                        f"Unlocks {self._lockout_until.date().isoformat()}."
+                    )
+                    self._log.warning("ORDER BLOCKED (lockout) — %s", reason)
+                    return False, reason
+                else:
+                    # Lockout expired
+                    self._lockout_until = None
+                    self._consecutive_loss_days = 0
+                    self._save_state()
+
+            # Daily-loss hit blocks ALL new entries
+            if self._daily_loss_hit and not is_exit:
                 reason = (
-                    f"Daily loss limit breached on {self.client_id} "
-                    f"(P&L: ₹{self._daily_pnl:.0f}, limit: ₹{self._dynamic_max_loss:.0f})"
+                    f"Daily loss limit breached for {self.client_id} "
+                    f"(P&L: Rs.{self._daily_pnl:.0f}, limit: Rs.{self._dynamic_max_loss:.0f}). "
+                    "All new orders blocked for today."
                 )
                 self._log.warning("ORDER BLOCKED — %s", reason)
                 return False, reason
 
-            if self._cooldown_until and datetime.now(timezone.utc) < self._cooldown_until:
-                remaining = int((self._cooldown_until - datetime.now(timezone.utc)).total_seconds() / 60)
-                reason = f"Account {self.client_id} in cooldown for {remaining} more minutes"
-                self._log.warning("ORDER BLOCKED — %s", reason)
-                return False, reason
+            if is_exit:
+                return True, ""
 
-            # 2. Exchange allowed?
-            exch = order.get("exchange", "NSE").upper()
+            # Exchange guard
+            exch = (order.get("exchange") or "NSE").upper()
             if self._config.allowed_exchanges and exch not in self._config.allowed_exchanges:
-                reason = f"Exchange {exch} not allowed for account {self.client_id}"
-                self._log.warning("ORDER BLOCKED — %s", reason)
+                reason = f"Exchange {exch} not permitted for {self.client_id}"
                 return False, reason
 
-            # 3. Quantity guard
+            # Quantity guard
             qty = int(order.get("quantity", 0))
             if qty <= 0:
                 return False, "Quantity must be > 0"
             if qty > self._config.max_qty_per_order:
                 reason = (
-                    f"Quantity {qty} exceeds max {self._config.max_qty_per_order} "
-                    f"for account {self.client_id}"
+                    f"Qty {qty} > max {self._config.max_qty_per_order} "
+                    f"for {self.client_id}"
                 )
-                self._log.warning("ORDER BLOCKED — %s", reason)
                 return False, reason
 
-            # 4. Order value guard
+            # Order value guard
             price = float(order.get("price", 0) or order.get("ltp", 0))
             if price > 0:
                 value = qty * price
                 if value > self._config.max_order_value:
                     reason = (
-                        f"Order value ₹{value:,.0f} exceeds max ₹{self._config.max_order_value:,.0f} "
-                        f"for account {self.client_id}"
+                        f"Order value Rs.{value:,.0f} > max Rs.{self._config.max_order_value:,.0f} "
+                        f"for {self.client_id}"
                     )
-                    self._log.warning("ORDER BLOCKED — %s", reason)
                     return False, reason
 
         return True, ""
 
-    # ── Real-time P&L update ──────────────────────────────────────────────────
+    # ── Real-time PnL update ──────────────────────────────────────────────────
 
     def on_pnl_update(self, pnl: float) -> None:
         """
-        Called on each P&L tick (positions polling, WebSocket, etc.).
-        Updates trailing max-loss and triggers force-exit if breached.
+        Feed the latest combined (realised + unrealised) PnL.
+        Called by heartbeat() every 1-2 s.  Thread-safe.
+        ALL products are included — CNC, MIS, NRML, delivery.
         """
         with self._lock:
             self._maybe_roll_day()
             self._daily_pnl = pnl
 
-            # Update trailing high-water mark
+            # ── Update trailing high-water mark ───────────────────────────
             if pnl > self._highest_profit:
                 self._highest_profit = pnl
-                # Raise trailing limit
-                steps = int(pnl / self._config.trail_step)
-                self._dynamic_max_loss = min(
-                    self._config.max_daily_loss + steps * self._config.trail_step,
-                    0.0,   # never above 0
-                )
 
-            # Warning threshold
+            # ── Compute dynamic loss limit ─────────────────────────────────
+            # Trail logic:
+            #   once PnL >= trail_when_pnl AND trail_stop_loss > 0,
+            #   the limit rises to (peak - trail_stop_loss) but never
+            #   below the configured max_daily_loss floor.
+            if (
+                self._config.trail_stop_loss > 0
+                and self._config.trail_when_pnl > 0
+                and self._highest_profit >= self._config.trail_when_pnl
+            ):
+                trail_limit = self._highest_profit - self._config.trail_stop_loss
+                # Only raise the limit (never lower it); cap is 0 (don't lock in profit)
+                self._dynamic_max_loss = max(
+                    self._config.max_daily_loss,  # absolute floor (most negative)
+                    min(trail_limit, 0.0),         # cap at break-even
+                )
+            # else: keep _dynamic_max_loss at config.max_daily_loss
+
+            # ── Warning ───────────────────────────────────────────────────
             warning_level = self._dynamic_max_loss * self._config.warning_threshold_pct
             if pnl <= warning_level and not self._warning_sent:
                 self._warning_sent = True
                 self._log.warning(
-                    "RISK WARNING — PnL ₹%.0f approaching limit ₹%.0f (account=%s)",
+                    "RISK WARNING — PnL Rs.%.0f approaching limit Rs.%.0f (client=%s)",
                     pnl, self._dynamic_max_loss, self.client_id,
                 )
                 if self._warning_cb:
                     try:
                         self._warning_cb(self.user_id, self.config_id, pnl, self._dynamic_max_loss)
-                    except Exception as e:
-                        self._log.error("Warning callback error: %s", e)
+                    except Exception as exc:
+                        self._log.error("Warning callback error: %s", exc)
 
-            # Breach check
+            # ── Breach ────────────────────────────────────────────────────
             if pnl <= self._dynamic_max_loss and not self._daily_loss_hit:
-                self._daily_loss_hit = True
+                self._daily_loss_hit       = True
                 self._force_exit_triggered = True
                 self._consecutive_loss_days += 1
+
                 self._log.critical(
-                    "RISK BREACH — PnL ₹%.0f hit limit ₹%.0f for account=%s (client=%s). "
-                    "Triggering force exit.",
-                    pnl, self._dynamic_max_loss, self.config_id[:8], self.client_id,
+                    "RISK BREACH — PnL Rs.%.0f hit limit Rs.%.0f for client=%s "
+                    "(consecutive_loss_days=%d)",
+                    pnl, self._dynamic_max_loss, self.client_id,
+                    self._consecutive_loss_days,
                 )
+
+                # Check for consecutive-loss lockout trigger
+                self._maybe_apply_lockout()
+
+                # Persist immediately
                 self._save_state()
+                self._append_history(pnl=pnl, breached=True)
+
                 if self._force_exit_cb:
                     try:
                         self._force_exit_cb(
                             self.user_id,
                             self.config_id,
-                            f"Daily loss limit breached: P&L={pnl:.0f} limit={self._dynamic_max_loss:.0f}",
+                            f"Daily loss limit breached: PnL=Rs.{pnl:.0f} "
+                            f"limit=Rs.{self._dynamic_max_loss:.0f}",
                         )
-                    except Exception as e:
-                        self._log.error("Force-exit callback error: %s", e)
+                    except Exception as exc:
+                        self._log.error("Force-exit callback error: %s", exc)
 
-    # ── Heartbeat — self-driven PnL + enforcement cycle ──────────────────────
+    # ── Heartbeat (called every ~1-2 s by PositionWatcher) ───────────────────
 
     def heartbeat(self, session) -> dict:
         """
-        Self-driven monitoring cycle.  Called every 1-2s by PositionWatcher.
+        One monitoring cycle.
 
-        1. Fetches positions from broker via session.get_positions()
-        2. Computes intraday PnL (excludes CNC/delivery)
-        3. Feeds PnL to on_pnl_update()
-        4. POST-BREACH enforcement: if daily_loss_hit AND positions still
-           exist → force-exit again (catches human-placed trades on broker)
-        5. Returns a status dict for push to frontend
-
-        Args:
-            session: BrokerAccountSession (has get_positions, get_order_book,
-                     cancel_order, place_order)
+        1. Fetch ALL positions from broker
+        2. Compute PnL = sum(realised + unrealised) for EVERY product (CNC included)
+        3. Feed into on_pnl_update()
+        4. If breached AND positions still exist -> kill them again immediately
+           (catches orders placed directly on broker terminal)
+        5. Returns status dict for WebSocket push
         """
         result = {
-            "config_id": self.config_id,
-            "broker_id": self.broker_id,
-            "client_id": self.client_id,
-            "pnl": 0.0,
+            "config_id":       self.config_id,
+            "broker_id":       self.broker_id,
+            "client_id":       self.client_id,
+            "pnl":             0.0,
             "positions_count": 0,
-            "breach": False,
-            "action": None,
+            "breach":          False,
+            "action":          None,
         }
 
         try:
             positions = session.get_positions() or []
-        except Exception as e:
-            self._log.warning("heartbeat: get_positions failed: %s", e)
+        except Exception as exc:
+            self._log.debug("heartbeat: get_positions failed: %s", exc)
             return result
 
-        # ── Empty-position guard (BUG-12) ─────────────────────────────────
-        # If broker returns empty positions mid-session, preserve last known
-        # PnL to avoid falsely resetting to 0 and missing a breach.
-        if not positions and hasattr(self, "_last_known_pnl") and self._last_known_pnl != 0.0:
+        # Guard against stale empty-positions read mid-session close
+        if not positions and self._last_known_pnl != 0.0:
             result["pnl"] = self._last_known_pnl
             return result
 
-        # ── Compute intraday PnL (exclude CNC/delivery) ──────────────────
+        # ── Compute total PnL — ALL products including CNC/delivery ───────
         pnl = 0.0
-        open_qty_count = 0
+        open_count = 0
         for p in positions:
-            if isinstance(p, dict):
-                prd = (p.get("product", "") or p.get("prd", "")).upper()
-                # Skip delivery/CNC positions for intraday risk
-                if prd in ("CNC", "C", "DELIVERY"):
-                    continue
-                net_qty = int(p.get("net_qty") or p.get("netqty") or p.get("qty", 0) or 0)
-                rpnl = float(p.get("realised_pnl") or p.get("rpnl", 0) or 0)
-                urmtom = float(
-                    p.get("unrealised_pnl")
-                    or p.get("urmtom", 0)
-                    or p.get("pnl", 0)
-                    or 0
-                )
-                pnl += rpnl + urmtom
-                if net_qty != 0:
-                    open_qty_count += 1
+            if not isinstance(p, dict):
+                continue
+            # Include realised + unrealised for every product type
+            rpnl   = float(p.get("realised_pnl")  or p.get("rpnl",   0) or 0)
+            urmtom = float(p.get("unrealised_pnl") or p.get("urmtom", 0)
+                           or p.get("pnl", 0) or 0)
+            pnl += rpnl + urmtom
+            net_qty = int(p.get("net_qty") or p.get("netqty") or p.get("qty", 0) or 0)
+            if net_qty != 0:
+                open_count += 1
 
-        self._last_known_pnl = pnl
-        result["pnl"] = round(pnl, 2)
-        result["positions_count"] = open_qty_count
+        self._last_known_pnl       = pnl
+        result["pnl"]              = round(pnl, 2)
+        result["positions_count"]  = open_count
 
-        # Feed PnL into the standard risk engine
+        # Feed into risk engine
         self.on_pnl_update(pnl)
 
         # ── Post-breach continuous enforcement ────────────────────────────
-        # If daily_loss_hit but positions still exist (e.g. human placed
-        # trades on broker terminal), kill them again.
         with self._lock:
-            if self._daily_loss_hit and open_qty_count > 0:
-                self._log.critical(
-                    "POST-BREACH: %d open positions detected after breach "
-                    "(client=%s). Re-triggering force exit + order cancellation.",
-                    open_qty_count, self.client_id,
-                )
-                result["breach"] = True
-                result["action"] = "POST_BREACH_FLATTEN"
+            locked_out = (
+                self._lockout_until is not None
+                and datetime.now(timezone.utc) < self._lockout_until
+            )
+            blocked = self._daily_loss_hit or locked_out
 
-                # Cancel all open broker orders first
+        if blocked and open_count > 0:
+            self._log.critical(
+                "POST-BREACH: %d open position(s) detected after breach "
+                "(client=%s). Force-killing NOW.",
+                open_count, self.client_id,
+            )
+            result["breach"] = True
+            result["action"] = "POST_BREACH_FLATTEN"
+
+            try:
+                self.cancel_all_broker_orders(session)
+            except Exception as exc:
+                self._log.error("Post-breach cancel_all failed: %s", exc)
+
+            if self._force_exit_cb:
                 try:
-                    self.cancel_all_broker_orders(session)
-                except Exception as e:
-                    self._log.error("Post-breach cancel_all_broker_orders failed: %s", e)
+                    self._force_exit_cb(
+                        self.user_id,
+                        self.config_id,
+                        "POST_BREACH_FLATTEN: trades detected after risk breach",
+                    )
+                except Exception as exc:
+                    self._log.error("Post-breach force_exit_cb: %s", exc)
 
-                # Trigger force-exit callback to flatten positions
-                if self._force_exit_cb:
-                    try:
-                        self._force_exit_cb(
-                            self.user_id,
-                            self.config_id,
-                            "POST_BREACH_FLATTEN: Human-placed trades detected after risk breach",
-                        )
-                    except Exception as e:
-                        self._log.error("Post-breach force_exit_cb failed: %s", e)
-
-            elif self._daily_loss_hit and open_qty_count == 0:
-                # All flat after breach — good. Cancel lingering orders just in case.
-                try:
-                    self.cancel_all_broker_orders(session)
-                except Exception:
-                    pass
+        elif blocked and open_count == 0:
+            # All flat — still cancel any stray open orders
+            try:
+                self.cancel_all_broker_orders(session)
+            except Exception:
+                pass
 
         return result
 
-    # ── Broker order cancellation ─────────────────────────────────────────
+    # ── Broker order cancellation ─────────────────────────────────────────────
 
     def cancel_all_broker_orders(self, session) -> int:
-        """
-        Cancel all open/pending/trigger-pending orders on the broker.
-
-        Called on risk breach and during post-breach enforcement.
-        Returns the number of orders cancelled.
-        """
-        cancelled = 0
-        try:
-            orders = session.get_order_book() or []
-        except Exception as e:
-            self._log.error("cancel_all_broker_orders: get_order_book failed: %s", e)
-            return 0
-
+        """Cancel every open/pending order on the broker. Returns count cancelled."""
         _OPEN_STATUSES = {
             "OPEN", "PENDING", "TRIGGER_PENDING", "TRIGGER PENDING",
             "NEW", "AFTER MARKET ORDER REQ RECEIVED", "MODIFIED",
             "WAITING", "PARTIALLY_FILLED", "PARTIALLY_EXECUTED",
         }
+        cancelled = 0
+        try:
+            orders = session.get_order_book() or []
+        except Exception as exc:
+            self._log.error("cancel_all_broker_orders: get_order_book failed: %s", exc)
+            return 0
 
         for order in orders:
             if isinstance(order, dict):
                 status = (
-                    order.get("status", "")
-                    or order.get("stat", "")
-                    or order.get("Status", "")
+                    order.get("status") or order.get("stat") or order.get("Status", "")
                 ).upper().strip()
                 order_id = (
-                    order.get("order_id")
-                    or order.get("norenordno")
-                    or order.get("orderid")
-                    or order.get("oms_order_id")
-                    or ""
+                    order.get("order_id") or order.get("norenordno")
+                    or order.get("orderid") or order.get("oms_order_id") or ""
                 )
             else:
-                status = str(getattr(order, "status", "")).upper().strip()
+                status   = str(getattr(order, "status", "")).upper().strip()
                 order_id = str(
-                    getattr(order, "order_id", "")
-                    or getattr(order, "norenordno", "")
-                    or ""
+                    getattr(order, "order_id", "") or getattr(order, "norenordno", "")
                 )
 
             if not order_id or status not in _OPEN_STATUSES:
                 continue
 
             try:
-                resp = session.cancel_order(order_id)
+                session.cancel_order(order_id)
                 cancelled += 1
-                self._log.info(
-                    "CANCELLED broker order %s (status=%s) on client=%s",
-                    order_id, status, self.client_id,
-                )
-            except Exception as e:
-                self._log.error(
-                    "Failed to cancel order %s on client=%s: %s",
-                    order_id, self.client_id, e,
-                )
+                self._log.info("CANCELLED order %s (status=%s) client=%s",
+                               order_id, status, self.client_id)
+            except Exception as exc:
+                self._log.error("Cancel order %s failed: %s", order_id, exc)
 
         if cancelled:
-            self._log.info(
-                "cancel_all_broker_orders: cancelled %d orders on client=%s",
-                cancelled, self.client_id,
-            )
+            self._log.info("cancel_all_broker_orders: cancelled %d orders on client=%s",
+                           cancelled, self.client_id)
         return cancelled
 
-    # ── System entry cancellation ─────────────────────────────────────────
+    # ── System order cancellation (PostgreSQL DB repo) ────────────────────────
 
     def cancel_system_entries(self, order_repo) -> int:
-        """
-        Mark all CREATED (not yet sent) system orders as FAILED in
-        the PostgreSQL order repository.
-
-        Prevents the OrderWatcher from picking up queued orders
-        after a risk breach.
-        """
+        """Fail all CREATED-but-not-sent system orders in the DB order repo."""
         cancelled = 0
         try:
-            pending = order_repo.get_open_orders()
-            for record in pending:
+            for record in (order_repo.get_open_orders() or []):
                 if record.status == "CREATED":
                     try:
                         order_repo.update_status(record.command_id, "FAILED")
                         cancelled += 1
-                    except Exception as e:
-                        self._log.error("cancel_system_entries: update failed for %s: %s",
-                                        record.command_id, e)
-        except Exception as e:
-            self._log.error("cancel_system_entries failed: %s", e)
-        if cancelled:
-            self._log.info("cancel_system_entries: cancelled %d pending orders", cancelled)
+                    except Exception as exc:
+                        self._log.error("cancel_system_entries: %s", exc)
+        except Exception as exc:
+            self._log.error("cancel_system_entries: %s", exc)
         return cancelled
 
     # ── Status & control ──────────────────────────────────────────────────────
 
-    def is_trading_allowed(self) -> tuple[bool, str]:
+    def is_trading_allowed(self) -> tuple:
+        """Returns (allowed: bool, reason: str).  Checks lockout first, then daily breach."""
         with self._lock:
             self._maybe_roll_day()
+
+            # Multi-day lockout
+            if self._lockout_until:
+                now = datetime.now(timezone.utc)
+                if now < self._lockout_until:
+                    days_left = max(0, (self._lockout_until.date() - date.today()).days)
+                    return (
+                        False,
+                        f"Account {self.client_id} locked for {days_left} more day(s) "
+                        f"({self._config.consec_loss_threshold} consecutive loss days hit). "
+                        f"Unlocks {self._lockout_until.date().isoformat()}.",
+                    )
+                else:
+                    self._lockout_until = None
+                    self._consecutive_loss_days = 0
+                    self._save_state()
+
+            # Today's breach
             if self._daily_loss_hit:
-                return False, f"Daily loss limit breached for {self.client_id}"
-            if self._cooldown_until and datetime.now(timezone.utc) < self._cooldown_until:
-                return False, f"In cooldown until {self._cooldown_until.isoformat()}"
+                return (
+                    False,
+                    f"Daily loss limit breached for {self.client_id} "
+                    f"(P&L Rs.{self._daily_pnl:.0f} <= Rs.{self._dynamic_max_loss:.0f})",
+                )
             return True, ""
 
     def get_status(self) -> dict:
         with self._lock:
             allowed, halt_reason = self.is_trading_allowed()
-            return AccountRiskStatus(
-                account_id=self.config_id,
-                broker_id=self.broker_id,
-                client_id=self.client_id,
-                daily_pnl=self._daily_pnl,
-                dynamic_max_loss=self._dynamic_max_loss,
-                highest_profit=self._highest_profit,
-                daily_loss_hit=self._daily_loss_hit,
-                warning_sent=self._warning_sent,
-                cooldown_until=self._cooldown_until.isoformat() if self._cooldown_until else None,
-                consecutive_loss_days=self._consecutive_loss_days,
-                force_exit_triggered=self._force_exit_triggered,
-                trading_allowed=allowed,
-                halt_reason=halt_reason,
-                checked_at=datetime.now(timezone.utc).isoformat(),
-            ).to_dict()
+            status = AccountRiskStatus(
+                account_id             = self.config_id,
+                broker_id              = self.broker_id,
+                client_id              = self.client_id,
+                daily_pnl              = self._daily_pnl,
+                dynamic_max_loss       = self._dynamic_max_loss,
+                highest_profit         = self._highest_profit,
+                daily_loss_hit         = self._daily_loss_hit,
+                warning_sent           = self._warning_sent,
+                lockout_until          = (
+                    self._lockout_until.isoformat() if self._lockout_until else None
+                ),
+                consecutive_loss_days  = self._consecutive_loss_days,
+                force_exit_triggered   = self._force_exit_triggered,
+                trading_allowed        = allowed,
+                halt_reason            = halt_reason,
+                checked_at             = datetime.now(timezone.utc).isoformat(),
+            )
+            return status.to_dict()
+
+    def get_config(self) -> dict:
+        """Return the current risk config as a dict."""
+        return self._config.to_dict()
+
+    def get_history(self) -> list:
+        """Return the per-day history list (last 60 trading days)."""
+        try:
+            if self._history_file.exists():
+                return json.loads(self._history_file.read_text())
+        except Exception:
+            pass
+        return []
 
     def acknowledge_exit_complete(self) -> None:
-        """Call after positions are fully squared off to clear force-exit flag."""
         with self._lock:
             self._force_exit_triggered = False
-            self._log.info("Force-exit acknowledged for client=%s", self.client_id)
 
     def reset_for_new_day(self) -> None:
-        """Manually reset daily state. Normally called by _maybe_roll_day()."""
         with self._lock:
             self._do_roll_day()
 
+    def force_unlock(self) -> None:
+        """Admin override: clear lockout and consecutive counter."""
+        with self._lock:
+            self._lockout_until         = None
+            self._consecutive_loss_days = 0
+            self._daily_loss_hit        = False
+            self._force_exit_triggered  = False
+            self._save_state()
+            self._log.warning("FORCE_UNLOCK: lockout cleared by admin for client=%s",
+                              self.client_id)
+
     def update_config(self, new_config: AccountRiskConfig) -> None:
-        """Hot-reload risk config without restart."""
+        """Hot-reload config without restart (e.g. from API PATCH)."""
         with self._lock:
             self._config = new_config
-            self._dynamic_max_loss = new_config.max_daily_loss
+            # Recalculate dynamic limit only if trailing hasn't started
+            if self._highest_profit < new_config.trail_when_pnl:
+                self._dynamic_max_loss = new_config.max_daily_loss
             self._log.info(
-                "Risk config updated — new max_loss=%s", new_config.max_daily_loss
+                "Config hot-reloaded — max_loss=%.0f trail_stop=%.0f trail_when=%.0f",
+                new_config.max_daily_loss,
+                new_config.trail_stop_loss,
+                new_config.trail_when_pnl,
             )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _maybe_apply_lockout(self) -> None:
+        """
+        If consecutive loss days >= threshold, apply a calendar-day lockout.
+        Called inside the mutex (already locked).
+        """
+        if self._consecutive_loss_days >= self._config.consec_loss_threshold:
+            unlock_dt = datetime.now(timezone.utc) + timedelta(days=self._config.lockout_days)
+            self._lockout_until = unlock_dt
+            self._log.critical(
+                "LOCKOUT APPLIED — %d consecutive loss days on client=%s. "
+                "Trading BLOCKED until %s",
+                self._consecutive_loss_days, self.client_id,
+                unlock_dt.date().isoformat(),
+            )
 
     def _maybe_roll_day(self) -> None:
         today = date.today()
@@ -558,68 +692,159 @@ class AccountRiskManager:
             self._today = today
 
     def _do_roll_day(self) -> None:
-        if self._daily_pnl < 0:
-            # Previous day was a loss — already counted in consecutive_loss_days
-            pass
-        else:
+        """
+        End-of-day roll: save history entry, reset intraday counters.
+        Locked by caller (_lock must be held or called with _lock).
+        """
+        prev_pnl = self._daily_pnl
+        breached = self._daily_loss_hit
+
+        # Persist final daily record
+        self._append_history(pnl=prev_pnl, breached=breached)
+
+        # Reset consecutive counter only when day was profitable
+        if not breached and prev_pnl >= 0:
             self._consecutive_loss_days = 0
 
         self._log.info(
-            "Day rolled — resetting daily state for client=%s (prev_pnl=%.0f)",
-            self.client_id, self._daily_pnl,
+            "Day rolled — pnl=%.0f breached=%s consec=%d client=%s",
+            prev_pnl, breached, self._consecutive_loss_days, self.client_id,
         )
+
+        # Reset intraday state
         self._daily_pnl          = 0.0
         self._highest_profit     = 0.0
         self._dynamic_max_loss   = self._config.max_daily_loss
         self._daily_loss_hit     = False
         self._warning_sent       = False
-        self._cooldown_until     = None
         self._force_exit_triggered = False
+        # NOTE: _lockout_until is intentionally NOT reset here
         self._save_state()
 
+    # ── Persistence ───────────────────────────────────────────────────────────
+
     def _save_state(self) -> None:
+        """Persist today's live risk state to JSON (called under lock)."""
         try:
             state = {
                 "date":                  self._today.isoformat(),
+                "client_id":             self.client_id,
+                "broker_id":             self.broker_id,
                 "daily_pnl":             self._daily_pnl,
                 "highest_profit":        self._highest_profit,
                 "dynamic_max_loss":      self._dynamic_max_loss,
                 "daily_loss_hit":        self._daily_loss_hit,
                 "warning_sent":          self._warning_sent,
-                "cooldown_until":        self._cooldown_until.isoformat() if self._cooldown_until else None,
+                "lockout_until":         (
+                    self._lockout_until.isoformat() if self._lockout_until else None
+                ),
                 "consecutive_loss_days": self._consecutive_loss_days,
                 "force_exit_triggered":  self._force_exit_triggered,
+                # Snapshot of active risk params for diagnostics
+                "config": {
+                    "max_daily_loss":    self._config.max_daily_loss,
+                    "trail_stop_loss":   self._config.trail_stop_loss,
+                    "trail_when_pnl":    self._config.trail_when_pnl,
+                    "warning_pct":       self._config.warning_threshold_pct,
+                },
             }
             self._state_file.write_text(json.dumps(state, indent=2))
-        except Exception as e:
-            self._log.warning("Could not save risk state: %s", e)
+        except Exception as exc:
+            self._log.warning("Could not save risk state: %s", exc)
 
     def _load_state(self) -> None:
+        """
+        Restore persisted state on startup.
+        Intraday stats only loaded if saved date == today.
+        Consecutive-day counter and lockout always loaded (survive day roll).
+        Falls back to old 'risk_*.json' naming for migration.
+        """
+        # Backward-compat: also check old 'risk_' prefix from v1/v2
+        _slug = self.config_id[:8]
+        old_file = Path(self._config.state_dir) / f"risk_{_slug}.json"
+        state_file = self._state_file if self._state_file.exists() else (
+            old_file if old_file.exists() else None
+        )
         try:
-            if not self._state_file.exists():
+            if not state_file:
                 return
-            state = json.loads(self._state_file.read_text())
-            if state.get("date") != date.today().isoformat():
-                self._log.info("State file is from yesterday — starting fresh")
-                return
-            self._daily_pnl          = float(state.get("daily_pnl", 0))
-            self._highest_profit     = float(state.get("highest_profit", 0))
-            self._dynamic_max_loss   = float(state.get("dynamic_max_loss", self._config.max_daily_loss))
-            self._daily_loss_hit     = bool(state.get("daily_loss_hit", False))
-            self._warning_sent       = bool(state.get("warning_sent", False))
+            state = json.loads(state_file.read_text())
+            saved_date_str = state.get("date", "")
+
+            # Always restore: consecutive count + lockout
             self._consecutive_loss_days = int(state.get("consecutive_loss_days", 0))
-            self._force_exit_triggered  = bool(state.get("force_exit_triggered", False))
-            cu = state.get("cooldown_until")
-            if cu:
-                self._cooldown_until = datetime.fromisoformat(cu)
-            self._log.info("Loaded risk state from disk — pnl=%.0f loss_hit=%s",
-                           self._daily_pnl, self._daily_loss_hit)
-        except Exception as e:
-            self._log.warning("Could not load risk state: %s", e)
+
+            # New key: lockout_until; old key was cooldown_until (ignored — no lockout in v1)
+            lu = state.get("lockout_until")
+            if lu:
+                try:
+                    self._lockout_until = datetime.fromisoformat(lu)
+                except ValueError:
+                    self._lockout_until = None
+
+            # Intraday state: only restore if same calendar day
+            if saved_date_str != date.today().isoformat():
+                self._log.info(
+                    "Stale state date=%s kept consec=%d lockout=%s",
+                    saved_date_str, self._consecutive_loss_days, self._lockout_until,
+                )
+                return
+
+            self._daily_pnl          = float(state.get("daily_pnl",        0))
+            self._highest_profit     = float(state.get("highest_profit",    0))
+            self._dynamic_max_loss   = float(state.get("dynamic_max_loss",  self._config.max_daily_loss))
+            self._daily_loss_hit     = bool( state.get("daily_loss_hit",    False))
+            self._warning_sent       = bool( state.get("warning_sent",      False))
+            self._force_exit_triggered = bool(state.get("force_exit_triggered", False))
+
+            self._log.info(
+                "Restored state — pnl=%.0f loss_hit=%s consec=%d lockout=%s",
+                self._daily_pnl, self._daily_loss_hit,
+                self._consecutive_loss_days, self._lockout_until,
+            )
+        except Exception as exc:
+            self._log.warning("Could not load risk state: %s", exc)
+
+    def _append_history(self, pnl: float, breached: bool) -> None:
+        """Append or update today's record in the daily history JSON file."""
+        try:
+            history: list = []
+            if self._history_file.exists():
+                try:
+                    history = json.loads(self._history_file.read_text())
+                except Exception:
+                    history = []
+
+            today_str = date.today().isoformat()
+            record = {
+                "date":                  today_str,
+                "client_id":             self.client_id,
+                "broker_id":             self.broker_id,
+                "final_pnl":             round(pnl, 2),
+                "daily_loss_hit":        breached,
+                "highest_profit":        round(self._highest_profit, 2),
+                "dynamic_max_loss_used": round(self._dynamic_max_loss, 2),
+                "max_daily_loss_config": round(self._config.max_daily_loss, 2),
+                "consecutive_loss_days": self._consecutive_loss_days,
+                "lockout_until":         (
+                    self._lockout_until.isoformat() if self._lockout_until else None
+                ),
+                "recorded_at":           datetime.now(timezone.utc).isoformat(),
+            }
+
+            # Replace if same date already exists (update-in-place)
+            history = [h for h in history if h.get("date") != today_str]
+            history.append(record)
+            # Retain last 60 trading days
+            history = history[-60:]
+
+            self._history_file.write_text(json.dumps(history, indent=2))
+        except Exception as exc:
+            self._log.warning("Could not append risk history: %s", exc)
 
 
 # ── Module-level registry ─────────────────────────────────────────────────────
-# Maps (user_id, config_id) → AccountRiskManager
+
 _risk_registry: Dict[tuple, AccountRiskManager] = {}
 _risk_lock = threading.Lock()
 
@@ -631,10 +856,7 @@ def get_account_risk(
     client_id: str = "unknown",
     config:    Optional[AccountRiskConfig] = None,
 ) -> AccountRiskManager:
-    """
-    Return (or create) the risk manager for a specific (user, account) pair.
-    thread-safe singleton per account.
-    """
+    """Singleton factory — one AccountRiskManager per (user_id, config_id)."""
     key = (user_id, config_id)
     with _risk_lock:
         if key not in _risk_registry:
@@ -645,14 +867,17 @@ def get_account_risk(
                 client_id = client_id,
                 config    = config or AccountRiskConfig(),
             )
+        elif config is not None:
+            # Update existing manager with new config if one is supplied
+            _risk_registry[key].update_config(config)
     return _risk_registry[key]
 
 
 def list_all_risk_statuses(user_id: str) -> list:
-    """Return risk status for all accounts of a user."""
+    """Return risk status dicts for all accounts belonging to user_id."""
     result = []
     with _risk_lock:
-        for (uid, cfg_id), rm in _risk_registry.items():
+        for (uid, _), rm in _risk_registry.items():
             if uid == user_id:
                 result.append(rm.get_status())
     return result

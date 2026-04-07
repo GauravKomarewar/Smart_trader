@@ -131,3 +131,122 @@ export function getLtp(token: string): number | undefined {
 export function getQuote(token: string): Quote | undefined {
   return quoteCache.get(token)
 }
+
+
+// ═══════════════════════════════════════════════════════
+//  MarketWS — /ws/market  real-time symbol tick feed
+//  No auth required. Subscibes to any symbol list.
+// ═══════════════════════════════════════════════════════
+
+export interface MarketTick {
+  symbol:    string
+  exchange:  string
+  ltp:       number
+  change:    number
+  changePct: number
+  open:      number
+  high:      number
+  low:       number
+  close:     number
+  volume:    number
+  oi:        number
+  tick_time: string
+  source:    string
+}
+
+type TickHandler = (tick: MarketTick) => void
+type MarketMsgType = 'connected' | 'subscribed' | 'unsubscribed' | 'tick' | 'heartbeat' | 'pong' | 'error'
+
+class MarketWebSocket {
+  private ws: WebSocket | null = null
+  private _open = false
+  private reconnectDelay = 2000
+  private maxDelay = 30_000
+  private pingTimer: ReturnType<typeof setInterval> | null = null
+  private pendingSubscribe: Set<string> = new Set()
+  private subscribed: Set<string> = new Set()
+  private tickHandlers: Set<TickHandler> = new Set()
+
+  connect() {
+    if (this.ws && this.ws.readyState <= WebSocket.OPEN) return
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const url = `${proto}://${location.host}/ws/market`
+    this.ws = new WebSocket(url)
+
+    this.ws.onopen = () => {
+      this._open = true
+      this.reconnectDelay = 2000
+      this._startPing()
+      // Re-subscribe any pending or previously subscribed symbols
+      const all = new Set([...this.pendingSubscribe, ...this.subscribed])
+      if (all.size > 0) {
+        this._send({ action: 'subscribe', symbols: [...all] })
+      }
+    }
+
+    this.ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data) as { type: MarketMsgType; data?: any; symbols?: string[] }
+        if (msg.type === 'tick' && msg.data) {
+          const tick = msg.data as MarketTick
+          this.tickHandlers.forEach(h => { try { h(tick) } catch {} })
+        } else if (msg.type === 'subscribed') {
+          this.subscribed = new Set(msg.symbols ?? [])
+          this.pendingSubscribe.clear()
+        }
+      } catch { /* ignore malformed */ }
+    }
+
+    this.ws.onclose = () => {
+      this._open = false
+      this._stopPing()
+      setTimeout(() => {
+        this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, this.maxDelay)
+        this.connect()
+      }, this.reconnectDelay)
+    }
+
+    this.ws.onerror = () => { this.ws?.close() }
+  }
+
+  subscribe(symbols: string[]) {
+    if (!symbols.length) return
+    symbols.forEach(s => this.pendingSubscribe.add(s.toUpperCase()))
+    if (this._open) {
+      this._send({ action: 'subscribe', symbols })
+    } else {
+      this.connect()
+    }
+  }
+
+  unsubscribe(symbols: string[]) {
+    if (this._open && symbols.length) {
+      this._send({ action: 'unsubscribe', symbols })
+    }
+    symbols.forEach(s => {
+      this.subscribed.delete(s.toUpperCase())
+      this.pendingSubscribe.delete(s.toUpperCase())
+    })
+  }
+
+  onTick(handler: TickHandler): () => void {
+    this.tickHandlers.add(handler)
+    return () => { this.tickHandlers.delete(handler) }
+  }
+
+  private _send(payload: unknown) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(payload))
+    }
+  }
+
+  private _startPing() {
+    this.pingTimer = setInterval(() => this._send({ action: 'ping' }), 20_000)
+  }
+
+  private _stopPing() {
+    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null }
+  }
+}
+
+export const marketWs = new MarketWebSocket()

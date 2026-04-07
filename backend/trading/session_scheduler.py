@@ -97,12 +97,16 @@ def _validate_shoonya_token(user_id: str, token: str) -> bool:
         return False
 
 
-def _save_shoonya_cached_token(user_id: str, token: str, source: str = "unknown"):
-    """Save a Shoonya token to shared cache file for cross-platform use."""
+def _save_shoonya_cached_token(user_id: str, token, source: str = "unknown"):
+    """Save a Shoonya token to shared cache file for cross-platform use.
+    token may be a _TokenResult (has .access_token) or plain str.
+    """
     import json as _json
+    access_token = getattr(token, "access_token", "") or ""
     data = {
         "user_id": user_id,
-        "token": token,
+        "token": str(token),
+        "access_token": access_token,
         "timestamp": datetime.now().isoformat(),
         "source": source,
     }
@@ -318,13 +322,38 @@ class SessionScheduler:
         token = None
 
         # ── Tier 0: Try cached token from shared file ────────────────────────
-        try:
-            cached = _load_shoonya_cached_token(creds["USER_ID"])
-            if cached:
-                log.info("Using cached Shoonya token from shared file")
-                token = cached
-        except Exception as e:
-            log.debug("Cached token not available: %s", e)
+        # If shoonya_platform (trading.service) is running and its cache is recent
+        # but invalid, it may be in the middle of its own login — wait and retry
+        # to avoid competing OAuth sessions that invalidate each other.
+        for _cache_attempt in range(3):
+            try:
+                cached = _load_shoonya_cached_token(creds["USER_ID"])
+                if cached:
+                    log.info("Using cached Shoonya token from shared file (attempt %d)", _cache_attempt + 1)
+                    token = cached
+                    break
+            except Exception as e:
+                log.debug("Cached token not available (attempt %d): %s", _cache_attempt + 1, e)
+
+            if token:
+                break
+
+            # Check if the cache file is fresh (written in the last 90s)
+            # — shoonya_platform may still be logging in on startup
+            try:
+                import json as _j, os as _os2
+                if _os2.path.exists(_TOKEN_CACHE_FILE):
+                    with open(_TOKEN_CACHE_FILE) as _f:
+                        _d = _j.load(_f)
+                    _age = (datetime.now() - datetime.fromisoformat(_d["timestamp"])).total_seconds()
+                    if _age < 90:
+                        log.info("Cache is %ds old — waiting 30s for shoonya_platform to finish login", int(_age))
+                        time.sleep(30)
+                        continue
+            except Exception:
+                pass
+
+            break  # Cache absent or too old — skip waiting
 
         # ── Tier 1: Try direct QuickAuth API ─────────────────────────────────
         if not token:

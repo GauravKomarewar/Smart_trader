@@ -251,7 +251,7 @@ class ShoonyaAdapter(BrokerAdapter):
     @staticmethod
     def _map_trade(raw: dict) -> Trade:
         return Trade(
-            trade_id=str(raw.get("ftm") or raw.get("trade_id") or ""),
+            trade_id=str(raw.get("flid") or raw.get("fillid") or raw.get("ftm") or raw.get("trade_id") or ""),
             order_id=str(raw.get("norenordno") or raw.get("order_id") or ""),
             symbol=raw.get("tsym") or raw.get("symbol") or "",
             exchange=raw.get("exch") or "",

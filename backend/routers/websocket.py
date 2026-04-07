@@ -26,6 +26,15 @@ from broker.shoonya_client import get_session
 logger = logging.getLogger("smart_trader.websocket")
 router = APIRouter(tags=["websocket"])
 
+
+def _normalize_sym(s: str) -> str:
+    """Normalize symbol for comparison: strip exchange prefix, suffixes, and spaces."""
+    s = str(s).upper().split(":")[-1]
+    for sfx in ("-INDEX", "-EQ", "-BE", "-SM", "-IL"):
+        if s.endswith(sfx):
+            s = s[: -len(sfx)]
+    return s.replace(" ", "")
+
 # ── Active connections registry ───────────────────────────────────────────────
 class ConnectionManager:
     def __init__(self):
@@ -61,20 +70,50 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-# ── No demo tick generator — only real data is sent ────────────────────
+# ── Live tick service integration ──────────────────────────────────────────────
+
+def _get_tick_service():
+    try:
+        from broker.live_tick_service import get_tick_service
+        return get_tick_service()
+    except Exception:
+        return None
 
 
 @router.websocket("/ws/market")
 async def market_websocket(websocket: WebSocket):
     """
     Live market data WebSocket.
-    Clients subscribe to symbols and receive real-time ticks.
+    Clients subscribe to symbols and receive real-time ticks from both
+    Fyers (primary) and Shoonya (parallel) data pipelines.
     """
     await manager.connect(websocket)
     session = get_session()
     subscribed: Set[str] = set()
     stop_event = asyncio.Event()
-    demo_task = None
+
+    # Register per-connection broadcast callback for this client
+    tick_svc = _get_tick_service()
+    if tick_svc is not None:
+        loop = asyncio.get_event_loop()
+        tick_svc.set_event_loop(loop)
+
+    async def _send_tick(msg: dict) -> None:
+        """Forward a tick only to symbols this client has subscribed."""
+        sym = msg.get("data", {}).get("symbol", "")
+        if not sym:
+            return
+        # Normalize both sides so "NIFTY50" matches subscribed "NIFTY 50"
+        sym_norm = _normalize_sym(sym)
+        if sym.upper() not in subscribed and sym_norm not in {_normalize_sym(s) for s in subscribed}:
+            return
+        try:
+            await websocket.send_text(json.dumps(msg))
+        except Exception:
+            pass
+
+    if tick_svc is not None:
+        tick_svc.add_broadcast_callback(_send_tick)
 
     try:
         # Send initial connection acknowledgement
@@ -106,7 +145,18 @@ async def market_websocket(websocket: WebSocket):
                 subscribed.update(new_symbols)
                 logger.info("WS subscribe: %s (total=%d)", new_symbols, len(subscribed))
 
-                # No demo ticks — only real broker data is pushed
+                # Pass new subscriptions to the live tick service
+                if tick_svc is not None and new_symbols:
+                    tick_svc.subscribe(new_symbols)
+
+                # Send back any already-cached ticks immediately
+                if tick_svc is not None:
+                    for sym in new_symbols:
+                        cached = tick_svc.get_latest(sym)
+                        if cached:
+                            await websocket.send_text(json.dumps({
+                                "type": "tick", "data": cached
+                            }))
 
                 await websocket.send_text(json.dumps({
                     "type": "subscribed",
@@ -131,8 +181,8 @@ async def market_websocket(websocket: WebSocket):
         logger.error("WS error: %s", e)
     finally:
         stop_event.set()
-        if demo_task:
-            demo_task.cancel()
+        if tick_svc is not None:
+            tick_svc.remove_broadcast_callback(_send_tick)
         await manager.disconnect(websocket)
 
 
@@ -206,10 +256,16 @@ async def live_feed_websocket(websocket: WebSocket):
                     dashboard = await asyncio.get_event_loop().run_in_executor(
                         None, supreme.get_dashboard, user_id
                     )
-                    has_data = (
+                    # Determine if this is a meaningful data push:
+                    # Accept if there are ANY positions, orders, non-zero funds,
+                    # or if it has explicit broker data (even with zero values).
+                    acct = dashboard.get("accountSummary", {})
+                    has_data = bool(
                         dashboard.get("positions")
                         or dashboard.get("orders")
-                        or any(v != 0 for v in dashboard.get("accountSummary", {}).values())
+                        or any(v != 0 for v in acct.values())
+                        or dashboard.get("holdings")
+                        or dashboard.get("trades")
                     )
                     if has_data:
                         _last_good_dashboard = dashboard

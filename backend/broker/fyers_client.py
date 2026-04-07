@@ -124,6 +124,29 @@ class FyersDataClient:
             self._client = None
         return self._try_load()
 
+    def inject_token(self, app_id: str, access_token: str) -> bool:
+        """Inject a valid token from a broker adapter session.
+
+        Called by FyersAdapter._build_client() so the global data client
+        always uses the freshest token.
+        """
+        try:
+            from fyers_apiv3 import fyersModel
+            with self._lock:
+                self._client = fyersModel.FyersModel(
+                    client_id=app_id,
+                    token=access_token,
+                    log_path="/tmp/",
+                    is_async=False,
+                )
+                self._app_id = app_id
+                self._loaded = True
+            logger.info("Fyers data client updated with injected token (app=%s)", app_id)
+            return True
+        except Exception as e:
+            logger.warning("Failed to inject Fyers token into data client: %s", e)
+            return False
+
     @property
     def is_live(self) -> bool:
         """True when the Fyers client is available."""
@@ -316,6 +339,71 @@ class FyersDataClient:
                 "source":    "fyers",
             })
         return out
+
+    # ── Historical candle data ─────────────────────────────────────────────────
+
+    _TF_RESOLUTION = {
+        "1m": "1", "3m": "3", "5m": "5", "10m": "10",
+        "15m": "15", "30m": "30", "1h": "60", "2h": "120",
+        "4h": "240", "D": "1D", "W": "7D", "M": "30D",
+    }
+
+    def get_history(
+        self,
+        fyers_symbol: str,
+        resolution: str = "5m",
+        days_back: int = 30,
+    ) -> List[Dict]:
+        """
+        Fetch OHLCV candle history from Fyers.
+
+        Args:
+            fyers_symbol: e.g. "NSE:NIFTY50-INDEX", "NSE:RELIANCE-EQ"
+            resolution:   "1m" | "5m" | "15m" | "30m" | "1h" | "D" etc.
+            days_back:    number of calendar days to look back
+
+        Returns:
+            List of {time, open, high, low, close, volume} dicts (ascending).
+        """
+        f = self._get()
+        if not f:
+            return []
+
+        fyres_res = self._TF_RESOLUTION.get(resolution, "5")
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        range_from = (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        range_to = now.strftime("%Y-%m-%d")
+
+        try:
+            resp = f.history({
+                "symbol":      fyers_symbol,
+                "resolution":  fyres_res,
+                "date_format":  1,
+                "range_from":  range_from,
+                "range_to":    range_to,
+                "cont_flag":   1,
+            })
+            if resp.get("code") != 200 or resp.get("s") != "ok":
+                logger.debug("Fyers history error: %s", resp.get("message", resp))
+                return []
+            candles_raw = resp.get("candles", [])
+            # Fyers returns: [[epoch, O, H, L, C, V], ...]
+            candles = []
+            for c in candles_raw:
+                if len(c) >= 6:
+                    candles.append({
+                        "time":   int(c[0]),
+                        "open":   c[1],
+                        "high":   c[2],
+                        "low":    c[3],
+                        "close":  c[4],
+                        "volume": int(c[5]),
+                    })
+            return candles
+        except Exception as e:
+            logger.debug("Fyers get_history error: %s", e)
+            return []
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────
