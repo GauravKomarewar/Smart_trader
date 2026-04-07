@@ -22,7 +22,7 @@ router = APIRouter(prefix="/market", tags=["market"])
 def _detect_exchange(sym: str, fallback: str = "NSE") -> str:
     """Auto-detect exchange from symbol pattern. Options/futures → NFO, else fallback."""
     upper = sym.upper().replace(" ", "")
-    if re.search(r'\d+(CE|PE)$', upper):
+    if re.search(r'\d{3,}(CE|PE)', upper):
         return "NFO"
     if re.search(r'\d+FUT$', upper):
         return "NFO"

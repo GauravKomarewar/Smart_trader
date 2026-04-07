@@ -82,14 +82,11 @@ export function useLiveData() {
       if (!Array.isArray(data)) return
       // Anti-flicker: skip all-zero pushes when we already have meaningful data
       const cur = useBrokerAccountsStore.getState().accounts
-      const hasExisting = cur && cur.length > 0 && cur.some(
-        (a: any) => a.is_live
+      const hasMeaningful = (accs: any[]) => accs.some(
+        (a: any) => a.cash || a.available_margin || a.total_balance || a.used_margin
       )
-      if (hasExisting) {
-        const hasIncoming = (data as any[]).some(
-          (a: any) => a.is_live
-        )
-        if (!hasIncoming) return
+      if (cur && cur.length > 0 && hasMeaningful(cur)) {
+        if (!hasMeaningful(data as any[])) return
       }
       setAccounts(data as BrokerAccountWS[])
     }

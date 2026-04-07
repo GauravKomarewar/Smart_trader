@@ -485,9 +485,9 @@ class LiveTickService:
         if upper_orig in {"NIFTY BANK", "BANK NIFTY"}: return "NSE:NIFTYBANK-INDEX"
         if upper_orig in {"FIN NIFTY"}: return "NSE:FINNIFTY-INDEX"
 
-        # Option symbols: end with CE or PE and contain digits (e.g. NIFTY24APR22500CE)
+        # Option symbols: contain CE or PE preceded by digits (e.g. NIFTY24APR22500CE, NIFTY2290030JUN26CE)
         import re
-        if re.search(r'\d+(CE|PE)$', upper):
+        if re.search(r'\d{3,}(CE|PE)', upper):
             return f"NFO:{upper}"
         # Futures: end with FUT and contain digits (e.g. NIFTY24APRFUT)
         if re.search(r'\d+FUT$', upper):

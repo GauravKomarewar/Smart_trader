@@ -32,7 +32,7 @@ function normSym(s: string): string {
 /** Detect exchange from symbol pattern: options/futures → NFO, else NSE. */
 function detectExchange(sym: string): string {
   const upper = sym.toUpperCase().replace(/\s+/g, '').split(':').pop() ?? ''
-  if (/\d+(CE|PE)$/i.test(upper)) return 'NFO'
+  if (/\d{3,}(CE|PE)/i.test(upper)) return 'NFO'
   if (/\d+FUT$/i.test(upper)) return 'NFO'
   return 'NSE'
 }
@@ -64,6 +64,9 @@ export default function WatchlistChartPage() {
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(
     activeWatchlist?.items[0]?.symbol ?? null
   )
+  // Resolve tradingsymbol for the selected item (used for chart/OHLCV data fetching)
+  const selectedItem = activeWatchlist?.items.find(i => i.symbol === selectedSymbol)
+  const chartSymbol = selectedItem?.tradingsymbol || selectedSymbol
   // Mobile view toggle
   const [mobileView, setMobileView] = useState<'list' | 'chart'>('list')
 
@@ -113,8 +116,8 @@ export default function WatchlistChartPage() {
           'flex-1 flex flex-col overflow-hidden',
           mobileView === 'chart' ? 'flex' : 'hidden sm:flex'
         )}>
-          {selectedSymbol ? (
-            <ChartPanel symbol={selectedSymbol} />
+          {chartSymbol ? (
+            <ChartPanel symbol={chartSymbol} />
           ) : (
             <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
               <div className="text-center space-y-2">
@@ -285,20 +288,22 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
   onRemove: () => void
 }) {
   const { openOrderModal } = useUIStore()
-  const [quote, setQuote] = useState(getLiveQuote(item.symbol))
+  // Use tradingsymbol for data fetching (works for options like NIFTY2290030JUN26CE)
+  const tickSym = item.tradingsymbol || item.symbol
+  const [quote, setQuote] = useState(getLiveQuote(tickSym))
   const [hover, setHover] = useState(false)
 
   useEffect(() => {
-    fetchRestQuote(item.symbol).then(() => setQuote(getLiveQuote(item.symbol)))
-    marketWs.subscribe([item.symbol])
+    fetchRestQuote(tickSym).then(() => setQuote(getLiveQuote(tickSym)))
+    marketWs.subscribe([tickSym])
     return marketWs.onTick((tick) => {
-      if (normSym(tick.symbol) === normSym(item.symbol)) {
+      if (normSym(tick.symbol) === normSym(tickSym)) {
         const q = { ltp: tick.ltp, changePct: tick.changePct ?? 0, change: tick.change ?? 0, volume: tick.volume ?? 0 }
-        _liveQuotes[normSym(item.symbol)] = q
+        _liveQuotes[normSym(tickSym)] = q
         setQuote(q)
       }
     })
-  }, [item.symbol])
+  }, [tickSym])
 
   return (
     <div

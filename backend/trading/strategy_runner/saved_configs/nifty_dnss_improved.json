@@ -4,8 +4,8 @@
   "id": "NIFTY_DNSS_IMPROVED",
   "description": "Improved DNSS with VIX spike defense, panic adj rule, breakeven guard, and trailing SL. Handles sudden directional moves and VIX spikes (war/event scenarios).",
   "type": "neutral",
-  "enabled": false,
-  "status": "STOPPED",
+  "enabled": true,
+  "status": "RUNNING",
   "identity": {
     "exchange": "NFO",
     "underlying": "NIFTY",

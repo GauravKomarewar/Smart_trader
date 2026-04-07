@@ -730,10 +730,8 @@ def env_preview(
         key   = field_def["key"]
         val   = creds.get(key, "")
         label = field_def["label"]
-        # Mask secrets in preview — show first 2 chars + asterisks
-        is_secret = field_def.get("type") == "password"
-        display   = (val[:2] + "***") if (is_secret and len(val) > 2) else val
-        lines.append(f"{key}={display}   # {label}")
+        # Show full value (no masking — user requested full visibility)
+        lines.append(f"{key}={val}   # {label}")
 
     return {"env_content": "\n".join(lines), "warning": "",
             "broker_id": cfg.broker_id, "client_id": cfg.client_id}
@@ -763,9 +761,9 @@ def edit_creds(
     result: dict = {}
     for field_def in BROKER_FIELD_DEFS.get(cfg.broker_id, []):
         key = field_def["key"]
-        is_sensitive = field_def.get("type") == "password"
         val = creds.get(key, "")
-        result[key] = "__SAVED__" if (is_sensitive and val) else val
+        # Return full value (no masking — user requested full visibility)
+        result[key] = val
 
     return {
         "fields":    result,

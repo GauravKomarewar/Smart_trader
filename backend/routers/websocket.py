@@ -317,7 +317,8 @@ async def live_feed_websocket(websocket: WebSocket):
                             None, supreme.get_broker_accounts, user_id
                         )
                         has_account_data = any(
-                            a.get("is_live")
+                            (a.get("cash") or a.get("available_margin") or
+                             a.get("total_balance") or a.get("used_margin"))
                             for a in accounts
                         )
                         if has_account_data:

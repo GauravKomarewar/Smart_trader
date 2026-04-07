@@ -22,7 +22,6 @@ const TABS = [
   { id: 'theme',      label: 'Theme & Display',  icon: Palette },
   { id: 'copy',       label: 'Copy Trading',     icon: Copy },
   { id: 'webhook',    label: 'Webhooks',         icon: Webhook },
-  { id: 'diagnostics',label: 'Diagnostics',      icon: Activity },
 ] as const
 type TabId = (typeof TABS)[number]['id']
 
@@ -90,7 +89,6 @@ export default function SettingsPage() {
             {active === 'theme'       && <ThemeSection />}
             {active === 'copy'        && <CopyTradeSection />}
             {active === 'webhook'     && <WebhookSection />}
-            {active === 'diagnostics' && <DiagnosticsSection />}
           </div>
         </div>
       </div>
@@ -268,13 +266,12 @@ function BrokersSection() {
       })))
     } catch { setFields([]) }
 
-    // Pre-populate from saved credentials
+    // Pre-populate from saved credentials (full values returned by backend)
     try {
       const saved = await api.brokerEditCreds(cfg.id)
-      // __SAVED__ means sensitive field has a value — show blank with placeholder
       const prefilled: Record<string, string> = {}
       for (const [k, v] of Object.entries(saved.fields ?? {})) {
-        prefilled[k] = v === '__SAVED__' ? '' : v
+        prefilled[k] = String(v ?? '')
       }
       setEditCreds(prefilled)
     } catch {
@@ -529,7 +526,7 @@ function BrokersSection() {
                 <TextInput value={editNickname} onChange={setEditNickname} />
               </div>
               <div className="text-[11px] text-text-muted">
-                Leave sensitive fields blank to keep existing encrypted values.
+                All credential values are shown in full. Edit as needed.
               </div>
               {fields.map((f: any) => (
                 <div key={f.id}>
@@ -539,8 +536,8 @@ function BrokersSection() {
                   <TextInput
                     value={editCreds[f.id] ?? ''}
                     onChange={v => setEditCreds(prev => ({ ...prev, [f.id]: v }))}
-                    type={f.sensitive ? 'password' : 'text'}
-                    placeholder={f.sensitive ? '(saved — leave blank to keep)' : (f.placeholder ?? '')}
+                    type="text"
+                    placeholder={f.placeholder ?? ''}
                   />
                 </div>
               ))}

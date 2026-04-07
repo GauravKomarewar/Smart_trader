@@ -12,9 +12,10 @@ import { api } from '../lib/api'
 import {
   WalletCards, Wifi, WifiOff, Layers, FileText, BarChart2, Package,
   RefreshCw, AlertCircle, XCircle, PenLine, ShieldCheck, X,
+  Activity, Terminal, CheckCircle, AlertTriangle, Loader2,
 } from 'lucide-react'
 
-type DashTab = 'positions' | 'holdings' | 'orders' | 'trades'
+type DashTab = 'positions' | 'holdings' | 'orders' | 'trades' | 'diagnostics'
 
 const BROKER_TINTS = [
   'border-l-[3px] border-l-[#3b9ede] bg-[#3b9ede]/5',
@@ -62,6 +63,7 @@ export default function BrokerAccountsPage() {
     { key: 'holdings',  label: 'Holdings',  icon: Package,   count: brokerData?.holdings?.length },
     { key: 'orders',    label: 'Orders',    icon: FileText,  count: brokerData?.orders?.length },
     { key: 'trades',    label: 'Trade Book',icon: BarChart2, count: brokerData?.trades?.length },
+    { key: 'diagnostics', label: 'Diagnostics', icon: Activity },
   ]
 
   async function exitAll() {
@@ -205,6 +207,7 @@ export default function BrokerAccountsPage() {
               {activeTab === 'holdings'  && <BrokerHoldingsTable  data={brokerData?.holdings ?? []} accountId={selectedId ?? ''} toast={toast} />}
               {activeTab === 'orders'    && <BrokerOrdersTable    data={brokerData?.orders ?? []} accountId={selectedId ?? ''} toast={toast} />}
               {activeTab === 'trades'    && <BrokerTradesTable    data={brokerData?.trades ?? []} />}
+              {activeTab === 'diagnostics' && <DiagnosticsSection toast={toast} accounts={accounts} selectedConfigId={selectedId} />}
             </div>
           </div>
         )}
@@ -504,7 +507,7 @@ function BrokerOrdersTable({ data, accountId, toast }: { data: any[]; accountId:
     setModifying(true)
     const oid = modify.order.id ?? modify.order.orderId ?? modify.order.order_id
     try {
-      await api.modifyOrder(oid, { price: parseFloat(modify.price), quantity: parseInt(modify.qty), orderType: modify.orderType })
+      await api.modifyOrder(oid, { accountId: accountId, price: parseFloat(modify.price), quantity: parseInt(modify.qty), orderType: modify.orderType })
       toast(`Modified: ${modify.order.tradingsymbol ?? modify.order.symbol}`, 'success')
       setModify(null)
     } catch { toast('Failed to modify order', 'error') }
@@ -672,4 +675,175 @@ function BrokerTradesTable({ data }: { data: any[] }) {
 
 function EmptyState({ msg }: { msg: string }) {
   return <div className="flex items-center justify-center py-16 text-text-muted text-sm">{msg}</div>
+}
+
+// ─── Diagnostics Section ─────────────────────────────────────────────────────
+type DiagCall = 'profile' | 'positions' | 'orderbook' | 'funds' | 'holdings' | 'tradebook'
+const DIAG_CALLS: { key: DiagCall; label: string }[] = [
+  { key: 'profile',    label: 'Profile' },
+  { key: 'funds',      label: 'Funds' },
+  { key: 'positions',  label: 'Positions' },
+  { key: 'orderbook',  label: 'Order Book' },
+  { key: 'holdings',   label: 'Holdings' },
+  { key: 'tradebook',  label: 'Tradebook' },
+]
+
+function DiagnosticsSection({ toast, accounts, selectedConfigId }: {
+  toast: (m: string, t: 'success'|'error'|'warning'|'info') => void
+  accounts: BrokerAccountWS[]
+  selectedConfigId: string | null
+}) {
+  const [health, setHealth] = useState<{ label: string; status: 'ok' | 'warn' | 'error'; detail: string }[]>([])
+  const [healthLoading, setHealthLoading] = useState(false)
+  const [diagCall, setDiagCall] = useState<DiagCall>('funds')
+  const [diagResult, setDiagResult] = useState<any>(null)
+  const [diagRunning, setDiagRunning] = useState(false)
+
+  useEffect(() => { runHealthChecks() }, [])
+
+  const runHealthChecks = async () => {
+    setHealthLoading(true)
+    const checks: typeof health = []
+    const t0 = Date.now()
+    try {
+      const res = await fetch('/api/health')
+      const ms = Date.now() - t0
+      if (res.ok) {
+        const body = await res.json()
+        checks.push({ label: 'Backend API', status: 'ok', detail: `Responding in ${ms}ms · mode=${body.mode}` })
+        checks.push({
+          label: 'Broker Sessions',
+          status: (body.active_accounts ?? 0) > 0 ? 'ok' : 'warn',
+          detail: `${body.active_accounts ?? 0} account(s) connected`,
+        })
+      } else {
+        checks.push({ label: 'Backend API', status: 'error', detail: `HTTP ${res.status}` })
+      }
+    } catch (e: any) {
+      checks.push({ label: 'Backend API', status: 'error', detail: String(e) })
+    }
+    setHealth(checks)
+    setHealthLoading(false)
+  }
+
+  const runDiagnose = async () => {
+    if (!selectedConfigId) { toast('Select a broker account first', 'error'); return }
+    setDiagRunning(true)
+    setDiagResult(null)
+    try {
+      const res = await api.brokerDiagnose(selectedConfigId, diagCall)
+      setDiagResult(res)
+    } catch (e: any) {
+      setDiagResult({ ok: false, error: String(e), data: null })
+    } finally {
+      setDiagRunning(false)
+    }
+  }
+
+  const STATUS_ICON: Record<string, React.ReactNode> = {
+    ok:    <CheckCircle className="w-4 h-4 text-profit shrink-0" />,
+    warn:  <AlertTriangle className="w-4 h-4 text-warning shrink-0" />,
+    error: <XCircle className="w-4 h-4 text-loss shrink-0" />,
+  }
+  const STATUS_BADGE: Record<string, string> = { ok: 'badge-green', warn: 'badge-yellow', error: 'badge-red' }
+
+  const selectedAcc = accounts.find(a => a.config_id === selectedConfigId)
+
+  return (
+    <div className="p-4 space-y-4">
+      {/* System Health */}
+      <div className="bg-bg-elevated border border-border rounded-lg p-4">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-[12px] font-semibold text-text-bright">System Health</span>
+          <button onClick={runHealthChecks} disabled={healthLoading}
+            className="flex items-center gap-1 text-[11px] text-text-muted hover:text-text-sec">
+            <RefreshCw className={cn('w-3 h-3', healthLoading && 'animate-spin')} /> Refresh
+          </button>
+        </div>
+        <div className="space-y-2.5">
+          {health.length === 0 && healthLoading && (
+            <div className="text-[11px] text-text-muted flex items-center gap-2">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Checking…
+            </div>
+          )}
+          {health.map(c => (
+            <div key={c.label} className="flex items-center gap-3">
+              {STATUS_ICON[c.status]}
+              <div className="flex-1 min-w-0">
+                <div className="text-[12px] font-medium text-text-sec">{c.label}</div>
+                <div className="text-[10px] text-text-muted truncate">{c.detail}</div>
+              </div>
+              <span className={cn('badge', STATUS_BADGE[c.status])}>{c.status}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Broker API Inspector */}
+      <div className="bg-bg-elevated border border-border rounded-lg p-4">
+        <div className="flex items-center gap-2 mb-4">
+          <Terminal className="w-3.5 h-3.5 text-brand" />
+          <span className="text-[12px] font-semibold text-text-bright">Broker API Inspector</span>
+          {selectedAcc && (
+            <span className="text-[10px] text-text-muted">
+              Testing: {selectedAcc.broker_name} · {selectedAcc.client_id}
+            </span>
+          )}
+        </div>
+
+        {!selectedConfigId ? (
+          <div className="text-[11px] text-text-muted py-4 text-center">Select a broker account above to run diagnostics</div>
+        ) : (
+          <div className="space-y-4">
+            <div>
+              <div className="text-[10px] text-text-muted mb-1.5 uppercase font-medium tracking-wide">Select API Call</div>
+              <div className="flex flex-wrap gap-1.5">
+                {DIAG_CALLS.map(c => (
+                  <button key={c.key}
+                    onClick={() => { setDiagCall(c.key); setDiagResult(null) }}
+                    className={cn(
+                      'px-3 py-1 rounded text-[11px] font-medium border transition-all',
+                      diagCall === c.key
+                        ? 'bg-brand text-white border-brand'
+                        : 'bg-bg-surface border-border text-text-sec hover:border-brand/40'
+                    )}>
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button onClick={runDiagnose} disabled={diagRunning}
+              className="flex items-center gap-2 text-[11px] px-3 py-1.5 rounded bg-brand text-white hover:bg-brand/90 disabled:opacity-50 font-medium">
+              {diagRunning
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Calling {diagCall}…</>
+                : <><Terminal className="w-3.5 h-3.5" />Call {DIAG_CALLS.find(c => c.key === diagCall)?.label}</>
+              }
+            </button>
+
+            {diagResult && (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="text-[10px] uppercase text-text-muted font-medium tracking-wide flex items-center gap-2">
+                    Raw Response
+                    {diagResult.ok
+                      ? <span className="badge badge-green">OK · {diagResult.elapsed_ms}ms</span>
+                      : <span className="badge badge-red">ERROR</span>
+                    }
+                  </div>
+                  <button className="text-[10px] text-text-muted hover:text-text-sec"
+                    onClick={() => { navigator.clipboard.writeText(JSON.stringify(diagResult, null, 2)); toast('Copied', 'success') }}>
+                    Copy
+                  </button>
+                </div>
+                <pre className="bg-bg-surface border border-border rounded-lg p-3 text-[10px] text-text-sec overflow-auto max-h-96 font-mono leading-relaxed">
+                  {JSON.stringify(diagResult, null, 2)}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }

@@ -244,9 +244,18 @@ class PositionSLManager:
 
             from broker.multi_broker import registry
             exit_side = "SELL" if side == "BUY" else "BUY"
+            # Auto-detect exchange from symbol
+            import re
+            sym_upper = symbol.upper().replace(" ", "")
+            if re.search(r'\d{3,}(CE|PE)', sym_upper) or re.search(r'\d+FUT$', sym_upper):
+                exchange = "NFO"
+            elif any(k in sym_upper for k in ("CRUDE", "GOLD", "SILVER", "COPPER", "NATURAL", "ZINC", "LEAD", "ALUMINIUM", "NICKEL", "COTTON")):
+                exchange = "MCX"
+            else:
+                exchange = "NSE"
             order = {
                 "symbol":            symbol,
-                "exchange":          "NSE",  # will be overridden by adapter if needed
+                "exchange":          exchange,
                 "side":              exit_side,
                 "transaction_type":  "S" if exit_side == "SELL" else "B",
                 "product":           product,
