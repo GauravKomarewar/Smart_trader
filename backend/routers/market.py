@@ -1,5 +1,6 @@
 """Market data router — quotes, option chain, indices, global markets."""
 
+import re
 import logging
 from collections import defaultdict
 from fastapi import APIRouter, Query
@@ -16,6 +17,16 @@ from broker.symbol_normalizer import (
 
 logger = logging.getLogger("smart_trader.api")
 router = APIRouter(prefix="/market", tags=["market"])
+
+
+def _detect_exchange(sym: str, fallback: str = "NSE") -> str:
+    """Auto-detect exchange from symbol pattern. Options/futures → NFO, else fallback."""
+    upper = sym.upper().replace(" ", "")
+    if re.search(r'\d+(CE|PE)$', upper):
+        return "NFO"
+    if re.search(r'\d+FUT$', upper):
+        return "NFO"
+    return fallback
 
 INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
 NIFTY50_SYMBOLS = [
@@ -98,6 +109,9 @@ async def get_quote(
     fyers = get_fyers_client()
     sym_upper = symbol.upper().strip()
 
+    # Auto-detect exchange for option/future symbols
+    effective_exchange = _detect_exchange(sym_upper, exchange)
+
     if fyers.is_live:
         # 1) Check index alias table (handles "NIFTY 50", "NIFTY BANK" etc.)
         fyers_sym = _INDEX_ALIAS.get(sym_upper)
@@ -106,19 +120,21 @@ async def get_quote(
             # 2) Try ScriptMaster lookup for proper Fyers symbol
             inst = lookup_by_trading_symbol(sym_upper)
             if not inst:
-                inst = lookup_by_trading_symbol(f"{exchange}:{sym_upper}")
+                inst = lookup_by_trading_symbol(f"{effective_exchange}:{sym_upper}")
             if not inst:
                 # 3) Try with spaces removed (e.g. "NIFTY 50" → "NIFTY50")
                 no_space = sym_upper.replace(" ", "")
                 inst = lookup_by_trading_symbol(no_space)
                 if not inst:
-                    inst = lookup_by_trading_symbol(f"{exchange}:{no_space}")
+                    inst = lookup_by_trading_symbol(f"{effective_exchange}:{no_space}")
             if inst and inst.fyers_symbol:
                 fyers_sym = inst.fyers_symbol
-            elif exchange in ("NSE", "BSE"):
-                fyers_sym = f"{exchange}:{sym_upper.replace(' ', '')}-EQ"
+            elif effective_exchange in ("NFO", "BFO", "MCX"):
+                fyers_sym = f"{effective_exchange}:{sym_upper.replace(' ', '')}"
+            elif effective_exchange in ("NSE", "BSE"):
+                fyers_sym = f"{effective_exchange}:{sym_upper.replace(' ', '')}-EQ"
             else:
-                fyers_sym = f"{exchange}:{sym_upper.replace(' ', '')}"
+                fyers_sym = f"{effective_exchange}:{sym_upper.replace(' ', '')}"
         q = fyers.get_quote(fyers_sym)
         if q:
             # Enrich with canonical symbol info
@@ -629,6 +645,8 @@ async def get_ohlcv(
     If the timeframe is not 1m, candles are re-sampled from 1m bars.
     """
     sym = symbol.upper().replace(" ", "")
+    # Auto-detect exchange for option/future symbols
+    exchange = _detect_exchange(sym, exchange)
     _TF_MINUTES = {
         "1m": 1, "3m": 3, "5m": 5, "15m": 15,
         "30m": 30, "1h": 60, "4h": 240, "D": 1440,
@@ -696,6 +714,8 @@ async def get_ohlcv(
                         inst = lookup_by_trading_symbol(f"{exchange}:{sym}")
                     if inst and inst.fyers_symbol:
                         fyers_sym = inst.fyers_symbol
+                    elif exchange in ("NFO", "BFO", "MCX"):
+                        fyers_sym = f"{exchange}:{sym}"
                     elif exchange in ("NSE", "BSE"):
                         fyers_sym = f"{exchange}:{sym}-EQ"
                     else:
@@ -752,7 +772,11 @@ async def get_latest_tick(
     # Fallback: REST quote from broker
     fyers = get_fyers_client()
     if fyers.is_live:
-        fyers_sym = f"{exchange}:{sym}-EQ" if exchange in ("NSE", "BSE") else f"{exchange}:{sym}"
+        eff_exch = _detect_exchange(sym, exchange)
+        if eff_exch in ("NFO", "BFO", "MCX"):
+            fyers_sym = f"{eff_exch}:{sym}"
+        else:
+            fyers_sym = f"{eff_exch}:{sym}-EQ"
         q = fyers.get_quote(fyers_sym)
         if q:
             return {"symbol": sym, "tick": q, "source": "fyers_rest"}

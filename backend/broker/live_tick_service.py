@@ -461,23 +461,45 @@ class LiveTickService:
 
     @staticmethod
     def _to_fyers_sym(symbol: str) -> str:
-        """Convert a generic symbol to Fyers format."""
+        """Convert a generic symbol to Fyers format.
+        Handles indices, equities, options (CE/PE), and futures (FUT).
+        """
         if ":" in symbol:
             return symbol  # Already in Fyers format
-        upper = symbol.upper()
+        upper = symbol.upper().replace(" ", "")
         # Indices
         _idx = {
             "NIFTY": "NSE:NIFTY50-INDEX",
-            "NIFTY 50": "NSE:NIFTY50-INDEX",
             "NIFTY50": "NSE:NIFTY50-INDEX",
             "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
-            "NIFTY BANK": "NSE:NIFTYBANK-INDEX",
+            "NIFTYBANK": "NSE:NIFTYBANK-INDEX",
             "FINNIFTY": "NSE:FINNIFTY-INDEX",
             "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
             "SENSEX": "BSE:SENSEX-INDEX",
         }
+        # Also check original with spaces for "NIFTY 50", "NIFTY BANK"
+        upper_orig = symbol.upper().strip()
         if upper in _idx:
             return _idx[upper]
+        if upper_orig in {"NIFTY 50"}: return "NSE:NIFTY50-INDEX"
+        if upper_orig in {"NIFTY BANK", "BANK NIFTY"}: return "NSE:NIFTYBANK-INDEX"
+        if upper_orig in {"FIN NIFTY"}: return "NSE:FINNIFTY-INDEX"
+
+        # Option symbols: end with CE or PE and contain digits (e.g. NIFTY24APR22500CE)
+        import re
+        if re.search(r'\d+(CE|PE)$', upper):
+            return f"NFO:{upper}"
+        # Futures: end with FUT and contain digits (e.g. NIFTY24APRFUT)
+        if re.search(r'\d+FUT$', upper):
+            return f"NFO:{upper}"
+        # Try ScriptMaster lookup for accurate exchange detection
+        try:
+            from scripts.unified_scriptmaster import lookup_by_trading_symbol
+            inst = lookup_by_trading_symbol(upper)
+            if inst and inst.fyers_symbol:
+                return inst.fyers_symbol
+        except Exception:
+            pass
         # Default: assume NSE equity
         return f"NSE:{upper}-EQ"
 

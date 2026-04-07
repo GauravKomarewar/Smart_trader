@@ -119,12 +119,23 @@ interface DashboardStore {
   updateOrder: (o: Order) => void
 }
 
-export const useDashboardStore = create<DashboardStore>((set) => ({
+export const useDashboardStore = create<DashboardStore>((set, get) => ({
   data: null,
   lastUpdate: 0,
   isLoading: true,
   showOnlyOpenOrders: false,
-  setData: (data) => set({ data, lastUpdate: Date.now(), isLoading: false }),
+  setData: (data) => {
+    // Anti-flicker: skip update if data is identical (deep comparison via JSON)
+    const current = get().data
+    if (current) {
+      try {
+        const curStr = JSON.stringify(current)
+        const newStr = JSON.stringify(data)
+        if (curStr === newStr) return  // No change — skip re-render
+      } catch { /* proceed with update on serialization error */ }
+    }
+    set({ data, lastUpdate: Date.now(), isLoading: false })
+  },
   setLoading: (v) => set({ isLoading: v }),
   setShowOnlyOpenOrders: (v) => set({ showOnlyOpenOrders: v }),
   updatePosition: (p) => set(s => {

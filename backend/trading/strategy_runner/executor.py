@@ -277,6 +277,12 @@ class StrategyExecutor:
         if self._should_enter(now):
             self._execute_entry()
             self._save_state()  # ✅ BUG-022 FIX: Save immediately after entry
+        elif (self.state.entered_today
+              and not any(l.is_active for l in self.state.legs.values())
+              and self.state.spot_price > 0):
+            # Entry was marked but no active legs (stale entry from when market data was missing)
+            logger.warning("entered_today=True but no active legs and spot is live — resetting for re-entry")
+            self.state.entered_today = False
 
         # Check adjustments
         actions = self.adjustment_engine.check_and_apply(now)

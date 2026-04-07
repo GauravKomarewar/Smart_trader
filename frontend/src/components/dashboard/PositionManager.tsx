@@ -9,7 +9,7 @@
    • EXIT button always visible (not just on hover)
    • EXIT ALL targets open positions only
    ═══════════════════════════════════════════════════════════════════════ */
-import { useState, useMemo, useRef, useCallback } from 'react'
+import { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import { useDashboardStore, useBrokerAccountsStore, useToastStore, useUIStore } from '../../stores'
 import { cn, fmtINR, fmtNum, pnlClass, pnlSign } from '../../lib/utils'
 import { api } from '../../lib/api'
@@ -57,6 +57,42 @@ export default function PositionManager() {
   // Position Manager state: pending user edits + managed exits
   const [pmEdits, setPmEdits]         = useState<PmEdits>({})
   const [managed, setManaged]         = useState<ManagedExit>({})
+
+  // Load saved SL settings from server on mount and refresh periodically
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const res: any = await api.getSLSettings()
+        if (cancelled) return
+        const settings = res?.data ?? []
+        const mgd: ManagedExit = {}
+        for (const s of settings) {
+          if (s.pos_key && s.active) {
+            mgd[s.pos_key] = {
+              stop_loss: s.stop_loss ?? undefined,
+              target: s.target ?? undefined,
+              trailing_value: s.trailing_value ?? undefined,
+              trail_when: s.trail_when ?? undefined,
+              active: true,
+            }
+          }
+        }
+        setManaged(prev => {
+          // Merge server state with any in-progress user edits
+          const merged = { ...mgd }
+          // Preserve local managed entries that user just activated but server hasn't synced yet
+          for (const [k, v] of Object.entries(prev)) {
+            if (v.active && !merged[k]) merged[k] = v
+          }
+          return merged
+        })
+      } catch { /* silent */ }
+    }
+    load()
+    const interval = window.setInterval(load, 10000)  // refresh every 10s
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [])
 
   // Build accountId → { brokerName, idx } map from broker accounts store
   const brokerMap = useMemo(() => {

@@ -240,10 +240,17 @@ async def live_feed_websocket(websocket: WebSocket):
 
     _last_good_dashboard: dict | None = None
     _last_good_accounts: list | None = None
+    _last_dash_hash: str = ""
+    _last_acct_hash: str = ""
+
+    def _quick_hash(obj) -> str:
+        """Fast hash of a JSON-serializable object for dedup."""
+        import hashlib
+        return hashlib.md5(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()
 
     async def _push_loop():
         """Background task: read all views from PostgreSQL via SupremeManager."""
-        nonlocal _last_good_dashboard, _last_good_accounts
+        nonlocal _last_good_dashboard, _last_good_accounts, _last_dash_hash, _last_acct_hash
         from managers.supreme_manager import supreme
         cycle = 0
         while not stop_event.is_set():
@@ -271,11 +278,15 @@ async def live_feed_websocket(websocket: WebSocket):
                         _last_good_dashboard = dashboard
                     elif _last_good_dashboard:
                         dashboard = _last_good_dashboard
-                    await websocket.send_text(json.dumps({
-                        "type": "dashboard",
-                        "data": dashboard,
-                        "ts": ts,
-                    }))
+                    # Only push if data actually changed (anti-flicker)
+                    dash_hash = _quick_hash(dashboard)
+                    if dash_hash != _last_dash_hash:
+                        _last_dash_hash = dash_hash
+                        await websocket.send_text(json.dumps({
+                            "type": "dashboard",
+                            "data": dashboard,
+                            "ts": ts,
+                        }))
                 except Exception as e:
                     logger.debug("WS feed dashboard error: %s", e)
 
@@ -313,11 +324,15 @@ async def live_feed_websocket(websocket: WebSocket):
                             _last_good_accounts = accounts
                         elif _last_good_accounts:
                             accounts = _last_good_accounts
-                        await websocket.send_text(json.dumps({
-                            "type": "broker_accounts",
-                            "data": accounts,
-                            "ts": ts,
-                        }))
+                        # Only push if accounts data actually changed (anti-flicker)
+                        acct_hash = _quick_hash(accounts)
+                        if acct_hash != _last_acct_hash:
+                            _last_acct_hash = acct_hash
+                            await websocket.send_text(json.dumps({
+                                "type": "broker_accounts",
+                                "data": accounts,
+                                "ts": ts,
+                            }))
                     except Exception as e:
                         logger.debug("WS feed accounts error: %s", e)
 

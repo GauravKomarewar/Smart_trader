@@ -29,6 +29,14 @@ function normSym(s: string): string {
     .replace(/\s+/g, '')
 }
 
+/** Detect exchange from symbol pattern: options/futures → NFO, else NSE. */
+function detectExchange(sym: string): string {
+  const upper = sym.toUpperCase().replace(/\s+/g, '').split(':').pop() ?? ''
+  if (/\d+(CE|PE)$/i.test(upper)) return 'NFO'
+  if (/\d+FUT$/i.test(upper)) return 'NFO'
+  return 'NSE'
+}
+
 // Kick off connection once the module is loaded
 marketWs.connect()
 
@@ -401,7 +409,7 @@ function ChartPanel({ symbol }: { symbol: string }) {
     volSeriesRef.current = volSeries
 
     // Load OHLCV history and subscribe to live tick updates
-    api.marketOhlcv(symbol, interval, 'NSE', 500)
+    api.marketOhlcv(symbol, interval, detectExchange(symbol), 500)
       .then((res: any) => {
         if (!chartRef.current) return
         if (res?.candles?.length) {

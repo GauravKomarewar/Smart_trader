@@ -95,7 +95,27 @@ class MarketReader:
         if expiry is not None:
             filename = f"{self.exchange}_{self.symbol}_{expiry}.sqlite"
             file_path = folder / filename
-            return str(file_path) if file_path.exists() else None
+            if file_path.exists():
+                return str(file_path)
+            # Try alternative date formats if exact match not found
+            # e.g. expiry = "7-Apr-2026" but file is "07-04-2026"
+            try:
+                for fmt_in in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d"):
+                    try:
+                        dt = datetime.strptime(expiry, fmt_in)
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    return None
+                for fmt_out in ("%d-%b-%Y", "%d-%m-%Y", "%-d-%b-%Y", "%Y-%m-%d"):
+                    alt_name = f"{self.exchange}_{self.symbol}_{dt.strftime(fmt_out)}.sqlite"
+                    alt_path = folder / alt_name
+                    if alt_path.exists():
+                        return str(alt_path)
+            except Exception:
+                pass
+            return None
 
         # No expiry: auto-resolve to nearest future expiry
         pattern = f"{self.exchange}_{self.symbol}_*.sqlite"
@@ -112,11 +132,17 @@ class MarketReader:
             if len(parts) < 3:
                 continue
             date_str = parts[2]
-            try:
-                expiry_date = datetime.strptime(date_str, "%d-%b-%Y").date()
-                candidates.append((f, expiry_date))
-            except ValueError:
+            # Support multiple date formats: DD-MMM-YYYY (10-Apr-2026) and DD-MM-YYYY (10-04-2026)
+            expiry_date = None
+            for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d"):
+                try:
+                    expiry_date = datetime.strptime(date_str, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if expiry_date is None:
                 continue
+            candidates.append((f, expiry_date))
 
         if not candidates:
             logger.warning(f"Using first match: {matches[0].name}")
@@ -1261,11 +1287,15 @@ class MarketReader:
             if len(parts) < 3:
                 continue
             date_str = parts[2]
-            try:
-                exp_date = datetime.strptime(date_str, "%d-%b-%Y").date()
+            exp_date = None
+            for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d"):
+                try:
+                    exp_date = datetime.strptime(date_str, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if exp_date is not None:
                 expiries.append((exp_date, date_str))
-            except ValueError:
-                continue
 
         if not expiries:
             raise ValueError("No valid expiry dates found in filenames")
