@@ -52,20 +52,28 @@ class OrderManager(BaseManager):
             })
 
         # Preserve locally-set terminal statuses (e.g. CANCELLED via cancel_order API)
-        # that haven't propagated to the broker yet
+        # that haven't propagated to the broker yet.
+        # Many brokers (Fyers, Shoonya) update their order book asynchronously,
+        # so we must protect the confirmed CANCELLED status from being overwritten.
         if rows and order_ids:
             try:
-                existing = self._get_existing_statuses(user_id, sess.config_id, order_ids)
+                existing = self._get_existing_cached(user_id, sess.config_id, order_ids)
                 for row in rows:
                     oid = row["order_id"]
                     broker_status = str(row["data"].get("status", "")).upper()
-                    cached_status = existing.get(oid, "")
+                    cached = existing.get(oid)
+                    if not cached:
+                        continue
+                    cached_status = cached["status"]
                     # If our cache says CANCELLED/REJECTED but broker still says PENDING/OPEN,
-                    # preserve the terminal status
+                    # preserve the terminal status and carry through metadata
                     if (cached_status in _TERMINAL_STATUSES
                             and broker_status in _NON_TERMINAL):
                         row["data"]["status"] = cached_status
-                        row["data"]["remarks"] = row["data"].get("remarks", "") or f"Cancel confirmed (pending broker sync)"
+                        row["data"]["remarks"] = row["data"].get("remarks", "") or "Cancel confirmed (pending broker sync)"
+                        # Carry through the cancellation timestamp so it survives polls
+                        if cached.get("cancelled_at"):
+                            row["data"]["_cancelled_at"] = cached["cancelled_at"]
             except Exception as e:
                 self._log.debug("Terminal status preservation failed: %s", e)
 
@@ -85,17 +93,24 @@ class OrderManager(BaseManager):
             )
 
     @staticmethod
-    def _get_existing_statuses(user_id: str, config_id: str, order_ids: list) -> dict:
-        """Read current cached statuses from mgr_orders for comparison."""
+    def _get_existing_cached(user_id: str, config_id: str, order_ids: list) -> dict:
+        """Read current cached statuses and metadata from mgr_orders."""
         conn = get_trading_conn()
         try:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cur.execute(
-                "SELECT order_id, data->>'status' AS status "
+                "SELECT order_id, data->>'status' AS status, "
+                "data->>'_cancelled_at' AS cancelled_at "
                 "FROM mgr_orders WHERE user_id = %s AND config_id = %s "
                 "AND order_id = ANY(%s)",
                 (user_id, config_id, order_ids),
             )
-            return {r["order_id"]: (r["status"] or "").upper() for r in cur.fetchall()}
+            return {
+                r["order_id"]: {
+                    "status": (r["status"] or "").upper(),
+                    "cancelled_at": r.get("cancelled_at") or "",
+                }
+                for r in cur.fetchall()
+            }
         finally:
             conn.close()

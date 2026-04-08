@@ -226,15 +226,31 @@ class FyersAdapter(BrokerAdapter):
         prd_raw   = (raw.get("prd") or raw.get("productType") or "").upper()
         prod_map  = {"INTRADAY": "MIS", "MARGIN": "NRML", "CNC": "CNC", "MIS": "MIS", "NRML": "NRML"}
         product   = prod_map.get(prd_raw, "MIS")
-        qty       = int(raw.get("qty") or raw.get("netqty") or raw.get("netQty") or 0)
         buy_avg   = float(raw.get("buy_avg") or raw.get("buyAvg") or 0)
         sell_avg  = float(raw.get("sellAvg") or 0)
-        avg_prc   = buy_avg if qty >= 0 else sell_avg
         ltp       = float(raw.get("ltp") or raw.get("last_price") or 0)
         rpnl      = float(raw.get("realised_pnl") or raw.get("rpnl") or raw.get("realized_profit") or 0)
         urmtom    = float(raw.get("unrealised_pnl") or raw.get("urmtom") or raw.get("unrealized_profit") or 0)
         buy_qty   = int(raw.get("day_buy_qty") or raw.get("buyQty") or 0)
         sell_qty  = int(raw.get("day_sell_qty") or raw.get("sellQty") or 0)
+
+        # Fyers qty is UNSIGNED — derive sign from buy_qty vs sell_qty
+        raw_qty   = int(raw.get("qty") or raw.get("netqty") or raw.get("netQty") or 0)
+        if raw_qty != 0 and sell_qty > buy_qty:
+            qty = -abs(raw_qty)  # net short
+        elif raw_qty != 0 and buy_qty > sell_qty:
+            qty = abs(raw_qty)   # net long
+        elif raw_qty != 0:
+            # Equal buy/sell: use netQty sign if provided, else check avg prices
+            net_qty_raw = raw.get("netQty")
+            if net_qty_raw is not None and int(net_qty_raw) != 0:
+                qty = int(net_qty_raw)
+            else:
+                qty = raw_qty  # fallback
+        else:
+            qty = 0
+
+        avg_prc   = buy_avg if qty >= 0 else sell_avg
 
         itype = ""
         if clean_sym.endswith("CE"):     itype = "CE"
@@ -430,7 +446,7 @@ class FyersAdapter(BrokerAdapter):
         prod_map   = {"INTRADAY": "MIS", "MARGIN": "NRML", "CNC": "CNC"}
         product    = prod_map.get(prd_raw, prd_raw)
         return Trade(
-            trade_id=str(raw.get("id") or ""),
+            trade_id=str(raw.get("tradeNumber") or raw.get("id") or ""),
             order_id=str(raw.get("orderNumber") or raw.get("orderId") or ""),
             symbol=symbol, exchange=exchange,
             side=side, product=product,
@@ -530,6 +546,8 @@ class FyersAdapter(BrokerAdapter):
             client = self._client
         try:
             result = client.cancel_order(data={"id": order_id})
+            logger.info("Fyers cancel_order id=%s → %s", order_id,
+                        {k: result.get(k) for k in ("s", "code", "message")} if isinstance(result, dict) else result)
             if isinstance(result, dict):
                 ok = result.get("s") == "ok"
                 return {"success": ok, "message": result.get("message", "")}

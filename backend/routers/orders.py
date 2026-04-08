@@ -197,6 +197,10 @@ def _update_mgr_order_cache(
             return
         data = dict(row["data"] or {})
         data.update({k: v for k, v in changes.items() if v is not None})
+        # Stamp cancellation time for time-limited status preservation
+        if changes.get("status") == "CANCELLED":
+            from datetime import datetime, timezone
+            data["_cancelled_at"] = datetime.now(timezone.utc).isoformat()
         cur.execute(
             """
             UPDATE mgr_orders
