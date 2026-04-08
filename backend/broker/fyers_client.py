@@ -164,6 +164,42 @@ class FyersDataClient:
                 self._try_load()
             return self._client
 
+    _refresh_attempted = False          # one-shot guard per process
+
+    def _try_refresh_from_broker(self) -> bool:
+        """Grab a fresh Fyers token from any active broker session.
+
+        Called automatically when a history/quotes call gets an auth error.
+        Returns True if a new token was successfully injected.
+        """
+        if self._refresh_attempted:
+            return False                # don't loop
+        self._refresh_attempted = True
+        try:
+            from broker.multi_broker import registry
+            # _sessions is {user_id: {config_id: BrokerAccountSession}}
+            for _uid, user_map in list(getattr(registry, '_sessions', {}).items()):
+                for _cid, sess in list(user_map.items()):
+                    if getattr(sess, 'broker_id', '') != 'fyers':
+                        continue
+                    adapter = getattr(sess, '_adapter', None)
+                    if adapter is None:
+                        continue
+                    client = getattr(adapter, '_client', None)
+                    if client is None:
+                        continue
+                    # Extract app_id and token from the adapter's FyersModel
+                    app_id = getattr(client, 'client_id', '') or getattr(adapter, '_app_id', '')
+                    token  = getattr(client, 'token', '')
+                    if app_id and token:
+                        ok = self.inject_token(app_id, token)
+                        if ok:
+                            logger.info("Refreshed Fyers data client token from broker session")
+                            return True
+        except Exception as e:
+            logger.debug("_try_refresh_from_broker failed: %s", e)
+        return False
+
     def _quotes(self, symbols: List[str]) -> List[Dict]:
         """Call fyers.quotes for a list of symbols; returns list of 'v' dicts."""
         f = self._get()
@@ -386,6 +422,10 @@ class FyersDataClient:
             })
             if resp.get("code") != 200 or resp.get("s") != "ok":
                 logger.debug("Fyers history error: %s", resp.get("message", resp))
+                # Auth failure → try refreshing token from active broker session
+                if resp.get("code") in (-16, -17):
+                    if self._try_refresh_from_broker():
+                        return self.get_history(fyers_symbol, resolution, days_back)
                 return []
             candles_raw = resp.get("candles", [])
             # Fyers returns: [[epoch, O, H, L, C, V], ...]

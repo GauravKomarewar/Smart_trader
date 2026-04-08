@@ -81,11 +81,18 @@ export default function ChartModal() {
     let cancelled = false
 
     const needsSubChart = activeIndicators.includes('RSI(14)') || activeIndicators.includes('MACD')
-    const mainHeight = needsSubChart ? 0.75 : 1
     const container = containerRef.current
+
+    /* Wait one frame so flex layout resolves container height */
+    const rafId = requestAnimationFrame(() => {
+      if (cancelled || !container.isConnected) return
+
+    const h = container.clientHeight || window.innerHeight - 100
+    const w = container.clientWidth  || window.innerWidth
 
     /* Create main chart */
     const chart = createChart(container, {
+      autoSize: true,
       layout:    { background: { color: '#0b0e17' }, textColor: '#7b8398', fontSize: 11 },
       grid:      { vertLines: { color: '#1c2133' }, horzLines: { color: '#1c2133' } },
       crosshair: { mode: 1, vertLine: { color: '#22d3ee', labelBackgroundColor: '#22d3ee' }, horzLine: { color: '#22d3ee', labelBackgroundColor: '#22d3ee' } },
@@ -93,8 +100,8 @@ export default function ChartModal() {
       timeScale:       { borderColor: '#252b3b', timeVisible: true, secondsVisible: false },
       handleScroll: { mouseWheel: true, pressedMouseMove: true },
       handleScale:  { mouseWheel: true, pinch: true },
-      width:  container.clientWidth,
-      height: Math.floor(container.clientHeight * mainHeight),
+      width:  w,
+      height: h,
     })
     chartRef.current = chart
 
@@ -102,13 +109,14 @@ export default function ChartModal() {
     let subChart: IChartApi | null = null
     if (needsSubChart && subContainerRef.current) {
       subChart = createChart(subContainerRef.current, {
+        autoSize: true,
         layout:    { background: { color: '#0b0e17' }, textColor: '#7b8398', fontSize: 10 },
         grid:      { vertLines: { color: '#1c2133' }, horzLines: { color: '#1c2133' } },
         crosshair: { mode: 1, vertLine: { color: '#22d3ee', labelBackgroundColor: '#22d3ee' }, horzLine: { color: '#22d3ee', labelBackgroundColor: '#22d3ee' } },
         rightPriceScale: { borderColor: '#252b3b' },
         timeScale:       { borderColor: '#252b3b', timeVisible: true, secondsVisible: false, visible: true },
-        width:  subContainerRef.current.clientWidth,
-        height: Math.floor(container.clientHeight * (1 - mainHeight)),
+        width:  subContainerRef.current.clientWidth || w,
+        height: subContainerRef.current.clientHeight || Math.floor(h * 0.25),
       })
       subChartRef.current = subChart
     }
@@ -272,19 +280,13 @@ export default function ChartModal() {
         if (!cancelled) { setError(err?.message ?? 'Failed to fetch chart data'); setLoading(false) }
       })
 
-    /* Resize observer */
-    const ro = new ResizeObserver(() => {
-      if (!container) return
-      chart.resize(container.clientWidth, Math.floor(container.clientHeight * mainHeight))
-      if (subChart && subContainerRef.current) subChart.resize(subContainerRef.current.clientWidth, Math.floor(container.clientHeight * (1 - mainHeight)))
-    })
-    ro.observe(container)
+    }) // end requestAnimationFrame
 
     return () => {
       cancelled = true
-      ro.disconnect()
-      chart.remove()
-      subChart?.remove()
+      cancelAnimationFrame(rafId)
+      chartRef.current?.remove()
+      subChartRef.current?.remove()
       chartRef.current = null
       subChartRef.current = null
     }
