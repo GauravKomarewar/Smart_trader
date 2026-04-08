@@ -203,6 +203,14 @@ html[data-theme="light"] body {
          transition-colors;
 }
 
+/* Input small variant */
+.input-sm {
+  @apply w-full px-2.5 py-1.5 bg-bg-input border border-border rounded text-[12px] text-text-pri
+         placeholder:text-text-muted
+         focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand/30
+         transition-colors;
+}
+
 /* Select base */
 .select-base {
   @apply input-base appearance-none cursor-pointer;

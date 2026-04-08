@@ -61,7 +61,7 @@ export default function BrokerAccountsPage({ initialTab = 'positions' }: { initi
   const selectedIdx = accounts.findIndex(a => a.config_id === selectedId)
   const positions = brokerData?.positions ?? []
   const openPositions = positions.filter((p: any) =>
-    parseFloat(p.netqty ?? p.qty ?? p.net_quantity ?? p.quantity ?? 0) !== 0
+    parseFloat(p.quantity ?? 0) !== 0
   )
 
   const tabs: { key: DashTab; label: string; icon: typeof Layers; count?: number }[] = [
@@ -244,11 +244,11 @@ function BrokerPositionsTable({
 
   async function exitPos(p: any) {
     if (!account) return
-    const qty = parseFloat(p.netqty ?? p.qty ?? p.net_quantity ?? p.quantity ?? 0)
+    const qty = parseFloat(p.quantity ?? 0)
     if (qty === 0) return
-    const sym  = p.tradingsymbol ?? p.tsym ?? p.symbol ?? ''
-    const exch = p.exchange ?? p.exch ?? 'NSE'
-    const prd  = p.product ?? p.prd ?? 'NRML'
+    const sym  = p.tradingsymbol ?? p.symbol ?? ''
+    const exch = p.exchange ?? 'NSE'
+    const prd  = p.product ?? 'NRML'
     const side = qty > 0 ? 'BUY' : 'SELL'
     const key  = `${sym}|${prd}`
     setExitLoading(key)
@@ -262,8 +262,8 @@ function BrokerPositionsTable({
     }
   }
 
-  const totalRealized   = data.reduce((s, p) => s + ('realised_pnl' in p ? +p.realised_pnl : 'rpnl' in p ? +p.rpnl : 0), 0)
-  const totalUnrealized = data.reduce((s, p) => s + ('unrealised_pnl' in p ? +p.unrealised_pnl : 'urmtom' in p ? +p.urmtom : 0), 0)
+  const totalUnrealized = data.reduce((s, p) => s + parseFloat(p.dayPnl ?? 0), 0)
+  const totalRealized   = data.reduce((s, p) => s + (parseFloat(p.pnl ?? 0) - parseFloat(p.dayPnl ?? 0)), 0)
   const totalPnl = totalRealized + totalUnrealized
 
   return (
@@ -285,16 +285,16 @@ function BrokerPositionsTable({
         </thead>
         <tbody>
           {data.map((p, i) => {
-            const qty    = parseFloat(p.netqty ?? p.qty ?? p.net_quantity ?? p.quantity ?? 0)
+            const qty    = parseFloat(p.quantity ?? 0)
             const isFlat = qty === 0
-            const sym    = p.tradingsymbol ?? p.tsym ?? p.symbol ?? '—'
-            const exch   = p.exchange ?? p.exch ?? '—'
-            const prd    = p.product ?? p.prd ?? '—'
-            const avg    = parseFloat(p.avgprc ?? p.avg_price ?? p.average_price ?? 0)
-            const ltp    = parseFloat(p.ltp ?? p.lp ?? p.last_price ?? 0)
-            const realized   = 'realised_pnl' in p ? +p.realised_pnl : 'rpnl' in p ? +p.rpnl : 'realized_pnl' in p ? +p.realized_pnl : 0
-            const unrealized = 'unrealised_pnl' in p ? +p.unrealised_pnl : 'urmtom' in p ? +p.urmtom : 'unrealized_pnl' in p ? +p.unrealized_pnl : 0
-            const total = realized + unrealized
+            const sym    = p.tradingsymbol ?? p.symbol ?? '—'
+            const exch   = p.exchange ?? '—'
+            const prd    = p.product ?? '—'
+            const avg    = parseFloat(p.avgPrice ?? 0)
+            const ltp    = parseFloat(p.ltp ?? 0)
+            const unrealized = parseFloat(p.dayPnl ?? 0)
+            const realized   = parseFloat(p.pnl ?? 0) - unrealized
+            const total = parseFloat(p.pnl ?? 0)
             const key   = `${sym}|${prd}`
             return (
               <tr key={i} className={cn('transition-colors', isFlat ? 'opacity-40' : rowTint, !isFlat && qty > 0 && 'hover:bg-profit/5', !isFlat && qty < 0 && 'hover:bg-loss/5')}>
@@ -341,7 +341,7 @@ function BrokerPositionsTable({
         <tfoot>
           <tr className="border-t border-border bg-bg-elevated/60">
             <td colSpan={6} className="px-3 py-2 text-[11px] text-text-muted">
-              {data.filter(p => parseFloat(p.netqty??p.qty??0) !== 0).length} open · {data.filter(p => parseFloat(p.netqty??p.qty??0) === 0).length} flat
+              {data.filter(p => parseFloat(p.quantity??0) !== 0).length} open · {data.filter(p => parseFloat(p.quantity??0) === 0).length} flat
             </td>
             <td className={cn('px-3 py-2 text-right font-mono font-bold text-[12px]', pnlClass(totalRealized))}>
               {pnlSign(totalRealized)}{fmtINR(Math.abs(totalRealized))}
@@ -413,12 +413,12 @@ function BrokerHoldingsTable({ data, accountId, account, brokerIdx, toast }: { d
         </thead>
         <tbody>
           {data.map((h, i) => {
-            const sym  = h.symbol ?? h.tradingSymbol ?? h.tsym ?? `H${i}`
-            const qty  = parseFloat(h.quantity ?? h.holdingQty ?? h.hldqty ?? 0)
-            const avg  = parseFloat(h.avgPrice ?? h.average_price ?? h.upldprc ?? 0)
-            const ltp  = parseFloat(h.ltp ?? h.last_price ?? h.lp ?? 0)
-            const exch = h.exchange ?? h.exch ?? 'NSE'
-            const pnl  = parseFloat(h.pnl ?? h.profitAndLoss ?? 0) || (ltp - avg) * qty
+            const sym  = h.symbol ?? `H${i}`
+            const qty  = parseFloat(h.quantity ?? 0)
+            const avg  = parseFloat(h.avgCost ?? 0)
+            const ltp  = parseFloat(h.ltp ?? 0)
+            const exch = h.exchange ?? 'NSE'
+            const pnl  = parseFloat(h.pnl ?? 0) || (ltp - avg) * qty
             const pnlPct = avg > 0 ? ((ltp - avg) / avg) * 100 : 0
             const curVal = ltp * qty
             const isMgd    = !!managed[sym]
@@ -512,8 +512,8 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
   const displayed  = showOpenOnly ? openOrders : data
 
   async function cancelOne(o: any) {
-    const oid = o.brokerOrderId ?? o.orderId ?? o.order_id ?? o.id
-    const acct = o.accountId ?? o.account_id ?? accountId
+    const oid = o.brokerOrderId ?? o.orderId ?? o.id
+    const acct = o.accountId ?? accountId
     if (o.actionable === false || !oid || !acct) {
       toast('This order is not yet ready for cancellation', 'warning')
       return
@@ -539,13 +539,13 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
   async function submitModify() {
     if (!modify) return
     setModifying(true)
-    const oid = modify.order.brokerOrderId ?? modify.order.orderId ?? modify.order.order_id ?? modify.order.id
+    const oid = modify.order.brokerOrderId ?? modify.order.orderId ?? modify.order.id
     try {
       if (modify.order.actionable === false || !oid || !accountId) {
         toast('This order is not yet ready for modification', 'warning')
         return
       }
-      const payload: any = { accountId: accountId, price: parseFloat(modify.price) || 0, quantity: parseInt(modify.qty) || 0, orderType: modify.orderType }
+      const payload: any = { accountId: accountId, price: parseFloat(modify.price) || undefined, quantity: parseInt(modify.qty) || undefined, orderType: modify.orderType }
       if (modify.triggerPrice) payload.triggerPrice = parseFloat(modify.triggerPrice)
       if (modify.validity) payload.validity = modify.validity
       await api.modifyOrder(oid, payload)
@@ -596,11 +596,11 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
         </thead>
         <tbody>
           {displayed.map((o, i) => {
-            const side   = (o.transactionType ?? o.side ?? o.trantype ?? '').toUpperCase()
+            const side   = (o.transactionType ?? '').toUpperCase()
             const isBuy  = side === 'BUY' || side === 'B'
-            const status = (o.status ?? o.orderStatus ?? '').toUpperCase()
+            const status = (o.status ?? '').toUpperCase()
             const isOpen = OPEN_STATUSES_STR.includes(status)
-            const oid    = o.brokerOrderId ?? o.orderId ?? o.order_id ?? o.id ?? String(i)
+            const oid    = o.brokerOrderId ?? o.orderId ?? o.id ?? String(i)
             return (
               <tr key={oid} className="hover:bg-bg-hover">
                 <td className="px-3 py-2">
@@ -609,17 +609,17 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
                   </span>
                   <div className="text-[9px] text-text-muted mt-0.5">{account?.client_id ?? ''}</div>
                 </td>
-                <td className="px-3 py-2 text-text-muted text-[10px] whitespace-nowrap">{fmtTime(o.placedAt ?? o.orderTime ?? o.timestamp ?? '')}</td>
-                <td className="px-3 py-2 font-medium text-[12px] text-text-bright">{o.tradingsymbol ?? o.symbol ?? o.tsym ?? '—'}</td>
-                <td className="px-3 py-2 text-[11px] text-text-muted">{o.exchange ?? o.exch ?? '—'}</td>
+                <td className="px-3 py-2 text-text-muted text-[10px] whitespace-nowrap">{fmtTime(o.placedAt ?? '')}</td>
+                <td className="px-3 py-2 font-medium text-[12px] text-text-bright">{o.tradingsymbol ?? o.symbol ?? '—'}</td>
+                <td className="px-3 py-2 text-[11px] text-text-muted">{o.exchange ?? '—'}</td>
                 <td className="px-3 py-2"><span className={cn('badge text-[9px]', isBuy ? 'badge-buy' : 'badge-sell')}>{isBuy ? 'BUY' : 'SELL'}</span></td>
-                <td className="px-3 py-2 text-[11px] text-text-sec">{o.orderType ?? o.order_type ?? o.prctyp ?? '—'}</td>
-                <td className="px-3 py-2 text-right font-mono text-[12px]">{o.quantity ?? o.qty ?? 0}</td>
+                <td className="px-3 py-2 text-[11px] text-text-sec">{o.orderType ?? '—'}</td>
+                <td className="px-3 py-2 text-right font-mono text-[12px]">{o.quantity ?? 0}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px] text-text-sec">{fmtINR(o.price ?? 0)}</td>
-                <td className="px-3 py-2 text-right font-mono text-[12px] text-text-muted">{fmtINR(o.triggerPrice ?? o.trigger_price ?? o.trgprc ?? 0)}</td>
-                <td className="px-3 py-2 text-right font-mono text-[12px]">{fmtINR(o.avgPrice ?? o.averagePrice ?? o.avgprc ?? 0)}</td>
-                <td className="px-3 py-2 text-[11px] text-text-muted">{o.product ?? o.prd ?? '—'}</td>
-                <td className="px-3 py-2 text-[11px] text-text-muted">{o.validity ?? o.ret ?? '—'}</td>
+                <td className="px-3 py-2 text-right font-mono text-[12px] text-text-muted">{fmtINR(o.triggerPrice ?? 0)}</td>
+                <td className="px-3 py-2 text-right font-mono text-[12px]">{fmtINR(o.avgPrice ?? 0)}</td>
+                <td className="px-3 py-2 text-[11px] text-text-muted">{o.product ?? '—'}</td>
+                <td className="px-3 py-2 text-[11px] text-text-muted">{o.validity ?? '—'}</td>
                 <td className="px-3 py-2">
                   <span className={cn('badge text-[9px]',
                     status.includes('COMPLETE') || status.includes('FILLED') ? 'badge-success' :
@@ -633,10 +633,10 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
                       <button onClick={() => setModify({
                         order: o,
                         price: String(o.price ?? ''),
-                        qty: String(o.quantity ?? o.qty ?? ''),
-                        orderType: o.orderType ?? o.order_type ?? o.prctyp ?? 'LMT',
-                        triggerPrice: String(o.triggerPrice ?? o.trigger_price ?? o.trgprc ?? ''),
-                        validity: o.validity ?? o.ret ?? 'DAY',
+                        qty: String(o.quantity ?? ''),
+                        orderType: o.orderType ?? 'LMT',
+                        triggerPrice: String(o.triggerPrice ?? ''),
+                        validity: o.validity ?? 'DAY',
                       })}
                         className="btn-ghost btn-xs !px-1.5 !py-1 text-text-muted hover:text-brand" title="Modify">
                         <PenLine className="w-3 h-3" />
@@ -664,10 +664,10 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
           </div>
           <div className="flex items-center gap-2 bg-bg-elevated border border-border rounded px-3 py-2">
             <span className="text-[12px] font-semibold text-text-bright">{modify.order.tradingsymbol ?? modify.order.symbol}</span>
-            <span className={cn('badge text-[9px]', (modify.order.transactionType ?? modify.order.side ?? '').toUpperCase().includes('B') ? 'badge-buy' : 'badge-sell')}>
-              {modify.order.transactionType ?? modify.order.side}
+            <span className={cn('badge text-[9px]', (modify.order.transactionType ?? '').toUpperCase().includes('B') ? 'badge-buy' : 'badge-sell')}>
+              {modify.order.transactionType}
             </span>
-            <span className="text-[10px] text-text-muted">{modify.order.exchange ?? modify.order.exch ?? ''}</span>
+            <span className="text-[10px] text-text-muted">{modify.order.exchange ?? ''}</span>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1">
@@ -743,28 +743,28 @@ function BrokerTradesTable({ data, account, brokerIdx }: { data: any[]; account:
         </thead>
         <tbody>
           {data.map((t, i) => {
-            const side  = (t.side ?? t.transactionType ?? t.trantype ?? '').toUpperCase()
+            const side  = (t.transactionType ?? '').toUpperCase()
             const isBuy = side === 'BUY' || side === 'B'
-            const qty   = t.qty ?? t.quantity ?? t.fillShares ?? 0
-            const price = t.price ?? t.averagePrice ?? t.flprc ?? 0
+            const qty   = t.quantity ?? 0
+            const price = t.price ?? 0
             const value = t.value != null ? t.value : qty * price
             return (
-              <tr key={t.trade_id ?? t.tradeId ?? i} className="hover:bg-bg-hover">
+              <tr key={t.tradeId ?? i} className="hover:bg-bg-hover">
                 <td className="px-3 py-2">
                   <span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-sm uppercase tracking-wide', BROKER_BADGES[brokerIdx % BROKER_BADGES.length])}>
                     {account?.broker_name ?? '—'}
                   </span>
                   <div className="text-[9px] text-text-muted mt-0.5">{account?.client_id ?? ''}</div>
                 </td>
-                <td className="px-3 py-2 text-text-muted text-[10px] whitespace-nowrap">{fmtTime(t.tradedAt ?? t.timestamp ?? t.fillTime ?? t.trade_timestamp ?? t.norentm ?? '')}</td>
-                <td className="px-3 py-2 text-[10px] text-text-muted font-mono">{t.trade_id ?? t.tradeId ?? t.flid ?? '—'}</td>
-                <td className="px-3 py-2 text-[10px] text-text-muted font-mono">{t.order_id ?? t.orderId ?? t.norenordno ?? '—'}</td>
+                <td className="px-3 py-2 text-text-muted text-[10px] whitespace-nowrap">{fmtTime(t.tradedAt ?? '')}</td>
+                <td className="px-3 py-2 text-[10px] text-text-muted font-mono">{t.tradeId ?? '—'}</td>
+                <td className="px-3 py-2 text-[10px] text-text-muted font-mono">{t.orderId ?? '—'}</td>
                 <td className="px-3 py-2">
-                  <div className="font-medium text-[12px] text-text-bright">{t.symbol ?? t.tradingSymbol ?? t.tsym ?? '—'}</div>
+                  <div className="font-medium text-[12px] text-text-bright">{t.tradingsymbol ?? t.symbol ?? '—'}</div>
                 </td>
-                <td className="px-3 py-2 text-[11px] text-text-sec">{t.exchange ?? t.exch ?? '—'}</td>
+                <td className="px-3 py-2 text-[11px] text-text-sec">{t.exchange ?? '—'}</td>
                 <td className="px-3 py-2"><span className={cn('badge text-[9px]', isBuy ? 'badge-buy' : 'badge-sell')}>{isBuy ? 'BUY' : 'SELL'}</span></td>
-                <td className="px-3 py-2 text-[11px] text-text-muted">{t.product ?? t.prd ?? '—'}</td>
+                <td className="px-3 py-2 text-[11px] text-text-muted">{t.product ?? '—'}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px]">{qty}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px]">{fmtINR(price)}</td>
                 <td className="px-3 py-2 text-right font-mono text-[12px] text-text-sec">{fmtINR(value)}</td>

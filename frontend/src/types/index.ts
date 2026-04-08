@@ -111,8 +111,14 @@ export interface Position {
   dayPnl: number
   value: number           // qty * ltp
   multiplier: number
+  lot_size: number
   side: PositionSide
   type: InstrumentType
+  status?: 'OPEN' | 'CLOSED'
+  underlying?: string
+  expiry?: string
+  strike?: number
+  option_type?: string
 }
 
 // ── Holdings ────────────────────────────────────

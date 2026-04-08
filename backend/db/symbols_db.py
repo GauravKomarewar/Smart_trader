@@ -592,7 +592,10 @@ def lookup_by_token(exchange: str, token: str) -> Optional[Dict[str, Any]]:
 
 
 def lookup_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Optional[Dict[str, Any]]:
-    """Lookup by trading symbol (e.g. 'NIFTY26APR24500CE')."""
+    """Lookup by trading symbol (e.g. 'NIFTY26APR24500CE').
+
+    Prefers exact match over fuzzy (-EQ/-INDEX stripped) variants.
+    """
     conn = get_trading_conn()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -603,25 +606,44 @@ def lookup_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Optiona
             if not exchange:
                 exchange = parts[0]
             tsym = parts[1]
-        # Remove common suffixes for index/equity matching
-        variants = [tsym]
-        if tsym.endswith("-EQ"):
-            variants.append(tsym[:-3])
-        elif tsym.endswith("-INDEX"):
-            variants.append(tsym[:-6])
 
+        # First: try exact match
         if exchange:
             cur.execute(
-                "SELECT * FROM symbols WHERE trading_symbol = ANY(%s) AND exchange = %s LIMIT 1",
-                (variants, exchange.upper()),
+                "SELECT * FROM symbols WHERE trading_symbol = %s AND exchange = %s LIMIT 1",
+                (tsym, exchange.upper()),
             )
         else:
             cur.execute(
-                "SELECT * FROM symbols WHERE trading_symbol = ANY(%s) LIMIT 1",
-                (variants,),
+                "SELECT * FROM symbols WHERE trading_symbol = %s LIMIT 1",
+                (tsym,),
             )
         row = cur.fetchone()
-        return dict(row) if row else None
+        if row:
+            return dict(row)
+
+        # Second: try without common suffixes (-EQ, -INDEX)
+        alt = None
+        if tsym.endswith("-EQ"):
+            alt = tsym[:-3]
+        elif tsym.endswith("-INDEX"):
+            alt = tsym[:-6]
+
+        if alt:
+            if exchange:
+                cur.execute(
+                    "SELECT * FROM symbols WHERE trading_symbol = %s AND exchange = %s LIMIT 1",
+                    (alt, exchange.upper()),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM symbols WHERE trading_symbol = %s LIMIT 1",
+                    (alt,),
+                )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+        return None
     finally:
         conn.close()
 

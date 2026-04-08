@@ -323,6 +323,19 @@ async def place_order(
             detail="No live broker accounts connected — connect a broker first"
         )
 
+    # Resolve lot_size from symbol DB and multiply quantity
+    actual_qty = req.quantity
+    try:
+        from broker.symbol_normalizer import lookup_by_trading_symbol
+        inst = lookup_by_trading_symbol(req.symbol)
+        if inst:
+            lot_size = getattr(inst, 'lot_size', None) or (inst.get('lot_size') if isinstance(inst, dict) else None) or 1
+            if lot_size > 1:
+                actual_qty = req.quantity * lot_size
+                logger.info("Lot size applied: %s × %d = %d (lot_size=%d)", req.symbol, req.quantity, actual_qty, lot_size)
+    except Exception as e:
+        logger.debug("Lot size lookup failed for %s: %s", req.symbol, e)
+
     # Build unified order intent
     intent = OrderIntentPayload(
         execution_type=exec_type,
@@ -332,7 +345,7 @@ async def place_order(
         legs=[LegPayload(
             tradingsymbol=req.symbol,
             direction=direction,
-            qty=req.quantity,
+            qty=actual_qty,
             order_type=canonical_order_type,
             price=req.price,
             trigger_price=req.triggerPrice or 0.0,

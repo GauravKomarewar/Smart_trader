@@ -17,7 +17,7 @@ _BACKOFF_SECONDS = 60  # Wait 60s after a rate-limit error before retrying
 
 class TradebookManager(BaseManager):
     MANAGER_NAME = "tradebook_manager"
-    REFRESH_INTERVAL = 30.0  # Tradebook polls every 30s to avoid broker rate limits
+    REFRESH_INTERVAL = 10.0  # Tradebook polls every 5s
 
     def refresh_user(self, user_id: str, sessions: list):
         self._refresh_sessions_concurrent(user_id, sessions, self._refresh_session)

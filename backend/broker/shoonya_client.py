@@ -289,7 +289,11 @@ class BrokerSession:
     # ── Market Data ───────────────────────────────────────────────────────────
 
     def get_ltp(self, exchange: str, symbol: str) -> Optional[dict]:
-        """Get latest tick data for a symbol."""
+        """Get latest tick data for a symbol.
+
+        Shoonya's get_quotes expects a numeric exchange token, NOT a trading symbol.
+        We resolve the token from the symbols DB.
+        """
         key = f"{exchange}:{symbol}"
         with self._lock:
             if key in self._tick_store:
@@ -305,7 +309,19 @@ class BrokerSession:
             return None
 
         try:
-            resp = self._client.get_quotes(exchange=exchange, token=symbol)
+            # Resolve numeric exchange token from symbol DB
+            token = symbol  # fallback: caller may have passed a token directly
+            if not symbol.isdigit():
+                try:
+                    from broker.symbol_normalizer import lookup_by_trading_symbol
+                    inst = lookup_by_trading_symbol(symbol, exchange)
+                    if inst:
+                        resolved = (getattr(inst, 'token', None) or "").strip()
+                        if resolved:
+                            token = resolved
+                except Exception:
+                    pass  # use symbol as-is
+            resp = self._client.get_quotes(exchange=exchange, token=token)
             if resp:
                 tick = {
                     "symbol": symbol,

@@ -68,8 +68,9 @@ export default function PositionManager() {
         const settings = res?.data ?? []
         const mgd: ManagedExit = {}
         for (const s of settings) {
-          if (s.pos_key && s.active) {
-            mgd[s.pos_key] = {
+          if (s.pos_key && s.active && s.config_id) {
+            const stateKey = `${s.config_id}|${s.pos_key}`
+            mgd[stateKey] = {
               stop_loss: s.stop_loss ?? undefined,
               target: s.target ?? undefined,
               trailing_value: s.trailing_value ?? undefined,
@@ -107,17 +108,17 @@ export default function PositionManager() {
   }, [brokerAccounts])
 
   const allPositions = data?.positions ?? []
-  const openPositions = useMemo(() => allPositions.filter((p: any) => p.status !== 'CLOSED'), [allPositions])
-  const closedPositions = useMemo(() => allPositions.filter((p: any) => p.status === 'CLOSED'), [allPositions])
+  const openPositions = useMemo(() => allPositions.filter(p => p.status !== 'CLOSED'), [allPositions])
+  const closedPositions = useMemo(() => allPositions.filter(p => p.status === 'CLOSED'), [allPositions])
 
   const filtered = useMemo(() => {
     let ps = allPositions
     if (filter === 'open')   ps = openPositions
     if (filter === 'closed') ps = closedPositions
-    if (showActiveOnly)      ps = ps.filter((p: any) => p.status !== 'CLOSED')
+    if (showActiveOnly)      ps = ps.filter(p => p.status !== 'CLOSED')
     return [...ps].sort((a, b) => {
-      const closedA = (a as any).status === 'CLOSED' ? 1 : 0
-      const closedB = (b as any).status === 'CLOSED' ? 1 : 0
+      const closedA = a.status === 'CLOSED' ? 1 : 0
+      const closedB = b.status === 'CLOSED' ? 1 : 0
       if (closedA !== closedB) return closedA - closedB
       const av = (a as any)[sortKey] as number
       const bv = (b as any)[sortKey] as number
@@ -135,17 +136,17 @@ export default function PositionManager() {
   }
 
   async function squareOff(pos: Position) {
-    const info = brokerMap[(pos as any).accountId]
+    const info = brokerMap[pos.accountId]
     if (!info) { toast('Cannot exit: broker info not found', 'error'); return }
     setSqOffLoading(pos.id)
     try {
       await api.squareOff({
         symbol:    pos.tradingsymbol ?? pos.symbol,
-        exchange:  (pos as any).exchange ?? 'NSE',
-        product:   (pos as any).product  ?? 'NRML',
+        exchange:  pos.exchange ?? 'NSE',
+        product:   pos.product  ?? 'NRML',
         quantity:  Math.abs(pos.quantity),
         side:      pos.side ?? (pos.quantity > 0 ? 'BUY' : 'SELL'),
-        accountId: (pos as any).accountId,
+        accountId: pos.accountId,
       })
       toast(`Exit sent: ${pos.tradingsymbol ?? pos.symbol}`, 'success')
     } catch (e: any) {
@@ -160,7 +161,7 @@ export default function PositionManager() {
     // Group by accountId and exit each broker's positions
     const byAccount: Record<string, any[]> = {}
     for (const p of openPositions) {
-      const aid = (p as any).accountId
+      const aid = p.accountId
       if (aid) { byAccount[aid] = byAccount[aid] ?? []; byAccount[aid].push(p) }
     }
     setSqOffAllLoading(true)
@@ -189,9 +190,9 @@ export default function PositionManager() {
   }
 
   // PM: activate/update managed exit for a row
-  async function activateManaged(posKey: string, accountId: string, currentLtp?: number) {
-    const edits = pmEdits[posKey] ?? {}
-    const prev = managed[posKey]
+  async function activateManaged(stateKey: string, posKey: string, accountId: string, currentLtp?: number) {
+    const edits = pmEdits[stateKey] ?? {}
+    const prev = managed[stateKey]
     const settings = {
       stop_loss:      edits.stop_loss      ? parseFloat(edits.stop_loss)      : prev?.stop_loss,
       target:         edits.target         ? parseFloat(edits.target)         : prev?.target,
@@ -205,9 +206,9 @@ export default function PositionManager() {
 
     setManaged(prev => ({
       ...prev,
-      [posKey]: { active: true, ...settings, initial_ltp: initialLtp, base_stop_loss: baseStopLoss },
+      [stateKey]: { active: true, ...settings, initial_ltp: initialLtp, base_stop_loss: baseStopLoss },
     }))
-    setPmEdits(prev => { const n = { ...prev }; delete n[posKey]; return n })
+    setPmEdits(prev => { const n = { ...prev }; delete n[stateKey]; return n })
     try {
       await api.setSLSettings({
         configId: accountId,
@@ -226,9 +227,9 @@ export default function PositionManager() {
     }
   }
 
-  async function deactivateManaged(posKey: string, accountId: string) {
-    setManaged(prev => { const n = { ...prev }; delete n[posKey]; return n })
-    setPmEdits(prev => { const n = { ...prev }; delete n[posKey]; return n })
+  async function deactivateManaged(stateKey: string, posKey: string, accountId: string) {
+    setManaged(prev => { const n = { ...prev }; delete n[stateKey]; return n })
+    setPmEdits(prev => { const n = { ...prev }; delete n[stateKey]; return n })
     try {
       await api.setSLSettings({ configId: accountId, posKey, active: false })
     } catch { /* non-fatal */ }
@@ -334,13 +335,14 @@ export default function PositionManager() {
             </thead>
             <tbody>
               {filtered.map(p => {
-                const isClosed  = (p as any).status === 'CLOSED'
-                const accountId = (p as any).accountId ?? ''
+                const isClosed  = p.status === 'CLOSED'
+                const accountId = p.accountId ?? ''
                 const broker    = brokerMap[accountId]
                 const bidx      = broker?.idx ?? 0
                 const posKey    = `${p.tradingsymbol ?? p.symbol}|${(p as any).product ?? ''}`
-                const isMgd     = !!managed[posKey]
-                const edits     = pmEdits[posKey] ?? {}
+                const stateKey  = `${accountId}|${posKey}`
+                const isMgd     = !!managed[stateKey]
+                const edits     = pmEdits[stateKey] ?? {}
 
                 return (
                   <tr key={p.id}
@@ -366,7 +368,7 @@ export default function PositionManager() {
                       <div className="font-semibold text-[12px] text-text-bright leading-tight">{p.tradingsymbol}</div>
                       <div className="flex items-center gap-1 mt-0.5">
                         <span className={cn('badge text-[9px]', p.side === 'BUY' ? 'badge-buy' : 'badge-sell')}>{p.side}</span>
-                        <span className="text-[10px] text-text-muted">{(p as any).product}</span>
+                        <span className="text-[10px] text-text-muted">{p.product}</span>
                       </div>
                     </td>
 
@@ -389,12 +391,12 @@ export default function PositionManager() {
                       {(p.pnlPct ?? 0) >= 0 ? '+' : ''}{(p.pnlPct ?? 0).toFixed(2)}%
                     </td>
                     <td className="px-3 py-2 font-mono text-right text-[11px] text-text-sec">{fmtINR(Math.abs(p.value ?? 0))}</td>
-                    <td className="px-3 py-2 text-[10px] text-text-muted">{(p as any).exchange || ''}</td>
+                    <td className="px-3 py-2 text-[10px] text-text-muted">{p.exchange || ''}</td>
 
                     {/* Position Manager columns */}
                     {pmMode && isClosed && <td colSpan={8} className="px-3 py-2 text-center text-[10px] text-text-muted">—</td>}
                     {pmMode && !isClosed && (() => {
-                      const mgdRow = managed[posKey]
+                      const mgdRow = managed[stateKey]
                       // Compute next trail activation price
                       let nextTrailPrice: number | undefined
                       if (isMgd && mgdRow?.initial_ltp && mgdRow?.trailing_value && mgdRow?.trail_when) {
@@ -412,10 +414,11 @@ export default function PositionManager() {
                               type="number"
                               step="any"
                               value={edits[field] ?? (mgdRow?.[field] != null ? String(mgdRow[field]) : '')}
-                              onChange={e => setPmField(posKey, field, e.target.value)}
+                              onChange={e => setPmField(stateKey, field, e.target.value)}
                               placeholder="—"
                               className={cn(
-                                'w-20 bg-bg-surface border text-[11px] font-mono px-1.5 py-1 rounded text-text-bright focus:outline-none focus:border-brand',
+                                (field === 'stop_loss' || field === 'target') ? 'w-[104px]' : 'w-20',
+                                'bg-bg-surface border text-[11px] font-mono px-1.5 py-1 rounded text-text-bright focus:outline-none focus:border-brand',
                                 edits[field] ? 'border-brand/60' : 'border-border'
                               )}
                             />
@@ -440,12 +443,12 @@ export default function PositionManager() {
                         </td>
                         <td className="px-2 py-1.5">
                           <div className="flex items-center gap-1">
-                            <button onClick={() => activateManaged(posKey, accountId, p.ltp)}
+                            <button onClick={() => activateManaged(stateKey, posKey, accountId, p.ltp)}
                               className="text-[10px] px-2 py-1 rounded border border-brand/60 text-brand hover:bg-brand/10 transition-colors font-medium whitespace-nowrap">
                               {isMgd ? 'Update' : 'Activate'}
                             </button>
                             {isMgd && (
-                              <button onClick={() => deactivateManaged(posKey, accountId)}
+                              <button onClick={() => deactivateManaged(stateKey, posKey, accountId)}
                                 className="text-[10px] px-2 py-1 rounded border border-loss/40 text-loss hover:bg-loss/10 transition-colors font-medium">
                                 Off
                               </button>

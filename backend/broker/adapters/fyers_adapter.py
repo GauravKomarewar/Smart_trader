@@ -178,7 +178,7 @@ class FyersAdapter(BrokerAdapter):
         with self._cb_lock:
             self._cb_open_until = 0.0
             self._cb_half_open = False
-            self._cb_backoff = 120.0  # reset for next failure
+            self._cb_backoff = 30.0  # reset for next failure
 
     def _circuit_trip(self) -> None:
         """Call on -429 to open the circuit with exponential backoff."""
@@ -186,7 +186,7 @@ class FyersAdapter(BrokerAdapter):
             backoff = self._cb_backoff
             self._cb_open_until = time.monotonic() + backoff
             self._cb_half_open = False
-            self._cb_backoff = min(backoff * 2, 600.0)  # cap at 10 min
+            self._cb_backoff = min(backoff * 2, 120.0)  # cap at 2 min
         logger.warning("Fyers rate limit — circuit open for %.0fs (client=%s)",
                        backoff, self.client_id)
 
@@ -478,8 +478,20 @@ class FyersAdapter(BrokerAdapter):
         try:
             sym = order.get("symbol", "")
             exch = order.get("exchange", "NSE")
-            # Fyers requires "EXCHANGE:SYMBOL" format
-            fyers_sym = sym if ":" in sym else f"{exch}:{sym}"
+            # Resolve Fyers-specific symbol from instruments DB
+            # e.g. GOLDPETAL30APR26 → MCX:GOLDPETAL26APRFUT
+            fyers_sym = ""
+            if ":" not in sym:
+                try:
+                    from broker.symbol_normalizer import lookup_by_trading_symbol
+                    inst = lookup_by_trading_symbol(sym, exch)
+                    if inst and getattr(inst, 'fyers_symbol', None):
+                        fyers_sym = inst.fyers_symbol
+                        logger.info("Fyers symbol resolved: %s → %s", sym, fyers_sym)
+                except Exception as e:
+                    logger.warning("Fyers symbol lookup failed for %s: %s", sym, e)
+            if not fyers_sym:
+                fyers_sym = sym if ":" in sym else f"{exch}:{sym}"
 
             side_str = str(order.get("side", "BUY")).upper()
             side_int = 1 if side_str in ("BUY", "B") else -1
@@ -526,7 +538,18 @@ class FyersAdapter(BrokerAdapter):
                 return None
             client = self._client
         try:
-            fyers_sym = f"{exchange}:{symbol}" if ":" not in symbol else symbol
+            # Resolve Fyers symbol from DB first
+            fyers_sym = ""
+            if ":" not in symbol:
+                try:
+                    from broker.symbol_normalizer import lookup_by_trading_symbol
+                    inst = lookup_by_trading_symbol(symbol, exchange)
+                    if inst and getattr(inst, 'fyers_symbol', None):
+                        fyers_sym = inst.fyers_symbol
+                except Exception:
+                    pass
+            if not fyers_sym:
+                fyers_sym = f"{exchange}:{symbol}" if ":" not in symbol else symbol
             resp = client.quotes({"symbols": fyers_sym})
             if isinstance(resp, dict) and resp.get("s") == "ok":
                 data_list = resp.get("d", [])
@@ -562,7 +585,19 @@ class FyersAdapter(BrokerAdapter):
                 return {"success": False, "message": "Not connected"}
             client = self._client
         try:
-            modify_data = {"id": order_id, **modifications}
+            otype_map = {"MARKET": 2, "LIMIT": 1, "SL": 3, "SL-M": 4}
+            modify_data: Dict[str, Any] = {"id": order_id}
+            if "qty" in modifications:
+                modify_data["qty"] = int(modifications["qty"])
+            elif "quantity" in modifications:
+                modify_data["qty"] = int(modifications["quantity"])
+            if "price" in modifications:
+                modify_data["limitPrice"] = float(modifications["price"])
+            if "trigger_price" in modifications:
+                modify_data["stopPrice"] = float(modifications["trigger_price"])
+            if "order_type" in modifications:
+                ot = str(modifications["order_type"]).upper()
+                modify_data["type"] = otype_map.get(ot, 2)
             result = client.modify_order(data=modify_data)
             if isinstance(result, dict):
                 ok = result.get("s") == "ok"

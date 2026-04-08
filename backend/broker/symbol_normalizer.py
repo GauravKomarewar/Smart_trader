@@ -300,16 +300,20 @@ def _fallback_search(query: str, limit: int) -> List[NormalizedInstrument]:
     return results[:limit]
 
 
-def lookup_by_trading_symbol(trading_symbol: str) -> Optional[NormalizedInstrument]:
+def lookup_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Optional[NormalizedInstrument]:
     """
     Look up a single instrument by its trading_symbol (with or without exchange prefix).
+
+    Args:
+        trading_symbol: e.g. "SBIN-EQ", "NIFTY26APR24500CE", "NSE:SBIN-EQ"
+        exchange:       Optional exchange filter for disambiguation (e.g. "NSE", "MCX")
 
     Returns NormalizedInstrument or None.
     """
     try:
         from db.symbols_db import lookup_by_trading_symbol as db_lookup
 
-        rec = db_lookup(trading_symbol)
+        rec = db_lookup(trading_symbol, exchange)
         return _record_to_normalized(rec) if rec else None
     except Exception:
         return None

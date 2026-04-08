@@ -287,15 +287,31 @@ class ShoonyaAdapter(BrokerAdapter):
         prd_raw = str(order.get("product") or order.get("product_type") or "MIS").upper()
         otype_raw = str(order.get("order_type") or order.get("price_type") or "MARKET").upper()
 
-        # Symbol: strip exchange prefix if present (Shoonya expects plain symbol)
+        # Symbol: resolve via symbol DB for correct Shoonya-specific symbol
         sym = order.get("symbol") or order.get("tradingsymbol") or ""
         if ":" in sym:
             sym = sym.split(":", 1)[1]
+        exch = order.get("exchange", "NSE")
+        # Look up Shoonya-specific trading symbol from symbol DB
+        try:
+            from broker.symbol_normalizer import lookup_by_trading_symbol
+            inst = lookup_by_trading_symbol(sym)
+            if inst:
+                shoonya_tsym = getattr(inst, 'trading_symbol', None) or ""
+                if shoonya_tsym:
+                    sym = shoonya_tsym
+                    logger.debug("Shoonya symbol resolved: %s → %s", order.get("symbol"), sym)
+                # Also use the DB exchange if available
+                db_exch = getattr(inst, 'exchange', None) or ""
+                if db_exch:
+                    exch = db_exch
+        except Exception as e:
+            logger.warning("Shoonya symbol lookup failed for %s: %s", sym, e)
 
         shoonya_params = {
             "buy_or_sell":   self._SIDE_MAP.get(side_raw, "B"),
             "product_type":  self._PRD_TO_SHOONYA.get(prd_raw, "I"),
-            "exchange":      order.get("exchange", "NSE"),
+            "exchange":      exch,
             "tradingsymbol": sym,
             "quantity":      int(order.get("qty") or order.get("quantity") or 0),
             "discloseqty":   0,
@@ -331,12 +347,32 @@ class ShoonyaAdapter(BrokerAdapter):
     # ── Market data ──────────────────────────────────────────────────────────
 
     def get_ltp(self, exchange: str, symbol: str) -> Optional[float]:
-        """Fetch last traded price via Shoonya get_quotes API."""
+        """Fetch last traded price via Shoonya get_quotes API.
+
+        Shoonya's get_quotes expects a numeric exchange token, NOT a trading symbol.
+        We resolve the token from the symbols DB.
+        """
         client = getattr(self._session, "_client", None)
         if client is None:
             return None
         try:
-            resp = client.get_quotes(exchange=exchange, token=symbol)
+            # Resolve numeric exchange token from symbol DB
+            token = symbol  # fallback: caller may have passed a token directly
+            if not symbol.isdigit():
+                try:
+                    from broker.symbol_normalizer import lookup_by_trading_symbol
+                    inst = lookup_by_trading_symbol(symbol, exchange)
+                    if inst:
+                        # Prefer shoonya-specific token, then generic exchange token
+                        resolved = (getattr(inst, 'token', None) or "").strip()
+                        if resolved:
+                            token = resolved
+                            logger.debug("Shoonya LTP: %s → token %s", symbol, token)
+                        else:
+                            logger.warning("Shoonya LTP: no token in DB for %s", symbol)
+                except Exception as e:
+                    logger.warning("Shoonya LTP: symbol lookup failed for %s: %s", symbol, e)
+            resp = client.get_quotes(exchange=exchange, token=token)
             if resp and isinstance(resp, dict):
                 lp = resp.get("lp")
                 if lp is not None:

@@ -359,7 +359,7 @@ async def live_feed_websocket(websocket: WebSocket):
                 stop_event.set()
                 return
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
     push_task = asyncio.create_task(_push_loop())
 
