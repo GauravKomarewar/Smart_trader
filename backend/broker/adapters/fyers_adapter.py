@@ -527,7 +527,6 @@ class FyersAdapter(BrokerAdapter):
                         fyers_order["limitPrice"] = float(math.ceil(ltp_fallback + buffer))
                     else:               # SELL — Use lower price (floor)
                         fyers_order["limitPrice"] = float(math.floor(max(1.0, ltp_fallback - buffer)))
-
             result = client.place_order(data=fyers_order)
             # FyersModel.place_order returns dict: {"s": "ok", "id": "...", "code": 1101, "message": "..."}
             if isinstance(result, dict):

@@ -6,7 +6,7 @@ import { useMemo, useState } from 'react'
 import { useDashboardStore, useBrokerAccountsStore, useToastStore } from '../../stores'
 import { cn, fmtNum, fmtTime } from '../../lib/utils'
 import { api } from '../../lib/api'
-import { ShoppingCart, XCircle, RefreshCw, Eye, EyeOff, PenLine, Trash2 } from 'lucide-react'
+import { ShoppingCart, XCircle, RefreshCw, PenLine, Trash2 } from 'lucide-react'
 import type { Order, OrderStatus } from '../../types'
 
 const OPEN_STATUSES: OrderStatus[] = ['OPEN', 'PENDING', 'AMO', 'TRIGGER_PENDING']
@@ -56,7 +56,7 @@ interface ModifyState {
 }
 
 export default function OrderManagement() {
-  const { data, showOnlyOpenOrders, setShowOnlyOpenOrders } = useDashboardStore()
+  const { data, orderFilter, setOrderFilter } = useDashboardStore()
   const { accounts: brokerAccounts } = useBrokerAccountsStore()
   const { toast } = useToastStore()
   const [cancelling, setCancelling] = useState<string | null>(null)
@@ -92,11 +92,24 @@ export default function OrderManagement() {
       if (pa !== pb) return pa - pb
       return new Date(b.placedAt).getTime() - new Date(a.placedAt).getTime()
     })
-    return showOnlyOpenOrders ? sorted.filter(o => OPEN_STATUSES.includes(o.status)) : sorted
-  }, [data?.orders, showOnlyOpenOrders])
+    if (orderFilter === 'all') return sorted
+    if (orderFilter === 'pending') return sorted.filter(o => OPEN_STATUSES.includes(o.status))
+    if (orderFilter === 'complete') return sorted.filter(o => o.status === 'COMPLETE')
+    if (orderFilter === 'cancelled') return sorted.filter(o => o.status === 'CANCELLED')
+    if (orderFilter === 'rejected') return sorted.filter(o => o.status === 'REJECTED')
+    return sorted
+  }, [data?.orders, orderFilter])
 
-  const openOrders = useMemo(() => orders.filter(o => OPEN_STATUSES.includes(o.status)), [orders])
-  const openCount = (data?.orders ?? []).filter(o => OPEN_STATUSES.includes(o.status)).length
+  const openOrders = useMemo(() => (data?.orders ?? []).filter(o => OPEN_STATUSES.includes(o.status)), [data?.orders])
+  const openCount  = openOrders.length
+  const allOrders  = data?.orders ?? []
+  const tabCounts  = useMemo(() => ({
+    all:       allOrders.length,
+    pending:   allOrders.filter(o => OPEN_STATUSES.includes(o.status)).length,
+    complete:  allOrders.filter(o => o.status === 'COMPLETE').length,
+    cancelled: allOrders.filter(o => o.status === 'CANCELLED').length,
+    rejected:  allOrders.filter(o => o.status === 'REJECTED').length,
+  }), [allOrders])
 
   async function cancelOrder(order: Order) {
     const requestOrderId = (order as any).brokerOrderId || (order as any).orderId || order.id
@@ -203,8 +216,7 @@ export default function OrderManagement() {
       <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
         <ShoppingCart className="w-4 h-4 text-warning" />
         <span className="text-[13px] font-semibold text-text-bright">Orders</span>
-        <span className="badge badge-neutral">{orders.length}</span>
-        {openCount > 0 && <span className="badge badge-brand">{openCount} open</span>}
+        <span className="badge badge-neutral">{allOrders.length}</span>
         <div className="flex-1" />
         {/* Cancel All */}
         {openCount > 0 && (
@@ -218,24 +230,37 @@ export default function OrderManagement() {
             Cancel All
           </button>
         )}
-        {/* Open-only toggle */}
-        <button
-          onClick={() => setShowOnlyOpenOrders(!showOnlyOpenOrders)}
-          className={cn('flex items-center gap-1.5 text-[11px] px-2 py-1 rounded border transition-colors',
-            showOnlyOpenOrders
-              ? 'bg-brand/10 border-brand/40 text-brand'
-              : 'border-border text-text-muted hover:text-text-pri hover:border-border-dim')}
-        >
-          {showOnlyOpenOrders ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
-          Open only
-        </button>
+      </div>
+      {/* Sub-tabs */}
+      <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-bg-elevated/30">
+        {([
+          { key: 'pending', label: 'Pending' },
+          { key: 'complete', label: 'Complete' },
+          { key: 'cancelled', label: 'Cancelled' },
+          { key: 'rejected', label: 'Rejected' },
+          { key: 'all', label: 'All' },
+        ] as const).map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setOrderFilter(tab.key)}
+            className={cn('text-[11px] px-2.5 py-1 rounded border font-medium transition-colors',
+              orderFilter === tab.key
+                ? 'bg-brand/15 border-brand/50 text-brand'
+                : 'border-border text-text-muted hover:text-text-pri hover:border-border-dim')}
+          >
+            {tab.label}
+            {tabCounts[tab.key] > 0 && (
+              <span className="ml-1 text-[9px] opacity-70">{tabCounts[tab.key]}</span>
+            )}
+          </button>
+        ))}
       </div>
 
       <div className="flex-1 overflow-auto">
         {orders.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-32 text-text-muted text-[12px] gap-2">
             <ShoppingCart className="w-8 h-8 opacity-30" />
-            {showOnlyOpenOrders ? 'No open orders' : 'No orders today'}
+            {orderFilter !== 'all' ? `No ${orderFilter} orders` : 'No orders today'}
           </div>
         ) : (
           <table className="data-table">

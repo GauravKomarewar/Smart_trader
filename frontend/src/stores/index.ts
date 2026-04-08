@@ -111,10 +111,10 @@ interface DashboardStore {
   data: DashboardData | null
   lastUpdate: number
   isLoading: boolean
-  showOnlyOpenOrders: boolean
+  orderFilter: 'all' | 'pending' | 'complete' | 'cancelled' | 'rejected'
   setData: (d: DashboardData) => void
   setLoading: (v: boolean) => void
-  setShowOnlyOpenOrders: (v: boolean) => void
+  setOrderFilter: (v: 'all' | 'pending' | 'complete' | 'cancelled' | 'rejected') => void
   updatePosition: (p: Position) => void
   updateOrder: (o: Order) => void
 }
@@ -123,7 +123,7 @@ export const useDashboardStore = create<DashboardStore>((set, get) => ({
   data: null,
   lastUpdate: 0,
   isLoading: true,
-  showOnlyOpenOrders: false,
+  orderFilter: 'pending' as const,
   setData: (data) => {
     // Anti-flicker: skip update if data is identical (deep comparison via JSON)
     const current = get().data
@@ -137,7 +137,7 @@ export const useDashboardStore = create<DashboardStore>((set, get) => ({
     set({ data, lastUpdate: Date.now(), isLoading: false })
   },
   setLoading: (v) => set({ isLoading: v }),
-  setShowOnlyOpenOrders: (v) => set({ showOnlyOpenOrders: v }),
+  setOrderFilter: (v) => set({ orderFilter: v }),
   updatePosition: (p) => set(s => {
     if (!s.data) return {}
     const positions = s.data.positions.map(pos => pos.id === p.id ? p : pos)

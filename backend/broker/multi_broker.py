@@ -1040,14 +1040,21 @@ class BrokerAccountSession:
                         # Buffer: +0.5% for BUY, -0.5% for SELL to ensure fill
                         buffer = 1.005 if side == "BUY" else 0.995
                         smart_price = round(ltp * buffer, 2)
-                        # Snap to tick size 0.05
-                        smart_price = round(round(smart_price / 0.05) * 0.05, 2)
+                        # Tick size: MCX uses 1.0, NSE/BSE use 0.05
+                        exch = normalised["exchange"].upper()
+                        tick = 1.0 if exch == "MCX" else 0.05
+                        import math as _math
+                        if side == "BUY":
+                            smart_price = _math.ceil(smart_price / tick) * tick
+                        else:
+                            smart_price = _math.floor(smart_price / tick) * tick
+                        smart_price = round(smart_price, 2)
                         normalised["order_type"] = "LIMIT"
                         normalised["price"] = smart_price
                         self._log.info(
-                            "SMART_LIMIT: MKT→LIMIT %s %s @ %.2f (LTP=%.2f, buffer=%.1f%%)",
+                            "SMART_LIMIT: MKT→LIMIT %s %s @ %.2f (LTP=%.2f, buffer=%.1f%%, tick=%.2f)",
                             side, normalised["symbol"], smart_price, ltp,
-                            (buffer - 1) * 100,
+                            (buffer - 1) * 100, tick,
                         )
                     else:
                         self._log.warning(

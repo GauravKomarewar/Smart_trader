@@ -68,7 +68,7 @@ export default function PositionManager() {
         const settings = res?.data ?? []
         const mgd: ManagedExit = {}
         for (const s of settings) {
-          if (s.pos_key && s.active && s.config_id) {
+          if (s.pos_key && s.config_id) {
             const stateKey = `${s.config_id}|${s.pos_key}`
             mgd[stateKey] = {
               stop_loss: s.stop_loss ?? undefined,
@@ -78,7 +78,7 @@ export default function PositionManager() {
               initial_ltp: s.initial_ltp ?? undefined,
               base_stop_loss: s.base_stop_loss ?? undefined,
               trail_stop: s.trail_stop ?? undefined,
-              active: true,
+              active: !!s.active,
             }
           }
         }
@@ -341,7 +341,7 @@ export default function PositionManager() {
                 const bidx      = broker?.idx ?? 0
                 const posKey    = `${p.tradingsymbol ?? p.symbol}|${(p as any).product ?? ''}`
                 const stateKey  = `${accountId}|${posKey}`
-                const isMgd     = !!managed[stateKey]
+                const isMgd     = !!managed[stateKey]?.active
                 const edits     = pmEdits[stateKey] ?? {}
 
                 return (
@@ -427,7 +427,7 @@ export default function PositionManager() {
                         {/* Start LTP — read-only, captured at activation */}
                         <td className="px-2 py-1.5 text-center">
                           <span className="text-[11px] font-mono text-text-sec">
-                            {isMgd && mgdRow?.initial_ltp ? fmtNum(mgdRow.initial_ltp) : '—'}
+                            {mgdRow?.initial_ltp ? fmtNum(mgdRow.initial_ltp) : '—'}
                           </span>
                         </td>
                         {/* Act@ — next trail activation price */}

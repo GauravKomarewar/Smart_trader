@@ -506,7 +506,7 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
   const [cancellingAll, setCancellingAll] = useState(false)
   const [modify, setModify] = useState<{ order: any; price: string; qty: string; orderType: string; triggerPrice: string; validity: string } | null>(null)
   const [modifying, setModifying] = useState(false)
-  const [showOpenOnly, setShowOpenOnly] = useState(false)
+  const [orderFilter, setOrderFilter] = useState<'all' | 'pending' | 'complete' | 'cancelled' | 'rejected'>('pending')
 
   // Status priority: PENDING/OPEN on top, then CANCELLED, then COMPLETE/REJECTED — each group sorted latest-first
   const statusPriority: Record<string, number> = { OPEN: 0, PENDING: 0, AMO: 0, TRIGGER_PENDING: 0, CANCELLED: 1, COMPLETE: 2, REJECTED: 2 }
@@ -517,7 +517,21 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
     return new Date(b.placedAt ?? 0).getTime() - new Date(a.placedAt ?? 0).getTime()
   }), [data])
   const openOrders = sorted.filter(o => OPEN_STATUSES_STR.includes((o.status ?? '').toUpperCase()))
-  const displayed  = showOpenOnly ? openOrders : sorted
+  const tabCounts = useMemo(() => ({
+    all:       sorted.length,
+    pending:   sorted.filter(o => OPEN_STATUSES_STR.includes((o.status ?? '').toUpperCase())).length,
+    complete:  sorted.filter(o => (o.status ?? '').toUpperCase() === 'COMPLETE').length,
+    cancelled: sorted.filter(o => (o.status ?? '').toUpperCase() === 'CANCELLED').length,
+    rejected:  sorted.filter(o => (o.status ?? '').toUpperCase() === 'REJECTED').length,
+  }), [sorted])
+  const displayed = useMemo(() => {
+    if (orderFilter === 'all') return sorted
+    if (orderFilter === 'pending') return openOrders
+    if (orderFilter === 'complete') return sorted.filter(o => (o.status ?? '').toUpperCase() === 'COMPLETE')
+    if (orderFilter === 'cancelled') return sorted.filter(o => (o.status ?? '').toUpperCase() === 'CANCELLED')
+    if (orderFilter === 'rejected') return sorted.filter(o => (o.status ?? '').toUpperCase() === 'REJECTED')
+    return sorted
+  }, [sorted, openOrders, orderFilter])
 
   async function cancelOne(o: any) {
     const oid = o.brokerOrderId ?? o.orderId ?? o.id
@@ -567,12 +581,29 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
 
   return (
     <>
-    <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-bg-elevated/30">
-      <button onClick={() => setShowOpenOnly(v => !v)}
-        className={cn('text-[11px] px-2.5 py-1 rounded border font-medium transition-colors',
-          showOpenOnly ? 'bg-brand border-brand text-white' : 'border-border text-text-muted hover:border-brand/40')}>
-        Open Only
-      </button>
+    <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-bg-elevated/30">
+      {([
+        { key: 'pending', label: 'Pending' },
+        { key: 'complete', label: 'Complete' },
+        { key: 'cancelled', label: 'Cancelled' },
+        { key: 'rejected', label: 'Rejected' },
+        { key: 'all', label: 'All' },
+      ] as const).map(tab => (
+        <button
+          key={tab.key}
+          onClick={() => setOrderFilter(tab.key)}
+          className={cn('text-[11px] px-2.5 py-1 rounded border font-medium transition-colors',
+            orderFilter === tab.key
+              ? 'bg-brand/15 border-brand/50 text-brand'
+              : 'border-border text-text-muted hover:text-text-pri hover:border-border-dim')}
+        >
+          {tab.label}
+          {tabCounts[tab.key] > 0 && (
+            <span className="ml-1 text-[9px] opacity-70">{tabCounts[tab.key]}</span>
+          )}
+        </button>
+      ))}
+      <div className="flex-1" />
       {openOrders.length > 0 && (
         <button onClick={cancelAll} disabled={cancellingAll}
           className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded border border-loss/60 text-loss hover:bg-loss/10 font-bold disabled:opacity-50">
@@ -580,7 +611,7 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
           Cancel All ({openOrders.length})
         </button>
       )}
-      <span className="ml-auto text-[10px] text-text-muted">{displayed.length} orders</span>
+      <span className="text-[10px] text-text-muted">{displayed.length} orders</span>
     </div>
     <div className="overflow-auto max-h-[560px]">
       <table className="data-table">
