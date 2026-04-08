@@ -84,7 +84,14 @@ export default function OrderManagement() {
 
   const orders = useMemo(() => {
     const all = data?.orders ?? []
-    const sorted = [...all].sort((a, b) => new Date(b.placedAt).getTime() - new Date(a.placedAt).getTime())
+    // Status priority: PENDING/OPEN first, then CANCELLED, then COMPLETE/REJECTED
+    const statusPriority: Record<string, number> = { OPEN: 0, PENDING: 0, AMO: 0, TRIGGER_PENDING: 0, CANCELLED: 1, COMPLETE: 2, REJECTED: 2 }
+    const sorted = [...all].sort((a, b) => {
+      const pa = statusPriority[a.status] ?? 1
+      const pb = statusPriority[b.status] ?? 1
+      if (pa !== pb) return pa - pb
+      return new Date(b.placedAt).getTime() - new Date(a.placedAt).getTime()
+    })
     return showOnlyOpenOrders ? sorted.filter(o => OPEN_STATUSES.includes(o.status)) : sorted
   }, [data?.orders, showOnlyOpenOrders])
 

@@ -64,7 +64,7 @@ export default function TradeBook() {
               </tr>
             </thead>
             <tbody>
-              {trades.map((t, i) => {
+              {[...trades].sort((a: any, b: any) => new Date(b.tradedAt ?? b.timestamp ?? 0).getTime() - new Date(a.tradedAt ?? a.timestamp ?? 0).getTime()).map((t, i) => {
                 const sym      = (t as any).tradingsymbol ?? (t as any).symbol ?? '—'
                 const side     = ((t as any).transactionType ?? (t as any).side ?? '').toUpperCase()
                 const qty      = (t as any).quantity ?? (t as any).qty ?? 0

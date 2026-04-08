@@ -3,7 +3,7 @@
    Per-broker: Positions (with EXIT), Holdings, Orders, Trade Book
    Row highlighting by broker / position side
    ═══════════════════════════════════════════════════════════════════ */
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { cn, fmtINR, fmtNum, fmtTime, pnlClass, pnlSign } from '../lib/utils'
 import { ws } from '../lib/ws'
@@ -508,8 +508,16 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
   const [modifying, setModifying] = useState(false)
   const [showOpenOnly, setShowOpenOnly] = useState(false)
 
-  const openOrders = data.filter(o => OPEN_STATUSES_STR.includes((o.status ?? '').toUpperCase()))
-  const displayed  = showOpenOnly ? openOrders : data
+  // Status priority: PENDING/OPEN on top, then CANCELLED, then COMPLETE/REJECTED — each group sorted latest-first
+  const statusPriority: Record<string, number> = { OPEN: 0, PENDING: 0, AMO: 0, TRIGGER_PENDING: 0, CANCELLED: 1, COMPLETE: 2, REJECTED: 2 }
+  const sorted = useMemo(() => [...data].sort((a, b) => {
+    const pa = statusPriority[(a.status ?? '').toUpperCase()] ?? 1
+    const pb = statusPriority[(b.status ?? '').toUpperCase()] ?? 1
+    if (pa !== pb) return pa - pb
+    return new Date(b.placedAt ?? 0).getTime() - new Date(a.placedAt ?? 0).getTime()
+  }), [data])
+  const openOrders = sorted.filter(o => OPEN_STATUSES_STR.includes((o.status ?? '').toUpperCase()))
+  const displayed  = showOpenOnly ? openOrders : sorted
 
   async function cancelOne(o: any) {
     const oid = o.brokerOrderId ?? o.orderId ?? o.id
@@ -722,6 +730,7 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
 }
 
 function BrokerTradesTable({ data, account, brokerIdx }: { data: any[]; account: BrokerAccountWS | null; brokerIdx: number }) {
+  const sorted = useMemo(() => [...data].sort((a, b) => new Date(b.tradedAt ?? 0).getTime() - new Date(a.tradedAt ?? 0).getTime()), [data])
   if (data.length === 0) return <EmptyState msg="No trades today for this broker" />
   return (
     <div className="overflow-auto max-h-[600px]">
@@ -742,7 +751,7 @@ function BrokerTradesTable({ data, account, brokerIdx }: { data: any[]; account:
           </tr>
         </thead>
         <tbody>
-          {data.map((t, i) => {
+          {sorted.map((t, i) => {
             const side  = (t.transactionType ?? '').toUpperCase()
             const isBuy = side === 'BUY' || side === 'B'
             const qty   = t.quantity ?? 0
