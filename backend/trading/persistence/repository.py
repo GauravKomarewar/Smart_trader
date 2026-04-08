@@ -12,7 +12,8 @@ OMS STATUS CONTRACT:
   CREATED        : Intent kept, not sent to broker
   SENT_TO_BROKER : Accepted by broker, broker_order_id assigned
   EXECUTED       : Confirmed fill (from OrderWatcher)
-  FAILED         : Broker rejected / cancelled / expired
+  CANCELLED      : Cancelled by user / broker
+  FAILED         : Broker rejected / expired / unrecoverable failure
 """
 
 import logging
@@ -76,6 +77,7 @@ def _row_to_record(row: dict) -> OrderRecord:
         trail_when      = row.get("trail_when"),
         managed_anchor_ltp      = row.get("managed_anchor_ltp"),
         managed_base_stop_loss  = row.get("managed_base_stop_loss"),
+        client_id       = row.get("client_id"),
         broker_order_id = row.get("broker_order_id"),
         execution_type  = row.get("execution_type", "ENTRY"),
         status          = row.get("status", "CREATED"),

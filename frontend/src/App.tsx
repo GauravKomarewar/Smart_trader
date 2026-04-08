@@ -105,6 +105,7 @@ export default function App() {
 
           <Route path="analytics" element={<HistoricalAnalyticsPage />} />
           <Route path="broker-accounts" element={<BrokerAccountsPage />} />
+          <Route path="broker-diagnostics" element={<BrokerAccountsPage initialTab="diagnostics" />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="settings/:tab" element={<SettingsPage />} />
         </Route>

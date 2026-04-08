@@ -66,12 +66,21 @@ export default function OrderManagement() {
 
   // Build accountId → broker info map
   const brokerMap = useMemo(() => {
-    const m: Record<string, { name: string; shortName: string; idx: number }> = {}
+    const m: Record<string, { name: string; shortName: string; idx: number; configId: string }> = {}
     brokerAccounts.forEach((acc, i) => {
-      m[acc.config_id] = { name: acc.broker_name, shortName: acc.client_id, idx: i }
+      const entry = { name: acc.broker_name, shortName: acc.client_id, idx: i, configId: acc.config_id }
+      m[acc.config_id] = entry
+      if (acc.client_id) m[acc.client_id] = entry
     })
     return m
   }, [brokerAccounts])
+
+  function resolveAccountId(order: Order) {
+    const direct = (order as any).accountId || (order as any).account_id || ''
+    if (direct) return direct
+    const clientId = (order as any).clientId || ''
+    return clientId ? (brokerMap[clientId]?.configId ?? '') : ''
+  }
 
   const orders = useMemo(() => {
     const all = data?.orders ?? []
@@ -83,18 +92,22 @@ export default function OrderManagement() {
   const openCount = (data?.orders ?? []).filter(o => OPEN_STATUSES.includes(o.status)).length
 
   async function cancelOrder(order: Order) {
-    const requestOrderId = (order as any).orderId || order.id
-    const accountId = (order as any).accountId || (order as any).account_id || ''
+    const requestOrderId = (order as any).brokerOrderId || (order as any).orderId || order.id
+    const accountId = resolveAccountId(order)
     if (!requestOrderId || !accountId) {
       toast('This order is not yet ready for cancellation', 'warning')
+      return
+    }
+    if ((order as any).actionable === false) {
+      toast('Waiting for broker order id before cancellation becomes available', 'warning')
       return
     }
     setCancelling(order.id)
     try {
       await api.cancelOrder(requestOrderId, accountId)
       toast(`Cancelled: ${order.tradingsymbol}`, 'success')
-    } catch {
-      toast('Failed to cancel order', 'error')
+    } catch (e: any) {
+      toast(e?.message || 'Failed to cancel order', 'error')
     } finally {
       setCancelling(null)
     }
@@ -104,7 +117,7 @@ export default function OrderManagement() {
     setCancellingAll(true)
     const byAccount: Record<string, Order[]> = {}
     for (const order of openOrders) {
-      const accountId = (order as any).accountId || (order as any).account_id || ''
+      const accountId = resolveAccountId(order)
       if (!accountId) continue
       byAccount[accountId] = byAccount[accountId] ?? []
       byAccount[accountId].push(order)
@@ -150,10 +163,14 @@ export default function OrderManagement() {
     if (!modify) return
     setModifying(true)
     try {
-      const requestOrderId = (modify.order as any).orderId || modify.order.id
-      const accountId = (modify.order as any).accountId || (modify.order as any).account_id || ''
+      const requestOrderId = (modify.order as any).brokerOrderId || (modify.order as any).orderId || modify.order.id
+      const accountId = resolveAccountId(modify.order)
       if (!requestOrderId || !accountId) {
         toast('This order is not yet ready for modification', 'warning')
+        return
+      }
+      if ((modify.order as any).actionable === false) {
+        toast('Waiting for broker order id before modification becomes available', 'warning')
         return
       }
       await api.modifyOrder(requestOrderId, {
@@ -166,8 +183,8 @@ export default function OrderManagement() {
       })
       toast(`Modified: ${modify.order.tradingsymbol}`, 'success')
       setModify(null)
-    } catch {
-      toast('Failed to modify order', 'error')
+    } catch (e: any) {
+      toast(e?.message || 'Failed to modify order', 'error')
     } finally {
       setModifying(false)
     }
@@ -231,10 +248,11 @@ export default function OrderManagement() {
             </thead>
             <tbody>
               {orders.map(o => {
-                const accountId = (o as any).accountId || (o as any).account_id || ''
-                const broker = brokerMap[accountId]
+                const accountId = resolveAccountId(o)
+                const broker = brokerMap[accountId] || brokerMap[(o as any).clientId || '']
                 const bidx = broker?.idx ?? 0
-                const canAct = OPEN_STATUSES.includes(o.status) && !!accountId && !!((o as any).orderId || o.id)
+                const requestOrderId = (o as any).brokerOrderId || (o as any).orderId || o.id
+                const canAct = OPEN_STATUSES.includes(o.status) && !!accountId && !!requestOrderId && ((o as any).actionable !== false)
                 return (
                 <tr key={o.id} className={cn('group transition-colors', BROKER_ROW_TINTS[bidx % BROKER_ROW_TINTS.length])}>
                   {/* Broker */}

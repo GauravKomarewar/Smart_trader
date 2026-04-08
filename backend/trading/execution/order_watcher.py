@@ -110,12 +110,13 @@ class OrderWatcherEngine(threading.Thread):
             if not record:
                 continue
 
-            if record.status in ("EXECUTED", "FAILED"):
+            if record.status in ("EXECUTED", "FAILED", "CANCELLED"):
                 continue
 
             # 6A: Broker failure
             if status in ("REJECTED", "CANCELLED", "EXPIRED"):
-                self.repo.update_status(record.command_id, "FAILED")
+                next_status = "CANCELLED" if status == "CANCELLED" else "FAILED"
+                self.repo.update_status(record.command_id, next_status)
                 self.repo.update_tag(record.command_id, f"BROKER_{status}")
                 self._clear_guard(record)
                 logger.warning("BROKER_FAILURE | cmd_id=%s broker_id=%s status=%s",

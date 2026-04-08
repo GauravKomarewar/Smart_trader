@@ -54,9 +54,21 @@ _MCX_KEYWORDS = {"GOLD", "SILVER", "CRUDE", "NATURALGAS", "COPPER", "ZINC", "LEA
 def _detect_exchange_from_symbol(sym: str) -> str:
     """Detect exchange from symbol pattern. Used as fallback when ScriptMaster lookup fails."""
     upper = sym.upper().strip()
+    try:
+        from broker.symbol_normalizer import lookup_by_trading_symbol
+        inst = lookup_by_trading_symbol(upper)
+        if inst and getattr(inst, "exchange", None):
+            return str(inst.exchange)
+    except Exception:
+        pass
     # Options: digits followed by CE or PE
     if _re.search(r'\d{3,}(CE|PE)$', upper):
         # MCX options
+        for kw in _MCX_KEYWORDS:
+            if upper.startswith(kw):
+                return "MCX"
+        return "NFO"
+    if _re.search(r'\d{2}[A-Z]{3}\d{2}[CP]\d+$', upper):
         for kw in _MCX_KEYWORDS:
             if upper.startswith(kw):
                 return "MCX"
@@ -466,8 +478,9 @@ class LiveTickService:
             if ltp <= 0:
                 return
             parts = sym.split(":")
-            exchange = parts[0] if len(parts) == 2 else "NSE"
+            raw_exchange = parts[0] if len(parts) == 2 else "NSE"
             clean_sym = (parts[1] if len(parts) == 2 else sym).replace("-EQ", "").replace("-INDEX", "")
+            exchange = _detect_exchange_from_symbol(clean_sym) if raw_exchange in ("NSE", "BSE") else raw_exchange
             # Map back to the user-subscribed symbol (e.g. "NIFTY50" → "NIFTY 50")
             norm = _normalize_sym(clean_sym)
             subscribed_sym = self._sym_alias.get(norm, clean_sym)
@@ -528,7 +541,7 @@ class LiveTickService:
             return f"NFO:{upper}"
         # Try ScriptMaster lookup for accurate exchange detection
         try:
-            from scripts.unified_scriptmaster import lookup_by_trading_symbol
+            from broker.symbol_normalizer import lookup_by_trading_symbol
             inst = lookup_by_trading_symbol(upper)
             if inst and inst.fyers_symbol:
                 return inst.fyers_symbol

@@ -15,6 +15,10 @@ function saveRecent(sym: string) {
   localStorage.setItem(RECENT_KEY, JSON.stringify(r))
 }
 
+function isDerivativeType(type?: string) {
+  return ['OPT', 'FUT', 'CE', 'PE'].includes(String(type || '').toUpperCase())
+}
+
 export default function GlobalSearch() {
   const { searchOpen, setSearchOpen, openOrderModal } = useUIStore()
   const { activeId, addItem } = useWatchlistStore()
@@ -36,11 +40,11 @@ export default function GlobalSearch() {
   if (!searchOpen) return null
 
   const handleSelect = (item: any) => {
-    const displaySym = item.symbol
     const tsym = item.trading_symbol || item.tradingsymbol || item.symbol
+    const displaySym = isDerivativeType(item.type) ? tsym : (item.symbol || tsym)
     saveRecent(displaySym)
     setRecent(loadRecent())
-    navigate('/watchlist')
+    navigate('/app/watchlist')
     addItem(activeId, { symbol: displaySym, tradingsymbol: tsym, exchange: item.exchange, type: item.type })
     setSearchOpen(false)
   }
@@ -80,7 +84,7 @@ export default function GlobalSearch() {
                     {recent.map(r => (
                       <button
                         key={r}
-                        onClick={() => { saveRecent(r); navigate('/watchlist') ; setSearchOpen(false) }}
+                        onClick={() => { saveRecent(r); navigate('/app/watchlist') ; setSearchOpen(false) }}
                         className="px-2.5 py-1 bg-bg-elevated border border-border rounded text-[11px] text-text-sec hover:text-brand hover:border-brand/50 transition-colors"
                       >
                         {r}
@@ -93,8 +97,8 @@ export default function GlobalSearch() {
                 <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wider mb-2">Quick Actions</div>
                 {[
                   { icon: TrendingUp, label: 'Open Place Order', action: () => { setSearchOpen(false); openOrderModal() } },
-                  { icon: List, label: 'Go to Watchlist', action: () => { navigate('/watchlist'); setSearchOpen(false) } },
-                  { icon: Zap, label: 'Option Chain', action: () => { navigate('/option-chain'); setSearchOpen(false) } },
+                  { icon: List, label: 'Go to Watchlist', action: () => { navigate('/app/watchlist'); setSearchOpen(false) } },
+                  { icon: Zap, label: 'Option Chain', action: () => { navigate('/app/option-chain'); setSearchOpen(false) } },
                 ].map(a => (
                   <button
                     key={a.label}

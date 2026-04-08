@@ -1,6 +1,7 @@
 """Orders router — place, modify, cancel, book."""
 
 import logging
+import re
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
@@ -123,7 +124,7 @@ def _resolve_order_target(
 
         cur.execute(
             """
-            SELECT command_id, broker_order_id
+            SELECT command_id, broker_order_id, client_id
             FROM orders
             WHERE user_id = %s AND (command_id = %s OR broker_order_id = %s)
             ORDER BY updated_at DESC
@@ -151,6 +152,20 @@ def _resolve_order_target(
         )
         mgr_row = cur.fetchone()
         resolved_account_id = requested_account_id or (mgr_row["config_id"] if mgr_row else None)
+        if not resolved_account_id and record.get("client_id"):
+            cur.execute(
+                """
+                SELECT config_id
+                FROM mgr_sessions
+                WHERE user_id = %s AND client_id = %s
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (user_id, record["client_id"]),
+            )
+            session_row = cur.fetchone()
+            if session_row:
+                resolved_account_id = session_row["config_id"]
         return resolved_account_id, broker_order_id, bool(resolved_account_id)
     finally:
         conn.close()
@@ -478,7 +493,7 @@ async def cancel_order(
         broker_order_id,
         {"status": "CANCELLED", "remarks": result.get("message") or "Cancelled"},
     )
-    _update_order_db(user_id, broker_order_id, status="FAILED")
+    _update_order_db(user_id, broker_order_id, status="CANCELLED")
     return result
 
 
@@ -657,6 +672,24 @@ def _order_type_map(prctyp: str) -> str:
         "LIMIT": "LIMIT", "MARKET": "MARKET", "SL": "SL", "SL-M": "SL-M",
     }.get(str(prctyp).upper(), "LIMIT")
 
+def _infer_instrument_type(symbol: str) -> str:
+    clean = str(symbol or "").upper().replace(" ", "")
+    inst = lookup_by_trading_symbol(clean)
+    if not inst and ":" in clean:
+        inst = lookup_by_trading_symbol(clean.split(":", 1)[-1])
+    if inst and getattr(inst, "instrument_type", None):
+        inst_type = str(inst.instrument_type).upper()
+        if inst_type == "OPT":
+            return "OPT"
+        return inst_type
+    if re.search(r"\d{3,}(CE|PE)$", clean):
+        return "OPT"
+    if re.search(r"\d{2}[A-Z]{3}\d{2}[CP]\d+$", clean):
+        return "OPT"
+    if re.search(r"\d+FUT$", clean):
+        return "FUT"
+    return "EQ"
+
 # Fyers returns exchange as int (10=NSE, 11=MCX, 12=BSE)
 _NUMERIC_EXCH_MAP = {10: "NSE", 11: "MCX", 12: "BSE"}
 
@@ -715,10 +748,7 @@ def _normalize_position(p: dict, idx: int) -> dict:
         inst = lookup_by_trading_symbol(tsym)  # try with exchange prefix
     lot_size = inst.lot_size if inst else 1
     underlying = inst.symbol if inst else clean_sym
-    inst_type = inst.instrument_type if inst else (
-        "OPT" if "CE" in clean_sym or "PE" in clean_sym else
-        ("FUT" if "FUT" in clean_sym else "EQ")
-    )
+    inst_type = inst.instrument_type if inst else _infer_instrument_type(clean_sym)
     # For derivatives, notional value uses lot_size
     notional = value * lot_size if lot_size > 1 else value
     # pnlPct: broker pnl / cost-basis
@@ -759,6 +789,7 @@ def _normalize_db_order(rec, idx: int) -> dict:
     _st_map = {
         "CREATED": "PENDING", "SENT_TO_BROKER": "OPEN",
         "EXECUTED": "COMPLETE", "FAILED": "REJECTED",
+        "CANCELLED": "CANCELLED",
     }
     status = _st_map.get(rec.status, rec.status or "PENDING")
     row_id = rec.broker_order_id or rec.command_id
@@ -766,15 +797,18 @@ def _normalize_db_order(rec, idx: int) -> dict:
     placed_at = rec.created_at or datetime.now().isoformat()
     prctyp  = _order_type_map(rec.order_type or "MARKET")
     prd     = _prd_map(rec.product or "MIS")
+    broker_order_id = rec.broker_order_id or ""
     return {
         "id": row_id,
         "accountId": "",
+        "clientId": rec.client_id or "",
         "orderId": order_id,
+        "brokerOrderId": broker_order_id,
         "commandId": rec.command_id,
         "symbol": tsym,
         "tradingsymbol": tsym,
         "exchange": exch,
-        "type": "OPT" if "CE" in tsym or "PE" in tsym else ("FUT" if "FUT" in tsym else "EQ"),
+        "type": _infer_instrument_type(tsym),
         "transactionType": txn,
         "orderType": prctyp,
         "product": prd,
@@ -789,6 +823,7 @@ def _normalize_db_order(rec, idx: int) -> dict:
         "tag": rec.tag or rec.strategy_name,
         "placedAt": placed_at,
         "updatedAt": rec.updated_at or placed_at,
+        "actionable": bool(broker_order_id),
         "source": "smart_trader_db",
     }
 
@@ -904,11 +939,14 @@ def _normalize_order(o: dict, idx: int) -> dict:
     return {
         "id": order_id,
         "accountId": o.get("actid") or o.get("account_id") or "live",
+        "clientId": o.get("client_id") or "",
         "orderId": order_id,
+        "brokerOrderId": order_id,
+        "commandId": o.get("command_id") or "",
         "symbol": tsym,
         "tradingsymbol": tsym,
         "exchange": exch,
-        "type": "OPT" if "CE" in tsym or "PE" in tsym else ("FUT" if "FUT" in tsym else "EQ"),
+        "type": _infer_instrument_type(tsym),
         "transactionType": txn,
         "orderType": prctyp,
         "product": prd,
@@ -923,6 +961,7 @@ def _normalize_order(o: dict, idx: int) -> dict:
         "tag": o.get("remarks") or o.get("tag"),
         "placedAt": placed_at,
         "updatedAt": placed_at,
+        "actionable": True,
     }
 
 

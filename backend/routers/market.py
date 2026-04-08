@@ -22,7 +22,14 @@ router = APIRouter(prefix="/market", tags=["market"])
 def _detect_exchange(sym: str, fallback: str = "NSE") -> str:
     """Auto-detect exchange from symbol pattern. Options/futures → NFO, else fallback."""
     upper = sym.upper().replace(" ", "")
-    if re.search(r'\d{3,}(CE|PE)', upper):
+    inst = lookup_by_trading_symbol(upper)
+    if not inst and fallback:
+        inst = lookup_by_trading_symbol(f"{fallback}:{upper}")
+    if inst and getattr(inst, "exchange", None):
+        return str(inst.exchange)
+    if re.search(r'\d{3,}(CE|PE)$', upper):
+        return "NFO"
+    if re.search(r'\d{2}[A-Z]{3}\d{2}[CP]\d+$', upper):
         return "NFO"
     if re.search(r'\d+FUT$', upper):
         return "NFO"

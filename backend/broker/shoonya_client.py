@@ -19,6 +19,7 @@ import threading
 import time
 from typing import Optional, Any
 from pathlib import Path
+import requests
 
 logger = logging.getLogger("smart_trader.broker")
 
@@ -130,6 +131,64 @@ class BrokerSession:
             logger.info("BrokerSession: DEMO mode (credentials not configured)")
         else:
             logger.info("BrokerSession: LIVE mode (Shoonya credentials loaded)")
+
+    # ── Session validation helpers ──────────────────────────────────────────
+
+    @staticmethod
+    def _is_session_error_payload(raw: Any) -> bool:
+        """Return True when broker payload clearly indicates session expiry."""
+        if not isinstance(raw, dict):
+            return False
+        emsg = str(raw.get("emsg") or raw.get("message") or "").lower()
+        if not emsg:
+            return False
+        return any(
+            marker in emsg
+            for marker in ("session", "invalid", "login", "token", "auth")
+        )
+
+    def _current_client_identity(self) -> tuple[str, str, str]:
+        """Read the live Shoonya identity/token from the injected Noren client."""
+        client = self._client
+        if client is None:
+            return "", "", ""
+        user_id = (
+            getattr(client, "_NorenApi__username", None)
+            or getattr(self._cfg, "user_id", "")
+            or getattr(self._cfg, "SHOONYA_USER_ID", "")
+        )
+        actid = getattr(client, "_NorenApi__accountid", None) or user_id
+        token = getattr(client, "_NorenApi__susertoken", None) or self._session_token or ""
+        return str(user_id or ""), str(actid or user_id or ""), str(token or "")
+
+    def _probe_session_valid(self) -> bool:
+        """
+        Validate the currently injected Shoonya session with a lightweight call.
+
+        This is only used when the SDK collapses broker errors into ``None``.
+        """
+        user_id, actid, token = self._current_client_identity()
+        if not user_id or not token:
+            return False
+
+        payload = 'jData=' + json.dumps({"uid": user_id, "actid": actid}) + f"&jKey={token}"
+        for host in (
+            "https://api.shoonya.com/NorenWClientAPI",
+            "https://trade.shoonya.com/NorenWClientAPI",
+        ):
+            try:
+                resp = requests.post(f"{host}/Limits", data=payload, timeout=8)
+                result = resp.json()
+            except Exception:
+                continue
+
+            if result.get("stat") == "Ok":
+                return True
+            if self._is_session_error_payload(result):
+                return False
+            return resp.status_code == 200
+
+        return False
 
     # ── Authentication ────────────────────────────────────────────────────────
 
@@ -305,9 +364,18 @@ class BrokerSession:
             return []
 
         try:
-            return self._client.get_positions() or []
+            raw = self._client.get_positions()
+            if raw is None:
+                if self._probe_session_valid():
+                    return []
+                raise RuntimeError("Session Expired: get_positions returned None")
+            if self._is_session_error_payload(raw):
+                raise RuntimeError(f"Session Expired: {raw.get('emsg') or raw.get('message') or raw}")
+            return raw or []
         except json.JSONDecodeError:
             raise  # Empty response = session expired — let auto-relogin handle
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error("get_positions error: %s", e)
             return []
@@ -321,9 +389,18 @@ class BrokerSession:
             return []
 
         try:
-            return self._client.get_order_book() or []
+            raw = self._client.get_order_book()
+            if raw is None:
+                if self._probe_session_valid():
+                    return []
+                raise RuntimeError("Session Expired: get_order_book returned None")
+            if self._is_session_error_payload(raw):
+                raise RuntimeError(f"Session Expired: {raw.get('emsg') or raw.get('message') or raw}")
+            return raw or []
         except json.JSONDecodeError:
             raise  # Empty response = session expired — let auto-relogin handle
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error("get_order_book error: %s", e)
             return []
@@ -334,6 +411,12 @@ class BrokerSession:
             return {}
         try:
             raw = self._client.get_limits()
+            if raw is None:
+                if self._probe_session_valid():
+                    return {}
+                raise RuntimeError("Session Expired: get_limits returned None")
+            if self._is_session_error_payload(raw):
+                raise RuntimeError(f"Session Expired: {raw.get('emsg') or raw.get('message') or raw}")
             if not raw:
                 return {}
             # Normalise Shoonya's field names to common schema
@@ -350,9 +433,63 @@ class BrokerSession:
             }
         except json.JSONDecodeError:
             raise  # Empty response = session expired — let auto-relogin handle
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error("get_limits error: %s", e)
             return {}
+
+    def get_holdings(self) -> list:
+        """Get holdings with session-aware empty vs expired handling."""
+        if self._demo_mode:
+            return []
+        if not self._client:
+            return []
+
+        try:
+            raw = self._client.get_holdings()
+            if raw is None:
+                if self._probe_session_valid():
+                    return []
+                raise RuntimeError("Session Expired: get_holdings returned None")
+            if self._is_session_error_payload(raw):
+                raise RuntimeError(f"Session Expired: {raw.get('emsg') or raw.get('message') or raw}")
+            return raw or []
+        except json.JSONDecodeError:
+            raise
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error("get_holdings error: %s", e)
+            return []
+
+    def get_tradebook(self) -> list:
+        """Get tradebook with session-aware empty vs expired handling."""
+        if self._demo_mode:
+            return []
+        if not self._client:
+            return []
+
+        raw_fn = getattr(self._client, "get_trade_book", None) or getattr(self._client, "tradebook", None)
+        if raw_fn is None:
+            return []
+
+        try:
+            raw = raw_fn()
+            if raw is None:
+                if self._probe_session_valid():
+                    return []
+                raise RuntimeError("Session Expired: get_tradebook returned None")
+            if self._is_session_error_payload(raw):
+                raise RuntimeError(f"Session Expired: {raw.get('emsg') or raw.get('message') or raw}")
+            return raw or []
+        except json.JSONDecodeError:
+            raise
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error("get_tradebook error: %s", e)
+            return []
 
     def place_order(self, order: dict) -> dict:
         """Place a buy/sell order."""

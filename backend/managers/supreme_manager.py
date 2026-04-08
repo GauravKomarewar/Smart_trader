@@ -568,6 +568,24 @@ class SupremeManager:
             for o in orders
             if o.get("orderId") and o.get("accountId")
         }
+        client_account_map: dict[str, str] = {}
+        for o in all_orders:
+            client_id = str(o.get("client_id") or "").strip()
+            account_id = str(o.get("account_id") or "").strip()
+            if client_id and account_id:
+                client_account_map[client_id] = account_id
+        try:
+            cur.execute(
+                "SELECT config_id, client_id FROM mgr_sessions WHERE user_id = %s",
+                (user_id,),
+            )
+            for row in cur.fetchall():
+                client_id = str(row.get("client_id") or "").strip()
+                config_id = str(row.get("config_id") or "").strip()
+                if client_id and config_id:
+                    client_account_map[client_id] = config_id
+        except Exception as e:
+            logger.debug("get_dashboard: session account map lookup failed: %s", e)
 
         # ── Merge Smart Trader DB orders (same for WS and REST) ──
         try:
@@ -581,6 +599,11 @@ class SupremeManager:
                 normalized = _normalize_db_order(rec, len(orders) + i)
                 if rec.broker_order_id and rec.broker_order_id in broker_order_accounts:
                     normalized["accountId"] = broker_order_accounts[rec.broker_order_id]
+                elif rec.client_id and rec.client_id in client_account_map:
+                    normalized["accountId"] = client_account_map[rec.client_id]
+                normalized["actionable"] = bool(
+                    normalized.get("accountId") and normalized.get("brokerOrderId")
+                )
                 orders.append(normalized)
         except Exception as e:
             logger.warning("get_dashboard: DB order merge failed: %s", e)

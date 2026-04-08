@@ -26,6 +26,7 @@ const NAV: NavItem[] = [
   { to: '/app/strategies',      icon: GitBranch,  label: 'Strategies'    },
   { to: '/app/analytics',        icon: BarChart2,   label: 'Analytics'      },
   { to: '/app/broker-accounts',  icon: Activity,    label: 'Brokers'        },
+  { to: '/app/broker-diagnostics', icon: Activity,  label: 'Diagnostics'    },
   { to: '/app/settings',         icon: Settings,    label: 'Settings'       },
 ]
 
@@ -67,6 +68,7 @@ export default function AppLayout() {
     '/app/strategies': 'Strategies', '/app/strategy-builder': 'Strategy Builder',
     '/app/analytics': 'Historical Analytics',
     '/app/broker-accounts': 'Broker Accounts',
+    '/app/broker-diagnostics': 'Broker Diagnostics',
     '/app/settings': 'Settings',
   }
   const title = pageTitle[location.pathname] ?? location.pathname.split('/').filter(Boolean).pop() ?? 'Dashboard'

@@ -195,20 +195,8 @@ class ShoonyaAdapter(BrokerAdapter):
     # ── Holdings ───────────────────────────────────────────────────────────────
 
     def get_holdings(self) -> List[Holding]:
-        client = getattr(self._session, "_client", None)
-        if client is None:
-            return []
         try:
-            raw_list = client.get_holdings()
-            if raw_list is None:
-                logger.debug("get_holdings returned None — treating as empty (no holdings)")
-                return []
-            if isinstance(raw_list, dict) and raw_list.get("stat") == "Not_Ok":
-                emsg = str(raw_list.get("emsg", "")).lower()
-                if "session" in emsg or "expired" in emsg or "invalid" in emsg:
-                    raise RuntimeError(f"Session Expired: {raw_list.get('emsg', 'unknown')}")
-                # Non-session error (e.g. "no data") — return empty
-                return []
+            raw_list = self._session.get_holdings()
             return [self._enrich(self._map_holding(h)) for h in (raw_list or [])]
         except json.JSONDecodeError:
             raise  # Empty response = session expired — let auto-relogin handle
@@ -220,16 +208,29 @@ class ShoonyaAdapter(BrokerAdapter):
 
     @staticmethod
     def _map_holding(raw: dict) -> Holding:
-        symbol  = raw.get("tsym") or raw.get("tradingsymbol") or ""
-        exch    = raw.get("exch") or raw.get("exchange") or "NSE"
+        exch_info = raw.get("exch_tsym") or []
+        primary = exch_info[0] if isinstance(exch_info, list) and exch_info else {}
+        symbol  = (
+            raw.get("tsym")
+            or raw.get("tradingsymbol")
+            or primary.get("tsym")
+            or primary.get("cname")
+            or ""
+        )
+        exch    = (
+            raw.get("exch")
+            or raw.get("exchange")
+            or primary.get("exch")
+            or "NSE"
+        )
         qty     = int(raw.get("holdqty") or raw.get("qty") or 0)
         dp_qty  = int(raw.get("dpqty") or raw.get("dp_qty") or qty)
         t1_qty  = int(raw.get("t1qty") or raw.get("t1_qty") or 0)
-        avg_prc = float(raw.get("avgprc") or raw.get("avg_price") or 0)
-        ltp     = float(raw.get("lp") or raw.get("ltp") or 0)
+        avg_prc = float(raw.get("avgprc") or raw.get("avg_price") or raw.get("upldprc") or 0)
+        ltp     = float(raw.get("lp") or raw.get("ltp") or raw.get("c") or 0)
         pnl     = (ltp - avg_prc) * qty if ltp and avg_prc else 0.0
         pnl_pct = (pnl / (avg_prc * qty) * 100) if avg_prc and qty else 0.0
-        isin    = raw.get("isin") or ""
+        isin    = raw.get("isin") or primary.get("isin") or ""
         return Holding(
             symbol=symbol, exchange=exch, qty=qty, avg_price=avg_prc,
             ltp=ltp, pnl=pnl, pnl_pct=pnl_pct, isin=isin,
@@ -239,22 +240,8 @@ class ShoonyaAdapter(BrokerAdapter):
     # ── Tradebook ──────────────────────────────────────────────────────────────
 
     def get_tradebook(self) -> List[Trade]:
-        client = getattr(self._session, "_client", None)
-        if client is None:
-            return []
         try:
-            raw_fn = getattr(client, "get_trade_book", None) or getattr(client, "tradebook", None)
-            if raw_fn is None:
-                return []
-            raw_list = raw_fn()
-            if raw_list is None:
-                logger.debug("get_tradebook returned None — treating as empty (no trades)")
-                return []
-            if isinstance(raw_list, dict) and raw_list.get("stat") == "Not_Ok":
-                emsg = str(raw_list.get("emsg", "")).lower()
-                if "session" in emsg or "expired" in emsg or "invalid" in emsg:
-                    raise RuntimeError(f"Session Expired: {raw_list.get('emsg', 'unknown')}")
-                return []
+            raw_list = self._session.get_tradebook()
             return [self._enrich(self._map_trade(t)) for t in (raw_list or [])]
         except json.JSONDecodeError:
             raise  # Empty response = session expired — let auto-relogin handle

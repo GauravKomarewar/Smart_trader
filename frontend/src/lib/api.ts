@@ -131,7 +131,7 @@ export const api = {
   // ── Orders ──
   orders:           (accountId: string) => api.get(`/orders?account=${accountId}`),
   placeOrder:       (data: unknown)     => api.post('/orders/place', data),
-  cancelOrder:      (id: string, accountId: string) => api.delete(`/orders/${id}?account_id=${accountId}`),
+  cancelOrder:      (id: string, accountId: string) => api.delete(`/orders/${encodeURIComponent(id)}?account_id=${encodeURIComponent(accountId)}`),
   cancelAllOrders:  (accountId: string) => api.delete(`/orders/cancel-all/${accountId}`),
   modifyOrder:      (id: string, data: unknown) => api.patch(`/orders/${id}`, data),
 

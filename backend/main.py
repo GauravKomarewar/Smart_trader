@@ -309,8 +309,40 @@ def _restore_broker_sessions():
             token = db_sess.session_token
 
             if db_sess.broker_id == "shoonya":
-                # Try DB token first, then cached token file
-                shoonya_token = token
+                # Prefer the shared cache when it has the currently-active Shoonya token.
+                shoonya_token = None
+                cached_token = None
+                try:
+                    from trading.session_scheduler import (
+                        _load_shoonya_cached_token,
+                        _validate_shoonya_token,
+                    )
+                    cached_token = _load_shoonya_cached_token(
+                        creds.get("USER_ID", client_id)
+                    )
+                except Exception:
+                    cached_token = None
+
+                if cached_token:
+                    shoonya_token = cached_token
+                    if cached_token != token:
+                        logger.info(
+                            "Using fresher shared Shoonya token for restore: user=%s client=%s",
+                            db_sess.user_id[:8], client_id,
+                        )
+                elif token:
+                    try:
+                        from trading.session_scheduler import _validate_shoonya_token
+                        if _validate_shoonya_token(creds.get("USER_ID", client_id), token):
+                            shoonya_token = token
+                        else:
+                            logger.warning(
+                                "Stored Shoonya DB token expired — skipping stale restore token: user=%s client=%s",
+                                db_sess.user_id[:8], client_id,
+                            )
+                    except Exception:
+                        shoonya_token = token
+
                 if not shoonya_token:
                     try:
                         from trading.session_scheduler import _load_shoonya_cached_token

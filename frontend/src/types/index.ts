@@ -145,6 +145,9 @@ export interface Order {
   id: string
   accountId: string
   orderId: string           // broker order id
+  brokerOrderId?: string
+  commandId?: string
+  clientId?: string
   symbol: string
   tradingsymbol: string
   exchange: Exchange
@@ -163,6 +166,8 @@ export interface Order {
   tag?: string
   placedAt: string
   updatedAt: string
+  actionable?: boolean
+  source?: string
 }
 
 // ── Trades ──────────────────────────────────────

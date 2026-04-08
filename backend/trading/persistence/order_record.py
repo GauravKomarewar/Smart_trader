@@ -6,7 +6,8 @@ OMS STATUS CONTRACT:
   CREATED        : Intent persisted, not yet sent to broker
   SENT_TO_BROKER : Broker accepted, order_id assigned
   EXECUTED       : Filled at broker (from OrderWatcher reconciliation)
-  FAILED         : Broker rejected / cancelled / expired
+  CANCELLED      : Cancelled by user / broker
+  FAILED         : Broker rejected / expired / unrecoverable failure
 
 Multi-tenant: every record is scoped to (user_id, client_id).
 """
@@ -46,11 +47,12 @@ class OrderRecord:
     managed_base_stop_loss: Optional[float] = None
 
     # ── Execution ───────────────────────────────────────────────────────────
+    client_id: Optional[str] = None
     broker_order_id: Optional[str] = None
     execution_type:  str = "ENTRY"   # ENTRY | EXIT | ADJUST
 
     # ── State ───────────────────────────────────────────────────────────────
-    status:     str = "CREATED"   # CREATED | SENT_TO_BROKER | EXECUTED | FAILED
+    status:     str = "CREATED"   # CREATED | SENT_TO_BROKER | EXECUTED | CANCELLED | FAILED
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     tag:        Optional[str] = None

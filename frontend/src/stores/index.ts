@@ -157,8 +157,13 @@ interface WatchlistStore {
   addWatchlist: (name: string) => void
   removeWatchlist: (id: string) => void
   addItem: (watchlistId: string, item: Omit<WatchlistItem, 'id' | 'addedAt'>) => void
-  removeItem: (watchlistId: string, symbol: string) => void
+  removeItem: (watchlistId: string, itemId: string) => void
   setActive: (id: string) => void
+}
+
+function watchlistInstrumentKey(item: Pick<WatchlistItem, 'exchange' | 'symbol' | 'tradingsymbol'>) {
+  const base = item.tradingsymbol || item.symbol
+  return `${item.exchange}:${base}`.toUpperCase()
 }
 
 const defaultWatchlist: Watchlist = {
@@ -191,13 +196,13 @@ export const useWatchlistStore = create<WatchlistStore>()(
       })),
       addItem: (wid, item) => set(s => ({
         watchlists: s.watchlists.map(w =>
-          w.id !== wid || w.items.some(i => i.symbol === item.symbol) ? w
+          w.id !== wid || w.items.some(i => watchlistInstrumentKey(i) === watchlistInstrumentKey(item as WatchlistItem)) ? w
             : { ...w, items: [...w.items, { ...item, id: uid(), addedAt: Date.now() }] }
         ),
       })),
-      removeItem: (wid, symbol) => set(s => ({
+      removeItem: (wid, itemId) => set(s => ({
         watchlists: s.watchlists.map(w =>
-          w.id !== wid ? w : { ...w, items: w.items.filter(i => i.symbol !== symbol) }
+          w.id !== wid ? w : { ...w, items: w.items.filter(i => i.id !== itemId) }
         ),
       })),
       setActive: (id) => set({ activeId: id }),

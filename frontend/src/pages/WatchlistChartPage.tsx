@@ -2,22 +2,25 @@
    Watchlist & Chart Page
    Split layout: watchlist left, chart right
    ════════════════════════════════════════════ */
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { createChart, CandlestickSeries, HistogramSeries, type IChartApi, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts'
-import { useWatchlistStore, useToastStore, useUIStore } from '../stores'
+import { useWatchlistStore, useUIStore } from '../stores'
 import { useInstrumentSearch, useKeyboard } from '../hooks'
-import { cn, fmtNum, changeCls, fmtVol } from '../lib/utils'
+import { cn, fmtNum, changeCls } from '../lib/utils'
 import { api } from '../lib/api'
-import { marketWs, type MarketTick } from '../lib/ws'
+import { marketWs } from '../lib/ws'
 import {
-  Search, Plus, X, BarChart2, BookOpen, ChevronDown,
-  TrendingUp, TrendingDown, Trash2, MoreHorizontal,
-  Maximize2, List, PlusCircle,
+  Search, Plus, X, BarChart2,
+  TrendingUp, TrendingDown, Maximize2, List, PlusCircle,
 } from 'lucide-react'
 import type { WatchlistItem, ChartInterval } from '../types'
 
 // ── Live quote cache (from /ws/market) ───────────────
 const _liveQuotes: Record<string, { ltp: number; changePct: number; change: number; volume: number }> = {}
+
+function quoteKey(symbol: string, exchange: string): string {
+  return `${exchange}:${normSym(symbol)}`
+}
 
 /** Normalize a symbol for comparison: strip exchange prefix, suffixes, and spaces. */
 function normSym(s: string): string {
@@ -33,18 +36,27 @@ function normSym(s: string): string {
 function detectExchange(sym: string): string {
   const upper = sym.toUpperCase().replace(/\s+/g, '').split(':').pop() ?? ''
   if (/\d{3,}(CE|PE)/i.test(upper)) return 'NFO'
+  if (/\d{2}[A-Z]{3}\d{2}[CP]\d+$/i.test(upper)) return 'NFO'
   if (/\d+FUT$/i.test(upper)) return 'NFO'
   return 'NSE'
+}
+
+function displaySymbol(item?: Pick<WatchlistItem, 'symbol' | 'tradingsymbol'> | null): string {
+  return item?.tradingsymbol || item?.symbol || ''
+}
+
+function isDerivativeType(type?: string): boolean {
+  return ['OPT', 'FUT', 'CE', 'PE'].includes(String(type || '').toUpperCase())
 }
 
 // Kick off connection once the module is loaded
 marketWs.connect()
 
-async function fetchRestQuote(symbol: string) {
+async function fetchRestQuote(symbol: string, exchange: string) {
   try {
-    const res = await api.get(`/market/quote/${encodeURIComponent(symbol)}`) as any
+    const res = await api.get(`/market/quote/${encodeURIComponent(symbol)}?exchange=${encodeURIComponent(exchange)}`) as any
     if (res && res.ltp) {
-      _liveQuotes[normSym(symbol)] = {
+      _liveQuotes[quoteKey(symbol, exchange)] = {
         ltp: res.ltp, changePct: res.changePct ?? 0,
         change: res.change ?? 0, volume: res.volume ?? 0,
       }
@@ -52,25 +64,35 @@ async function fetchRestQuote(symbol: string) {
   } catch { /* silent */ }
 }
 
-function getLiveQuote(symbol: string) {
-  return _liveQuotes[normSym(symbol)] ?? { ltp: 0, changePct: 0, change: 0, volume: 0 }
+function getLiveQuote(symbol: string, exchange: string) {
+  return _liveQuotes[quoteKey(symbol, exchange)] ?? { ltp: 0, changePct: 0, change: 0, volume: 0 }
 }
 
 const CHART_INTERVALS: ChartInterval[] = ['1m','3m','5m','15m','30m','1h','4h','D','W']
 
 export default function WatchlistChartPage() {
-  const { watchlists, activeId, setActive, addWatchlist } = useWatchlistStore()
+  const { watchlists, activeId } = useWatchlistStore()
   const activeWatchlist = watchlists.find(w => w.id === activeId) ?? watchlists[0]
-  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(
-    activeWatchlist?.items[0]?.symbol ?? null
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(
+    activeWatchlist?.items[0]?.id ?? null
   )
-  // Resolve tradingsymbol for the selected item (used for chart/OHLCV data fetching)
-  const selectedItem = activeWatchlist?.items.find(i => i.symbol === selectedSymbol)
-  const chartSymbol = selectedItem?.tradingsymbol || selectedSymbol
+  const selectedItem = activeWatchlist?.items.find(i => i.id === selectedItemId) ?? activeWatchlist?.items[0] ?? null
+  const chartSymbol = selectedItem ? displaySymbol(selectedItem) : null
+  const chartExchange = selectedItem?.exchange || (chartSymbol ? detectExchange(chartSymbol) : 'NSE')
   // Mobile view toggle
   const [mobileView, setMobileView] = useState<'list' | 'chart'>('list')
 
   useKeyboard('ctrl+w', () => {}) // placeholder
+
+  useEffect(() => {
+    if (!activeWatchlist?.items?.length) {
+      setSelectedItemId(null)
+      return
+    }
+    if (!selectedItemId || !activeWatchlist.items.some(i => i.id === selectedItemId)) {
+      setSelectedItemId(activeWatchlist.items[0].id)
+    }
+  }, [activeWatchlist, selectedItemId])
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -93,7 +115,7 @@ export default function WatchlistChartPage() {
           )}
         >
           <BarChart2 className="w-3.5 h-3.5" /> Chart
-          {selectedSymbol && <span className="ml-1 text-[10px] text-text-muted">{selectedSymbol}</span>}
+          {chartSymbol && <span className="ml-1 text-[10px] text-text-muted">{chartSymbol}</span>}
         </button>
       </div>
 
@@ -106,8 +128,8 @@ export default function WatchlistChartPage() {
           mobileView === 'list' ? 'flex flex-col bg-bg-surface' : 'hidden sm:flex'
         )}>
           <WatchlistPanel
-            selected={selectedSymbol}
-            onSelect={(s) => { setSelectedSymbol(s); setMobileView('chart') }}
+            selectedId={selectedItemId}
+            onSelect={(itemId) => { setSelectedItemId(itemId); setMobileView('chart') }}
           />
         </div>
 
@@ -117,7 +139,7 @@ export default function WatchlistChartPage() {
           mobileView === 'chart' ? 'flex' : 'hidden sm:flex'
         )}>
           {chartSymbol ? (
-            <ChartPanel symbol={chartSymbol} />
+            <ChartPanel symbol={chartSymbol} exchange={chartExchange} />
           ) : (
             <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
               <div className="text-center space-y-2">
@@ -133,9 +155,9 @@ export default function WatchlistChartPage() {
 }
 
 // ── Watchlist Panel ───────────────────────────────
-function WatchlistPanel({ selected, onSelect }: {
-  selected: string | null
-  onSelect: (s: string) => void
+function WatchlistPanel({ selectedId, onSelect }: {
+  selectedId: string | null
+  onSelect: (itemId: string) => void
 }) {
   const { watchlists, activeId, setActive, addWatchlist, addItem, removeItem } = useWatchlistStore()
   const activeWL = watchlists.find(w => w.id === activeId) ?? watchlists[0]
@@ -159,7 +181,7 @@ function WatchlistPanel({ selected, onSelect }: {
     if (items.length) {
       marketWs.subscribe(items.map(i => i.tradingsymbol || i.symbol))
     }
-  }, [activeWL?.items?.length])
+  }, [activeWL?.items])
 
   return (
     <>
@@ -237,13 +259,15 @@ function WatchlistPanel({ selected, onSelect }: {
                     <button
                       key={i}
                       onMouseDown={() => {
-                        addItem(activeId, { symbol: r.symbol, tradingsymbol: r.tradingsymbol, exchange: r.exchange, type: r.type })
+                        const tsym = r.trading_symbol || r.tradingsymbol || r.symbol
+                        const watchSymbol = isDerivativeType(r.type) ? tsym : (r.symbol || tsym)
+                        addItem(activeId, { symbol: watchSymbol, tradingsymbol: tsym, exchange: r.exchange, type: r.type })
                         setSearch('')
                       }}
                       className="w-full flex items-center gap-3 px-3 py-2 hover:bg-bg-hover text-left transition-colors"
                     >
                       <div className="flex-1">
-                        <div className="text-[12px] font-medium text-text-bright">{r.symbol}</div>
+                        <div className="text-[12px] font-medium text-text-bright">{r.trading_symbol || r.tradingsymbol || r.symbol}</div>
                         <div className="text-[10px] text-text-muted">{r.exchange} · {r.type}</div>
                       </div>
                       <Plus className="w-3.5 h-3.5 text-brand" />
@@ -268,9 +292,9 @@ function WatchlistPanel({ selected, onSelect }: {
             <WatchlistRow
               key={item.id}
               item={item}
-              isSelected={selected === item.symbol}
-              onSelect={() => onSelect(item.symbol)}
-              onRemove={() => removeItem(activeId, item.symbol)}
+              isSelected={selectedId === item.id}
+              onSelect={() => onSelect(item.id)}
+              onRemove={() => removeItem(activeId, item.id)}
             />
           ))
         )}
@@ -288,22 +312,21 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
   onRemove: () => void
 }) {
   const { openOrderModal } = useUIStore()
-  // Use tradingsymbol for data fetching (works for options like NIFTY2290030JUN26CE)
-  const tickSym = item.tradingsymbol || item.symbol
-  const [quote, setQuote] = useState(getLiveQuote(tickSym))
+  const tickSym = displaySymbol(item)
+  const [quote, setQuote] = useState(getLiveQuote(tickSym, item.exchange))
   const [hover, setHover] = useState(false)
 
   useEffect(() => {
-    fetchRestQuote(tickSym).then(() => setQuote(getLiveQuote(tickSym)))
+    fetchRestQuote(tickSym, item.exchange).then(() => setQuote(getLiveQuote(tickSym, item.exchange)))
     marketWs.subscribe([tickSym])
     return marketWs.onTick((tick) => {
       if (normSym(tick.symbol) === normSym(tickSym)) {
         const q = { ltp: tick.ltp, changePct: tick.changePct ?? 0, change: tick.change ?? 0, volume: tick.volume ?? 0 }
-        _liveQuotes[normSym(tickSym)] = q
+        _liveQuotes[quoteKey(tickSym, item.exchange)] = q
         setQuote(q)
       }
     })
-  }, [tickSym])
+  }, [tickSym, item.exchange])
 
   return (
     <div
@@ -317,7 +340,7 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
       onMouseLeave={() => setHover(false)}
     >
       <div className="flex-1 min-w-0">
-        <div className="text-[12px] font-semibold text-text-bright truncate">{item.symbol}</div>
+        <div className="text-[12px] font-semibold text-text-bright truncate">{displaySymbol(item)}</div>
         <div className="text-[10px] text-text-muted">{item.exchange}</div>
       </div>
       <div className="text-right">
@@ -329,12 +352,12 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
       {/* Hover actions */}
       <div className={cn('flex items-center gap-0.5 ml-2 transition-opacity', hover ? 'opacity-100' : 'opacity-0')}>
         <button
-          onClick={e => { e.stopPropagation(); openOrderModal(item.symbol, item.exchange) }}
+          onClick={e => { e.stopPropagation(); openOrderModal(displaySymbol(item), item.exchange) }}
           className="btn-buy btn-xs !px-1.5 !py-0.5"
           title="Buy"
         >B</button>
         <button
-          onClick={e => { e.stopPropagation(); openOrderModal(item.symbol, item.exchange) }}
+          onClick={e => { e.stopPropagation(); openOrderModal(displaySymbol(item), item.exchange) }}
           className="btn-sell btn-xs !px-1.5 !py-0.5"
           title="Sell"
         >S</button>
@@ -351,7 +374,7 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
 }
 
 // ── Chart Panel ───────────────────────────────────
-function ChartPanel({ symbol }: { symbol: string }) {
+function ChartPanel({ symbol, exchange }: { symbol: string; exchange: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -359,18 +382,18 @@ function ChartPanel({ symbol }: { symbol: string }) {
   const [interval, setInterval] = useState<ChartInterval>('5m')
   const { openOrderModal, openChartModal } = useUIStore()
 
-  const [quote, setQuote] = useState(getLiveQuote(symbol))
+  const [quote, setQuote] = useState(getLiveQuote(symbol, exchange))
 
   // Live tick subscription for quote header
   useEffect(() => {
-    fetchRestQuote(symbol).then(() => setQuote(getLiveQuote(symbol)))
+    fetchRestQuote(symbol, exchange).then(() => setQuote(getLiveQuote(symbol, exchange)))
     marketWs.subscribe([symbol])
     return marketWs.onTick((tick) => {
       if (normSym(tick.symbol) === normSym(symbol)) {
         setQuote({ ltp: tick.ltp, changePct: tick.changePct ?? 0, change: tick.change ?? 0, volume: tick.volume ?? 0 })
       }
     })
-  }, [symbol])
+  }, [symbol, exchange])
 
   // Load historical OHLCV candles; update last candle with live ticks — runs inside chart init effect below
   useEffect(() => {
@@ -413,8 +436,30 @@ function ChartPanel({ symbol }: { symbol: string }) {
     })
     volSeriesRef.current = volSeries
 
+    const seedChartFromLatest = async () => {
+      try {
+        const latest = await api.latestTick(symbol, exchange).catch(() => null)
+        if (!latest?.tick?.ltp) {
+          await fetchRestQuote(symbol, exchange)
+        }
+        const cached = getLiveQuote(symbol, exchange)
+        const ltp = Number(latest?.tick?.ltp || cached.ltp || 0)
+        if (!ltp || !chartRef.current) return
+        const now = Math.floor(Date.now() / 60_000) * 60 as UTCTimestamp
+        series.setData([{ time: now, open: ltp, high: ltp, low: ltp, close: ltp }])
+        volSeries.setData([{ time: now, value: Number(latest?.tick?.volume || cached.volume || 0) }])
+        chart.timeScale().fitContent()
+      } catch {
+        const ltp = Number(getLiveQuote(symbol, exchange).ltp || 0)
+        if (!ltp || !chartRef.current) return
+        const now = Math.floor(Date.now() / 60_000) * 60 as UTCTimestamp
+        series.setData([{ time: now, open: ltp, high: ltp, low: ltp, close: ltp }])
+        chart.timeScale().fitContent()
+      }
+    }
+
     // Load OHLCV history and subscribe to live tick updates
-    api.marketOhlcv(symbol, interval, detectExchange(symbol), 500)
+    api.marketOhlcv(symbol, interval, exchange || detectExchange(symbol), 500)
       .then((res: any) => {
         if (!chartRef.current) return
         if (res?.candles?.length) {
@@ -426,13 +471,17 @@ function ChartPanel({ symbol }: { symbol: string }) {
             time: c.time as UTCTimestamp, value: c.volume ?? 0,
           })))
           chart.timeScale().fitContent()
+        } else {
+          void seedChartFromLatest()
         }
       })
       .catch(() => {
-        const q = getLiveQuote(symbol)
+        const q = getLiveQuote(symbol, exchange)
         if (q.ltp > 0 && chartRef.current) {
           const now = Math.floor(Date.now() / 1000) as UTCTimestamp
           series.setData([{ time: now, open: q.ltp, high: q.ltp, low: q.ltp, close: q.ltp }])
+        } else {
+          void seedChartFromLatest()
         }
       })
 
@@ -458,7 +507,7 @@ function ChartPanel({ symbol }: { symbol: string }) {
       chart.remove()
       chartRef.current = null
     }
-  }, [symbol, interval])
+  }, [symbol, exchange, interval])
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -491,10 +540,10 @@ function ChartPanel({ symbol }: { symbol: string }) {
         </div>
 
         {/* Actions */}
-        <button onClick={() => openOrderModal(symbol)} className="btn-buy btn-sm">
+        <button onClick={() => openOrderModal(symbol, exchange)} className="btn-buy btn-sm">
           <TrendingUp className="w-3.5 h-3.5" /> Buy
         </button>
-        <button onClick={() => openOrderModal(symbol)} className="btn-sell btn-sm">
+        <button onClick={() => openOrderModal(symbol, exchange)} className="btn-sell btn-sm">
           <TrendingDown className="w-3.5 h-3.5" /> Sell
         </button>
         <button

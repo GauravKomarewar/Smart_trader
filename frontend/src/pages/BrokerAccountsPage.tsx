@@ -4,6 +4,7 @@
    Row highlighting by broker / position side
    ═══════════════════════════════════════════════════════════════════ */
 import { useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { cn, fmtINR, fmtNum, fmtTime, pnlClass, pnlSign } from '../lib/utils'
 import { ws } from '../lib/ws'
 import { useBrokerAccountsStore, useToastStore } from '../stores'
@@ -30,15 +31,20 @@ const BROKER_BADGES = [
   'bg-[#10b981]/20 text-[#10b981] border border-[#10b981]/40',
 ]
 
-export default function BrokerAccountsPage() {
+export default function BrokerAccountsPage({ initialTab = 'positions' }: { initialTab?: DashTab }) {
   const { accounts, brokerData } = useBrokerAccountsStore()
   const { toast } = useToastStore()
+  const navigate = useNavigate()
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<DashTab>('positions')
+  const [activeTab, setActiveTab] = useState<DashTab>(initialTab)
   const [showActiveOnly, setShowActiveOnly] = useState(false)
   const [exitAllLoading, setExitAllLoading] = useState(false)
   const selectedRef = useRef<string | null>(null)
   selectedRef.current = selectedId
+
+  useEffect(() => {
+    setActiveTab(initialTab)
+  }, [initialTab])
 
   useEffect(() => {
     if (!selectedRef.current && accounts.length > 0) {
@@ -86,6 +92,12 @@ export default function BrokerAccountsPage() {
           <WalletCards className="w-4 h-4 text-brand" />
           <span className="text-sm font-semibold text-text-bright">Broker Accounts — Raw Truth</span>
           <span className="text-[10px] text-text-muted border border-border rounded px-1.5 py-0.5">Live broker data · no system filters</span>
+          <button
+            onClick={() => navigate('/app/broker-diagnostics')}
+            className="ml-auto text-[11px] px-2.5 py-1 rounded border border-border text-text-muted hover:text-text-bright hover:border-brand/40 transition-colors"
+          >
+            Open Diagnostics
+          </button>
         </div>
 
         {/* Broker selector */}
@@ -94,7 +106,7 @@ export default function BrokerAccountsPage() {
             const isActive = acc.config_id === selectedId
             return (
               <button key={acc.config_id}
-                onClick={() => { setSelectedId(acc.config_id); setActiveTab('positions') }}
+                onClick={() => { setSelectedId(acc.config_id); setActiveTab(initialTab === 'diagnostics' ? 'diagnostics' : 'positions') }}
                 className={cn(
                   'flex items-center gap-3 px-4 py-3 rounded-xl border transition-all text-left min-w-[240px]',
                   isActive ? 'border-brand bg-brand/10 ring-1 ring-brand/30' : 'border-border bg-bg-surface hover:border-brand/30'
@@ -500,13 +512,17 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
   const displayed  = showOpenOnly ? openOrders : data
 
   async function cancelOne(o: any) {
-    const oid = o.id ?? o.orderId ?? o.order_id
+    const oid = o.brokerOrderId ?? o.orderId ?? o.order_id ?? o.id
     const acct = o.accountId ?? o.account_id ?? accountId
+    if (o.actionable === false || !oid || !acct) {
+      toast('This order is not yet ready for cancellation', 'warning')
+      return
+    }
     setCancelling(oid)
     try {
       await api.cancelOrder(oid, acct)
       toast(`Cancelled: ${o.tradingsymbol ?? o.symbol}`, 'success')
-    } catch { toast('Failed to cancel order', 'error') }
+    } catch (e: any) { toast(e?.message || 'Failed to cancel order', 'error') }
     finally { setCancelling(null) }
   }
 
@@ -523,15 +539,19 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
   async function submitModify() {
     if (!modify) return
     setModifying(true)
-    const oid = modify.order.id ?? modify.order.orderId ?? modify.order.order_id
+    const oid = modify.order.brokerOrderId ?? modify.order.orderId ?? modify.order.order_id ?? modify.order.id
     try {
+      if (modify.order.actionable === false || !oid || !accountId) {
+        toast('This order is not yet ready for modification', 'warning')
+        return
+      }
       const payload: any = { accountId: accountId, price: parseFloat(modify.price) || 0, quantity: parseInt(modify.qty) || 0, orderType: modify.orderType }
       if (modify.triggerPrice) payload.triggerPrice = parseFloat(modify.triggerPrice)
       if (modify.validity) payload.validity = modify.validity
       await api.modifyOrder(oid, payload)
       toast(`Modified: ${modify.order.tradingsymbol ?? modify.order.symbol}`, 'success')
       setModify(null)
-    } catch { toast('Failed to modify order', 'error') }
+    } catch (e: any) { toast(e?.message || 'Failed to modify order', 'error') }
     finally { setModifying(false) }
   }
 
@@ -580,7 +600,7 @@ function BrokerOrdersTable({ data, accountId, account, brokerIdx, toast }: { dat
             const isBuy  = side === 'BUY' || side === 'B'
             const status = (o.status ?? o.orderStatus ?? '').toUpperCase()
             const isOpen = OPEN_STATUSES_STR.includes(status)
-            const oid    = o.id ?? o.orderId ?? o.order_id ?? String(i)
+            const oid    = o.brokerOrderId ?? o.orderId ?? o.order_id ?? o.id ?? String(i)
             return (
               <tr key={oid} className="hover:bg-bg-hover">
                 <td className="px-3 py-2">
