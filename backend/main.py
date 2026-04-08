@@ -262,6 +262,14 @@ async def on_startup():
     except Exception as exc:
         logger.warning("ManualPositionManager start failed (non-fatal): %s", exc)
 
+    # ── Start OrderExecutionTracker (smart-MKT fill assurance) ────────────────
+    try:
+        from trading.order_execution_tracker import execution_tracker
+        execution_tracker.start()
+        logger.info("OrderExecutionTracker started — smart-MKT fill assurance active")
+    except Exception as exc:
+        logger.warning("OrderExecutionTracker start failed (non-fatal): %s", exc)
+
     # ── Start SessionScheduler (SEBI daily login/logout) ─────────────────────
     try:
         from trading.session_scheduler import session_scheduler

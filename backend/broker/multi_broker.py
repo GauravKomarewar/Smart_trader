@@ -1040,7 +1040,7 @@ class BrokerAccountSession:
                         # Buffer: +0.5% for BUY, -0.5% for SELL to ensure fill
                         buffer = 1.005 if side == "BUY" else 0.995
                         smart_price = round(ltp * buffer, 2)
-                        # Tick size: MCX uses 1.0, NSE/BSE use 0.05
+                        # Tick size: MCX uses 1.0 (integer prices), NSE/BSE use 0.05
                         exch = normalised["exchange"].upper()
                         tick = 1.0 if exch == "MCX" else 0.05
                         import math as _math
@@ -1048,9 +1048,11 @@ class BrokerAccountSession:
                             smart_price = _math.ceil(smart_price / tick) * tick
                         else:
                             smart_price = _math.floor(smart_price / tick) * tick
-                        smart_price = round(smart_price, 2)
+                        # MCX prices must be whole integers
+                        smart_price = int(smart_price) if exch == "MCX" else round(smart_price, 2)
                         normalised["order_type"] = "LIMIT"
                         normalised["price"] = smart_price
+                        normalised["_smart_mkt"] = True  # tag for execution tracker
                         self._log.info(
                             "SMART_LIMIT: MKT→LIMIT %s %s @ %.2f (LTP=%.2f, buffer=%.1f%%, tick=%.2f)",
                             side, normalised["symbol"], smart_price, ltp,
@@ -1068,6 +1070,7 @@ class BrokerAccountSession:
                     )
 
             # Attempt via adapter with ensure_login
+            is_smart_mkt = normalised.pop("_smart_mkt", False)
             try:
                 result = self._call_with_relogin(self._adapter.place_order, normalised)
                 # Check if response itself indicates session expiry
@@ -1076,6 +1079,23 @@ class BrokerAccountSession:
                     if self._relogin():
                         self._log.info("ENSURE_LOGIN: relogin OK — retrying place_order")
                         result = self._adapter.place_order(normalised)
+                # Register smart-MKT orders for execution tracking
+                if is_smart_mkt and result.get("success"):
+                    try:
+                        from trading.order_execution_tracker import execution_tracker
+                        execution_tracker.track(
+                            user_id=self.user_id,
+                            config_id=self.config_id,
+                            order_id=result.get("order_id", ""),
+                            symbol=normalised["symbol"],
+                            exchange=normalised["exchange"],
+                            side=normalised["side"],
+                            qty=normalised["qty"],
+                            price=normalised.get("price", 0),
+                            tag=normalised.get("tag", ""),
+                        )
+                    except Exception as te:
+                        self._log.warning("exec_tracker.track failed: %s", te)
                 return result
             except Exception as e:
                 self._log.error("place_order (adapter) error: %s", e, exc_info=True)
