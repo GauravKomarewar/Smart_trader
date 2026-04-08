@@ -4,7 +4,7 @@ import logging
 import re
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Any, Optional, List
 import psycopg2.extras
 from sqlalchemy.orm import Session
@@ -573,6 +573,18 @@ class SLSettingsRequest(BaseModel):
     trailWhen: Optional[float] = None
     initialLtp: Optional[float] = None
     baseStopLoss: Optional[float] = None
+
+    @validator("stopLoss", "target", "trailingValue", "trailWhen", "initialLtp", "baseStopLoss", pre=True)
+    def non_negative(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("Value must be non-negative")
+        return v
+
+    @validator("posKey")
+    def valid_pos_key(cls, v):
+        if "|" not in v:
+            raise ValueError("posKey must be in 'SYMBOL|PRODUCT' format")
+        return v
 
 
 @router.put("/positions/sl-settings")

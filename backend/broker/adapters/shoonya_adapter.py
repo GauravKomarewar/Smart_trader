@@ -365,11 +365,62 @@ class ShoonyaAdapter(BrokerAdapter):
         if client is None:
             return {"success": False, "message": "Not connected"}
         try:
-            resp = client.modify_order(order_id, modifications)
+            # Shoonya's NorenApi.modify_order() requires positional args:
+            #   orderno, exchange, tradingsymbol, newquantity, newprice_type
+            # We need to look up the original order to get exchange + tradingsymbol + defaults.
+            raw_book = self._session.get_order_book()
+            if raw_book is None or (isinstance(raw_book, dict) and raw_book.get("stat") == "Not_Ok"):
+                return {"success": False, "message": "Failed to fetch order book from broker — cannot modify"}
+            if not isinstance(raw_book, list):
+                raw_book = []
+            original = None
+            for o in raw_book:
+                if str(o.get("norenordno", "")) == str(order_id):
+                    original = o
+                    break
+            if not original:
+                return {"success": False, "message": f"Order {order_id} not found in Shoonya order book"}
+
+            exchange     = original.get("exch") or original.get("exchange") or "NSE"
+            tradingsymbol = original.get("tsym") or original.get("tradingsymbol") or ""
+            cur_qty      = int(original.get("qty") or 1)
+            cur_prctyp   = (original.get("prctyp") or "LMT").upper()
+            cur_price    = float(original.get("prc") or 0)
+            cur_trgprc   = float(original.get("trgprc") or 0)
+
+            # Apply modifications
+            new_qty = int(modifications.get("quantity") or modifications.get("qty") or cur_qty)
+
+            ot = modifications.get("order_type")
+            if ot:
+                new_prctyp = self._OTYPE_TO_SHOONYA.get(str(ot).upper(), cur_prctyp)
+            else:
+                new_prctyp = cur_prctyp
+
+            new_price = float(modifications.get("price") if modifications.get("price") is not None else cur_price)
+            new_trgprc = float(modifications.get("trigger_price") if modifications.get("trigger_price") is not None else cur_trgprc)
+
+            kwargs: Dict[str, Any] = {}
+            if new_price > 0:
+                kwargs["newprice"] = new_price
+            if new_trgprc > 0:
+                kwargs["newtrigger_price"] = new_trgprc
+
+            logger.info("Shoonya modify order %s: sym=%s exch=%s qty=%d prctyp=%s price=%.2f trgprc=%.2f",
+                        order_id, tradingsymbol, exchange, new_qty, new_prctyp, new_price, new_trgprc)
+
+            resp = client.modify_order(
+                orderno=order_id,
+                exchange=exchange,
+                tradingsymbol=tradingsymbol,
+                newquantity=new_qty,
+                newprice_type=new_prctyp,
+                **kwargs,
+            )
             if resp and isinstance(resp, dict):
                 ok = resp.get("stat") == "Ok"
-                return {"success": ok, "message": resp.get("emsg", "") or "Modified"}
+                return {"success": ok, "message": resp.get("emsg", "") or "Modified", "order_id": order_id}
             return {"success": bool(resp), "message": "Modified" if resp else "Modify failed"}
         except Exception as e:
-            logger.error("modify_order error: %s", e)
+            logger.error("modify_order error: %s", e, exc_info=True)
             return {"success": False, "message": str(e)}

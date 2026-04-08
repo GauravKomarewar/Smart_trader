@@ -31,7 +31,9 @@ class PositionSLManager:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._lock = threading.Lock()
         self._missing_counts: dict[tuple[str, str, str], int] = {}
+        self._in_flight: set[tuple[str, str, str]] = {}  # keys currently firing exit
 
     def start(self):
         if self._running:
@@ -65,7 +67,7 @@ class PositionSLManager:
         try:
             conn = get_trading_conn()
         except Exception as e:
-            logger.debug("DB connect failed: %s", e)
+            logger.warning("DB connect failed in SL manager: %s", e)
             return
         try:
             cur = conn.cursor()
@@ -91,9 +93,16 @@ class PositionSLManager:
 
         position = self._get_position_snapshot(user_id, config_id, pos_key)
         state_key = (user_id, config_id, pos_key)
+
+        # Guard: skip if an exit order is already in flight for this position
+        with self._lock:
+            if state_key in self._in_flight:
+                return
+
         if position is None or position["ltp"] is None or position["qty"] == 0:
-            misses = self._missing_counts.get(state_key, 0) + 1
-            self._missing_counts[state_key] = misses
+            with self._lock:
+                misses = self._missing_counts.get(state_key, 0) + 1
+                self._missing_counts[state_key] = misses
             if misses >= 3:
                 logger.info(
                     "Deactivating managed position %s/%s %s — position no longer present",
@@ -102,7 +111,8 @@ class PositionSLManager:
                 self._deactivate(user_id, config_id, pos_key)
             return
 
-        self._missing_counts.pop(state_key, None)
+        with self._lock:
+            self._missing_counts.pop(state_key, None)
         ltp = position["ltp"]
         side = position["side"]
         qty = position["qty"]
@@ -151,9 +161,21 @@ class PositionSLManager:
                 exit_reason = f"Target hit {ltp:.2f} ≤ {target:.2f}"
 
         if exit_reason:
-            logger.info("EXIT TRIGGERED: %s/%s %s — %s", config_id[:8], pos_key, side, exit_reason)
-            self._fire_exit(user_id, config_id, pos_key, exchange, product, side, qty, exit_reason)
-            self._deactivate(user_id, config_id, pos_key)
+            # Mark in-flight to prevent duplicate exit orders from concurrent polls
+            with self._lock:
+                if state_key in self._in_flight:
+                    return
+                self._in_flight.add(state_key)
+            try:
+                logger.info("EXIT TRIGGERED: %s/%s %s — %s", config_id[:8], pos_key, side, exit_reason)
+                ok = self._fire_exit(user_id, config_id, pos_key, exchange, product, side, qty, exit_reason)
+                if ok:
+                    self._deactivate(user_id, config_id, pos_key)
+                else:
+                    logger.error("Exit order FAILED — keeping SL active for %s %s", config_id[:8], pos_key)
+            finally:
+                with self._lock:
+                    self._in_flight.discard(state_key)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -248,7 +270,9 @@ class PositionSLManager:
 
     def _deactivate(self, user_id: str, config_id: str, pos_key: str):
         from db.trading_db import get_trading_conn
-        self._missing_counts.pop((user_id, config_id, pos_key), None)
+        with self._lock:
+            self._missing_counts.pop((user_id, config_id, pos_key), None)
+            self._in_flight.discard((user_id, config_id, pos_key))
         try:
             conn = get_trading_conn()
             try:
@@ -275,8 +299,8 @@ class PositionSLManager:
         side: str,
         qty: int,
         reason: str,
-    ):
-        """Place a market exit order to close the position."""
+    ) -> bool:
+        """Place a market exit order to close the position. Returns True on success."""
         try:
             symbol, _ = (pos_key.split("|") + [""])[:2]
             from broker.multi_broker import registry
@@ -296,10 +320,13 @@ class PositionSLManager:
             result = registry.execute_order(user_id, config_id, order)
             if result.get("success"):
                 logger.info("Exit order placed: %s %d %s — %s", symbol, qty, exit_side, reason)
+                return True
             else:
                 logger.error("Exit order FAILED: %s — %s", symbol, result.get("message"))
+                return False
         except Exception as e:
             logger.error("_fire_exit error: %s", e, exc_info=True)
+            return False
 
     # ── Public API for saving settings ────────────────────────────────────────
 
