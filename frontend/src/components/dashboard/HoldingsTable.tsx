@@ -250,7 +250,7 @@ export default function HoldingsTable() {
                         </div>
                       </div>
                     </td>
-                    <td className="px-3 py-2 text-[12px] font-mono text-right text-text-pri">{h.quantity}</td>
+                    <td className="px-3 py-2 text-[12px] font-mono text-right text-text-pri">{fmtNum(h.quantity, 0)}</td>
                     <td className="px-3 py-2 text-[12px] font-mono text-right text-text-sec">{fmtNum(h.avgCost)}</td>
                     <td className="px-3 py-2 text-[12px] font-mono text-right text-text-bright">{fmtNum(h.ltp)}</td>
                     <td className="px-3 py-2 text-[12px] font-mono text-right text-text-pri">{fmtINR(h.currentValue)}</td>
@@ -258,10 +258,10 @@ export default function HoldingsTable() {
                       {h.pnl >= 0 ? '+' : ''}{fmtINR(h.pnl)}
                     </td>
                     <td className={cn('px-3 py-2 text-[11px] font-mono text-right', pnlClass(h.pnlPct ?? 0))}>
-                      {(h.pnlPct ?? 0) >= 0 ? '+' : ''}{(h.pnlPct ?? 0).toFixed(2)}%
+                      {(h.pnlPct ?? 0) >= 0 ? '+' : ''}{fmtNum(h.pnlPct ?? 0)}%
                     </td>
                     <td className={cn('px-3 py-2 text-[11px] font-mono text-right', pnlClass(h.dayChange ?? 0))}>
-                      {(h.dayChange ?? 0) >= 0 ? '+' : ''}{(h.dayChangePct ?? 0).toFixed(2)}%
+                      {(h.dayChange ?? 0) >= 0 ? '+' : ''}{fmtNum(h.dayChangePct ?? 0)}%
                     </td>
                     {/* Holding Manager inline columns */}
                     {hmMode && (() => {
@@ -330,7 +330,7 @@ export default function HoldingsTable() {
                   {totalPnl >= 0 ? '+' : ''}{fmtINR(totalPnl)}
                 </td>
                 <td className={cn('px-3 py-2 text-[11px] font-mono text-right', pnlClass(totalPnl))}>
-                  {totalInvested > 0 ? ((totalPnl / totalInvested) * 100).toFixed(2) : '0.00'}%
+                  {totalInvested > 0 ? fmtNum((totalPnl / totalInvested) * 100) : '0.00'}%
                 </td>
                 <td colSpan={hmMode ? 9 : 2}></td>
               </tr>

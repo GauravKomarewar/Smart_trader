@@ -67,7 +67,7 @@ def _load_shoonya_cached_token(user_id: str) -> str | None:
         logger.info("Cached Shoonya token INVALID (session expired)")
         return None
     except Exception as e:
-        logger.debug("Could not load cached Shoonya token: %s", e)
+        logger.warning("Could not load cached Shoonya token: %s", e)
         return None
 
 

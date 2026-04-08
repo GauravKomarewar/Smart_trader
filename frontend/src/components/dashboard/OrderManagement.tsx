@@ -280,7 +280,7 @@ export default function OrderManagement() {
                   </td>
                   <td className="px-3 py-2 text-[10px] text-text-muted">{o.product}</td>
                   <td className="px-3 py-2 text-right">
-                    <div className="text-[12px] font-mono text-text-pri">{o.filledQty}/{o.quantity}</div>
+                    <div className="text-[12px] font-mono text-text-pri">{fmtNum(o.filledQty, 0)}/{fmtNum(o.quantity, 0)}</div>
                   </td>
                   <td className="px-3 py-2 text-right">
                     <div className="text-[12px] font-mono text-text-bright">

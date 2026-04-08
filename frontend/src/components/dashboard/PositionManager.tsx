@@ -381,14 +381,14 @@ export default function PositionManager() {
                       </span>
                     </td>
 
-                    <td className="px-3 py-2 text-right font-mono text-[12px] text-text-pri">{p.quantity}</td>
+                    <td className="px-3 py-2 text-right font-mono text-[12px] text-text-pri">{fmtNum(p.quantity, 0)}</td>
                     <td className="px-3 py-2 text-right font-mono text-[12px] text-text-sec">{fmtNum(p.avgPrice)}</td>
                     <td className="px-3 py-2 text-right font-mono text-[12px] text-text-bright">{fmtNum(p.ltp)}</td>
                     <td className={cn('px-3 py-2 font-mono font-semibold text-[12px]', pnlClass(p.pnl))}>
                       {p.pnl >= 0 ? '+' : ''}{fmtINR(p.pnl)}
                     </td>
                     <td className={cn('px-3 py-2 font-mono text-[11px]', pnlClass(p.pnlPct ?? 0))}>
-                      {(p.pnlPct ?? 0) >= 0 ? '+' : ''}{(p.pnlPct ?? 0).toFixed(2)}%
+                      {(p.pnlPct ?? 0) >= 0 ? '+' : ''}{fmtNum(p.pnlPct ?? 0)}%
                     </td>
                     <td className="px-3 py-2 font-mono text-right text-[11px] text-text-sec">{fmtINR(Math.abs(p.value ?? 0))}</td>
                     <td className="px-3 py-2 text-[10px] text-text-muted">{p.exchange || ''}</td>

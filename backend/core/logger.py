@@ -36,18 +36,31 @@ _reg = _ComponentRegistry()
 
 # Component name → (logger_name, file_name)
 _COMPONENTS = {
-    "api":            ("smart_trader.api",           "api.log"),
-    "auth":           ("smart_trader.auth",          "auth.log"),
-    "broker":         ("smart_trader.broker",        "broker.log"),
-    "broker.connect": ("smart_trader.broker.connect","broker.log"),
-    "broker.session": ("smart_trader.broker.session","broker.log"),
-    "broker.registry":("smart_trader.broker.registry","broker.log"),
-    "account_risk":   ("smart_trader.account_risk",  "risk.log"),
-    "orders":         ("smart_trader.orders",        "orders.log"),
-    "oms":            ("smart_trader.oms",           "orders.log"),
-    "websocket":      ("smart_trader.websocket",     "websocket.log"),
-    "fyers":          ("smart_trader.fyers",         "broker.log"),
-    "app":            ("smart_trader",               "api.log"),
+    "api":              ("smart_trader.api",              "api.log"),
+    "auth":             ("smart_trader.auth",             "auth.log"),
+    "broker":           ("smart_trader.broker",           "broker.log"),
+    "broker.connect":   ("smart_trader.broker.connect",   "broker.log"),
+    "broker.session":   ("smart_trader.broker.session",   "broker.log"),
+    "broker.registry":  ("smart_trader.broker.registry",  "broker.log"),
+    "account_risk":     ("smart_trader.account_risk",     "risk.log"),
+    "orders":           ("smart_trader.orders",           "orders.log"),
+    "oms":              ("smart_trader.oms",              "orders.log"),
+    "websocket":        ("smart_trader.websocket",        "websocket.log"),
+    "fyers":            ("smart_trader.fyers",            "broker.log"),
+    "app":              ("smart_trader",                  "api.log"),
+    # ── Position / risk managers ─────────────────────────────────────────
+    "pos_sl":           ("smart_trader.pos_sl",           "positions.log"),
+    "position_watcher": ("smart_trader.position_watcher", "positions.log"),
+    "manual_pos":       ("smart_trader.manual_position_mgr", "positions.log"),
+    "mgr.positions":    ("smart_trader.mgr.positions",    "positions.log"),
+    "mgr.holdings":     ("smart_trader.mgr.holdings",     "orders.log"),
+    "mgr.orders":       ("smart_trader.mgr.orders",       "orders.log"),
+    "mgr.supreme":      ("smart_trader.mgr.supreme",      "api.log"),
+    # ── Broker subsystems ────────────────────────────────────────────────
+    "session_scheduler":("smart_trader.session_scheduler", "broker.log"),
+    "live_tick":        ("smart_trader.live_tick",         "broker.log"),
+    "symbol_normalizer":("smart_trader.symbol_normalizer", "broker.log"),
+    "symbols_db":       ("smart_trader.symbols_db",        "broker.log"),
 }
 
 
@@ -102,25 +115,27 @@ def setup_logging(
     _reg._error_handler = err_handler
 
     # ── Per-component rotating handlers ─────────────────────────────────────
-    # Track which logger names already have a file handler so we don't add
+    # Track which logger names map to which log files so we don't add
     # duplicate handlers when a parent and child share the same log file.
     # e.g. smart_trader.broker *and* smart_trader.broker.connect both map to
     # broker.log — the child must NOT get its own handler or each message is
     # written twice (once by child handler, once by parent handler).
-    loggers_with_file_handler: set[str] = set()
+    # But if they map to DIFFERENT files, both get their own handler.
+    logger_file_map: dict[str, str] = {}   # logger_name → file_name
 
     for key, (logger_name, file_name) in _COMPONENTS.items():
-        # Skip adding a file handler if any ancestor logger already has one
+        # Skip adding a file handler if any ancestor logger already has
+        # a handler writing to the SAME file (avoids duplicates).
         parts = logger_name.split(".")
-        has_ancestor = any(
-            ".".join(parts[:i]) in loggers_with_file_handler
+        has_ancestor_same_file = any(
+            logger_file_map.get(".".join(parts[:i])) == file_name
             for i in range(1, len(parts))
         )
 
         comp_logger = logging.getLogger(logger_name)
         comp_logger.propagate = True  # always propagate to root (console + errors.log)
 
-        if not has_ancestor:
+        if not has_ancestor_same_file:
             file_handler = logging.handlers.RotatingFileHandler(
                 str(_reg._log_dir / file_name),
                 maxBytes=max_bytes,
@@ -131,7 +146,7 @@ def setup_logging(
             file_handler.setLevel(numeric_level)
             comp_logger.addHandler(file_handler)
             _reg._handlers[key] = file_handler
-            loggers_with_file_handler.add(logger_name)
+            logger_file_map[logger_name] = file_name
 
     # ── Quiet noisy libraries ────────────────────────────────────────────────
     for noisy in ("uvicorn.access", "uvicorn.error", "websockets", "httpx"):

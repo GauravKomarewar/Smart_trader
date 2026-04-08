@@ -208,7 +208,7 @@ class ManualPositionManager:
                 if triggered:
                     self._execute_rule(rule, reason)
             except Exception as e:
-                logger.debug("Error evaluating rule %s: %s", row["rule_id"], e)
+                logger.error("Error evaluating rule %s: %s", row["rule_id"], e, exc_info=True)
 
     # ── Rule evaluation ───────────────────────────────────────────────────
 
@@ -407,7 +407,7 @@ class ManualPositionManager:
             )
             conn.commit()
         except Exception as e:
-            logger.debug("Failed to update rule payload %s: %s", rule.rule_id, e)
+            logger.error("Failed to update rule payload %s: %s", rule.rule_id, e, exc_info=True)
         finally:
             conn.close()
 

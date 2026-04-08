@@ -447,7 +447,7 @@ function BrokerHoldingsTable({ data, accountId, account, brokerIdx, toast }: { d
                   {pnlSign(pnl)}{fmtINR(Math.abs(pnl))}
                 </td>
                 <td className={cn('px-3 py-2 text-right font-mono text-[11px]', pnlClass(pnlPct))}>
-                  {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                  {pnlPct >= 0 ? '+' : ''}{fmtNum(pnlPct)}%
                 </td>
                 <td className="px-3 py-2">
                   <button onClick={() => setExpanded(isExpanded ? null : sym)}

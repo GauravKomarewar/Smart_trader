@@ -21,7 +21,7 @@ class HoldingsManager(BaseManager):
         try:
             raw_holdings = sess.get_holdings()
         except Exception as e:
-            self._log.debug("get_holdings failed %s/%s: %s",
+            self._log.warning("get_holdings failed %s/%s: %s",
                             sess.broker_id, sess.client_id, e)
             return
 

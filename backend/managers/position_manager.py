@@ -21,7 +21,7 @@ class PositionManager(BaseManager):
         try:
             raw_positions = sess.get_positions()  # Returns list[dict]
         except Exception as e:
-            self._log.debug("get_positions failed %s/%s: %s",
+            self._log.warning("get_positions failed %s/%s: %s",
                             sess.broker_id, sess.client_id, e)
             return
 

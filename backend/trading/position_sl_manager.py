@@ -33,7 +33,8 @@ class PositionSLManager:
         self._running = False
         self._lock = threading.Lock()
         self._missing_counts: dict[tuple[str, str, str], int] = {}
-        self._in_flight: set[tuple[str, str, str]] = {}  # keys currently firing exit
+        self._in_flight: set[tuple[str, str, str]] = set()  # keys currently firing exit
+        self._check_count: int = 0  # throttle "OK" log to every Nth check
 
     def start(self):
         if self._running:
@@ -81,11 +82,14 @@ class PositionSLManager:
         finally:
             conn.close()
 
+        if not rows:
+            return   # no active settings — nothing to monitor
+
         for row in rows:
             try:
                 self._check_row(row)
             except Exception as e:
-                logger.debug("Error checking SL row %s: %s", row, e)
+                logger.error("Error checking SL row %s: %s", row[:3], e, exc_info=True)
 
     def _check_row(self, row):
         (user_id, config_id, pos_key, stop_loss, target,
@@ -97,12 +101,18 @@ class PositionSLManager:
         # Guard: skip if an exit order is already in flight for this position
         with self._lock:
             if state_key in self._in_flight:
+                logger.debug("Skipping %s/%s — exit already in-flight", config_id[:8], pos_key)
                 return
 
         if position is None or position["ltp"] is None or position["qty"] == 0:
             with self._lock:
                 misses = self._missing_counts.get(state_key, 0) + 1
                 self._missing_counts[state_key] = misses
+            logger.warning(
+                "SL-CHECK %s/%s — position missing/inactive (miss=%d, pos=%s)",
+                config_id[:8], pos_key, misses,
+                "None" if position is None else f"ltp={position.get('ltp')} qty={position.get('qty')}",
+            )
             if misses >= 3:
                 logger.info(
                     "Deactivating managed position %s/%s %s — position no longer present",
@@ -137,12 +147,20 @@ class PositionSLManager:
                     if is_long:
                         new_sl = bsl + (steps * step_move)
                         if stop_loss is None or new_sl > stop_loss:
+                            logger.info(
+                                "TRAIL-UPDATE %s/%s LONG — steps=%d new_sl=%.2f (was %.2f) ltp=%.2f anchor=%.2f bsl=%.2f",
+                                config_id[:8], pos_key, steps, new_sl, float(stop_loss or 0), ltp, anchor, bsl,
+                            )
                             stop_loss = new_sl
                             trail_stop = new_sl
                             self._save_sl_and_trail(user_id, config_id, pos_key, stop_loss, trail_stop)
                     else:
                         new_sl = bsl - (steps * step_move)
                         if stop_loss is None or new_sl < stop_loss:
+                            logger.info(
+                                "TRAIL-UPDATE %s/%s SHORT — steps=%d new_sl=%.2f (was %.2f) ltp=%.2f anchor=%.2f bsl=%.2f",
+                                config_id[:8], pos_key, steps, new_sl, float(stop_loss or 0), ltp, anchor, bsl,
+                            )
                             stop_loss = new_sl
                             trail_stop = new_sl
                             self._save_sl_and_trail(user_id, config_id, pos_key, stop_loss, trail_stop)
@@ -160,6 +178,20 @@ class PositionSLManager:
             elif target and ltp <= target:
                 exit_reason = f"Target hit {ltp:.2f} ≤ {target:.2f}"
 
+        # Log every check so we can trace SL monitoring activity
+        # Throttle "OK" logs to every 15th check (~30s), but always log triggers
+        self._check_count += 1
+        if exit_reason or self._check_count % 15 == 1:
+            logger.info(
+                "SL-CHECK %s/%s %s ltp=%.2f sl=%s tg=%s trail=%s bsl=%s → %s",
+                config_id[:8], pos_key, side, ltp,
+                f"{float(stop_loss):.2f}" if stop_loss else "—",
+                f"{float(target):.2f}" if target else "—",
+                f"{float(trail_stop):.2f}" if trail_stop else "—",
+                f"{float(base_stop_loss):.2f}" if base_stop_loss else "—",
+                exit_reason or "OK",
+            )
+
         if exit_reason:
             # Mark in-flight to prevent duplicate exit orders from concurrent polls
             with self._lock:
@@ -168,7 +200,7 @@ class PositionSLManager:
                 self._in_flight.add(state_key)
             try:
                 logger.info("EXIT TRIGGERED: %s/%s %s — %s", config_id[:8], pos_key, side, exit_reason)
-                ok = self._fire_exit(user_id, config_id, pos_key, exchange, product, side, qty, exit_reason)
+                ok = self._fire_exit(user_id, config_id, pos_key, exchange, product, side, qty, exit_reason, ltp)
                 if ok:
                     self._deactivate(user_id, config_id, pos_key)
                 else:
@@ -200,6 +232,10 @@ class PositionSLManager:
             finally:
                 conn.close()
 
+            if not rows:
+                logger.warning("_get_position_snapshot: no DB rows for %s/%s symbol=%s", config_id[:8], pos_key, symbol)
+                return None
+
             for data, exchange in rows:
                 if not data:
                     continue
@@ -207,8 +243,8 @@ class PositionSLManager:
                 if not p:
                     continue
                 psym = str(p.get("tradingsymbol") or p.get("symbol") or "")
-                pprd = str(p.get("product") or "")
-                if psym != symbol or pprd != product:
+                pprd = str(p.get("product") or p.get("prd") or p.get("productType") or "")
+                if psym != symbol or (product and pprd and pprd != product):
                     continue
 
                 qty_raw = float(
@@ -224,10 +260,12 @@ class PositionSLManager:
                     "qty": int(abs(qty_raw)),
                     "avg_price": float(p.get("avgPrice") or p.get("averagePrice") or p.get("avg_price") or 0),
                     "exchange": str(p.get("exchange") or p.get("exch") or exchange or "NSE"),
-                    "product": pprd,
+                    "product": pprd or product,
                 }
+
+            logger.warning("_get_position_snapshot: no matching row for %s/%s (rows=%d)", config_id[:8], pos_key, len(rows))
         except Exception as e:
-            logger.debug("_get_position_snapshot error: %s", e)
+            logger.error("_get_position_snapshot error for %s/%s: %s", config_id[:8], pos_key, e, exc_info=True)
         return None
 
     def _save_sl_and_trail(self, user_id: str, config_id: str, pos_key: str,
@@ -248,7 +286,7 @@ class PositionSLManager:
             finally:
                 conn.close()
         except Exception as e:
-            logger.debug("_save_sl_and_trail error: %s", e)
+            logger.error("_save_sl_and_trail error: %s", e, exc_info=True)
 
     def _save_trail_stop(self, user_id: str, config_id: str, pos_key: str, trail_stop: float):
         from db.trading_db import get_trading_conn
@@ -266,7 +304,7 @@ class PositionSLManager:
             finally:
                 conn.close()
         except Exception as e:
-            logger.debug("_save_trail_stop error: %s", e)
+            logger.error("_save_trail_stop error: %s", e, exc_info=True)
 
     def _deactivate(self, user_id: str, config_id: str, pos_key: str):
         from db.trading_db import get_trading_conn
@@ -287,7 +325,7 @@ class PositionSLManager:
             finally:
                 conn.close()
         except Exception as e:
-            logger.debug("_deactivate error: %s", e)
+            logger.error("_deactivate error: %s", e, exc_info=True)
 
     def _fire_exit(
         self,
@@ -299,6 +337,7 @@ class PositionSLManager:
         side: str,
         qty: int,
         reason: str,
+        ltp: float = 0.0,
     ) -> bool:
         """Place a market exit order to close the position. Returns True on success."""
         try:
@@ -312,17 +351,23 @@ class PositionSLManager:
                 "transaction_type":  "S" if exit_side == "SELL" else "B",
                 "product":           product,
                 "order_type":        "MARKET",
+                "qty":               qty,
                 "quantity":          qty,
                 "price":             0,
+                "ltp":               ltp,   # pass LTP so adapter can use for protection price
                 "tag":               f"SL-MGR:{reason[:30]}",
             }
+            logger.info(
+                "FIRE-EXIT %s/%s %s %d %s — order=%s",
+                config_id[:8], symbol, exit_side, qty, reason, order,
+            )
 
             result = registry.execute_order(user_id, config_id, order)
             if result.get("success"):
-                logger.info("Exit order placed: %s %d %s — %s", symbol, qty, exit_side, reason)
+                logger.info("Exit order placed: %s %d %s — %s (result=%s)", symbol, qty, exit_side, reason, result)
                 return True
             else:
-                logger.error("Exit order FAILED: %s — %s", symbol, result.get("message"))
+                logger.error("Exit order FAILED: %s — %s (result=%s)", symbol, result.get("message"), result)
                 return False
         except Exception as e:
             logger.error("_fire_exit error: %s", e, exc_info=True)

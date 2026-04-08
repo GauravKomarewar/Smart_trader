@@ -100,7 +100,7 @@ export default function TradeBook() {
                     </span>
                   </td>
                   <td className="px-3 py-2 text-[10px] text-text-muted">{product}</td>
-                  <td className="px-3 py-2 text-[12px] font-mono text-right text-text-pri">{qty}</td>
+                  <td className="px-3 py-2 text-[12px] font-mono text-right text-text-pri">{fmtNum(qty, 0)}</td>
                   <td className="px-3 py-2 text-[12px] font-mono text-right text-text-bright">{fmtNum(price)}</td>
                   <td className="px-3 py-2 text-[12px] font-mono text-right text-text-pri">{fmtINR(value)}</td>
                   <td className="px-3 py-2 text-[11px] font-mono text-right text-loss">{fmtINR(charges)}</td>

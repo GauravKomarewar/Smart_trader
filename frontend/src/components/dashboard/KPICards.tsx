@@ -16,7 +16,7 @@ export default function KPICards() {
     {
       label: 'Day P&L',
       value: summary ? fmtINR(summary.dayPnl) : '—',
-      sub: summary ? `${summary.dayPnl >= 0 ? '+' : ''}${(summary.dayPnlPct ?? 0).toFixed(2)}%` : '',
+      sub: summary ? `${summary.dayPnl >= 0 ? '+' : ''}${(summary.dayPnlPct ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%` : '',
       cls: pnlClass(summary?.dayPnl ?? 0),
       icon: summary?.dayPnl && summary.dayPnl >= 0 ? TrendingUp : TrendingDown,
       iconCls: pnlClass(summary?.dayPnl ?? 0),

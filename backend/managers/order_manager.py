@@ -28,7 +28,7 @@ class OrderManager(BaseManager):
         try:
             raw_orders = sess.get_order_book()
         except Exception as e:
-            self._log.debug("get_order_book failed %s/%s: %s",
+            self._log.warning("get_order_book failed %s/%s: %s",
                             sess.broker_id, sess.client_id, e)
             return
 

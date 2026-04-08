@@ -20,6 +20,7 @@ Funds:     fund_limit list: [{title, equityAmount}]
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -504,7 +505,7 @@ class FyersAdapter(BrokerAdapter):
 
             fyers_order = {
                 "symbol":      fyers_sym,
-                "qty":         int(order.get("qty", 0)),
+                "qty":         int(order.get("qty") or order.get("quantity") or 0),
                 "type":        otype_map.get(otype_raw, 2),
                 "side":        side_int,
                 "productType": prd_map.get(prd_raw, "INTRADAY"),
@@ -514,6 +515,18 @@ class FyersAdapter(BrokerAdapter):
                 "disclosedQty":  0,
                 "offlineOrder":  False,
             }
+
+            # Fyers rejects limitPrice=0 for MCX MARKET orders (tick-size validation).
+            # For MARKET orders with price=0, use LTP ± 1% buffer as protection price.
+            # Round to whole number — MCX tick sizes are typically 1.0.
+            if fyers_order["type"] == 2 and fyers_order["limitPrice"] == 0:
+                ltp_fallback = float(order.get("ltp") or 0)
+                if ltp_fallback > 0:
+                    buffer = max(1.0, ltp_fallback * 0.01)  # 1% buffer
+                    if side_int == 1:   # BUY — Use higher price (ceil)
+                        fyers_order["limitPrice"] = float(math.ceil(ltp_fallback + buffer))
+                    else:               # SELL — Use lower price (floor)
+                        fyers_order["limitPrice"] = float(math.floor(max(1.0, ltp_fallback - buffer)))
 
             result = client.place_order(data=fyers_order)
             # FyersModel.place_order returns dict: {"s": "ok", "id": "...", "code": 1101, "message": "..."}
