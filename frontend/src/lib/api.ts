@@ -30,6 +30,12 @@ async function request<T>(
   })
 
   if (!res.ok) {
+    // Global 401 handler: clear token & redirect to login (skip for login endpoint itself)
+    if (res.status === 401 && path !== '/auth/login' && token) {
+      localStorage.removeItem('st_token')
+      window.location.href = '/login'
+      throw new ApiError(401, 'Session expired — please log in again')
+    }
     const text = await res.text().catch(() => res.statusText)
     throw new ApiError(res.status, text)
   }

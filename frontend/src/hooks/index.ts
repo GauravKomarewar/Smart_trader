@@ -196,8 +196,11 @@ export function useAuthCheck() {
           }
         }
       })
-      .catch(() => {
-        localStorage.removeItem('st_token')
+      .catch((err: any) => {
+        // Only clear token on 401 (expired/invalid). Network errors (service restart) keep the token.
+        if (err?.status === 401) {
+          localStorage.removeItem('st_token')
+        }
       })
       .finally(() => setChecking(false))
   }, [])
