@@ -216,6 +216,13 @@ class AccountRiskManager:
         # Guard against stale empty-positions reads during close
         self._last_known_pnl: float = 0.0
 
+        # ── Manual trade detection ────────────────────────────────────────
+        # Track position signature to detect positions created outside
+        # Smart Trader (direct broker terminal trades).
+        self._last_position_signature: Optional[str] = None
+        self._manual_trade_detected:   bool          = False
+        self._manual_detect_cooldown:  float         = 0.0  # monotonic ts
+
         # ── Logging adapter ───────────────────────────────────────────────
         self._log = logging.LoggerAdapter(
             logging.getLogger("smart_trader.account_risk"),
@@ -440,6 +447,9 @@ class AccountRiskManager:
             result["pnl"] = self._last_known_pnl
             return result
 
+        # ── Detect manual / orphan trades ─────────────────────────────
+        self._check_manual_trades(positions)
+
         # ── Compute total PnL — ALL products including CNC/delivery ───────
         pnl = 0.0
         open_count = 0
@@ -620,7 +630,9 @@ class AccountRiskManager:
                 halt_reason            = halt_reason,
                 checked_at             = datetime.now(timezone.utc).isoformat(),
             )
-            return status.to_dict()
+            d = status.to_dict()
+            d["manual_trade_detected"] = self._manual_trade_detected
+            return d
 
     def get_config(self) -> dict:
         """Return the current risk config as a dict."""
@@ -667,6 +679,86 @@ class AccountRiskManager:
                 new_config.trail_stop_loss,
                 new_config.trail_when_pnl,
             )
+
+    # ── Manual trade detection ───────────────────────────────────────────────
+
+    def _check_manual_trades(self, positions: list) -> None:
+        """
+        Detect positions created outside Smart Trader by tracking a position
+        signature (sorted hash of symbol+qty+side).  If the signature changes
+        without a corresponding DB order, flag as manual trade.
+
+        Ported from shoonya_platform/risk/supreme_risk.py manual-trade detection.
+        """
+        import hashlib
+
+        # Build deterministic signature from open positions
+        sig_parts = []
+        for p in positions:
+            if not isinstance(p, dict):
+                continue
+            sym = p.get("symbol") or p.get("tsym") or ""
+            qty = int(p.get("net_qty") or p.get("netqty") or p.get("qty", 0) or 0)
+            if qty == 0:
+                continue
+            side = "B" if qty > 0 else "S"
+            sig_parts.append(f"{sym}|{side}|{abs(qty)}")
+        sig_parts.sort()
+        current_sig = hashlib.sha256("|".join(sig_parts).encode()).hexdigest()[:16] if sig_parts else ""
+
+        with self._lock:
+            if self._last_position_signature is None:
+                # First heartbeat — just record
+                self._last_position_signature = current_sig
+                return
+
+            if current_sig == self._last_position_signature:
+                return  # No change
+
+            # Signature changed — check cooldown
+            import time as _time
+            now = _time.monotonic()
+            if now - self._manual_detect_cooldown < 5.0:
+                return
+            self._manual_detect_cooldown = now
+
+            # Check if the change came from Smart Trader DB orders
+            # by comparing with recent order records
+            try:
+                from trading.persistence.repository import OrderRepository
+                repo = OrderRepository(self.user_id, self.client_id)
+                recent = repo.get_all(limit=20)
+                # If there are recent SENT/EXECUTED orders in last 30s, it's our order
+                for rec in recent:
+                    if rec.status in ("SENT_TO_BROKER", "EXECUTED", "DISPATCHING"):
+                        age = (datetime.now(timezone.utc) - rec.updated_at).total_seconds() \
+                            if hasattr(rec, "updated_at") and rec.updated_at else 999
+                        if age < 30:
+                            # Likely our order, not manual
+                            self._last_position_signature = current_sig
+                            return
+            except Exception:
+                pass
+
+            # Genuine manual trade detected
+            self._manual_trade_detected = True
+            self._log.warning(
+                "MANUAL TRADE DETECTED — position signature changed for client=%s "
+                "(old=%s new=%s). Positions may have been created outside Smart Trader.",
+                self.client_id,
+                self._last_position_signature[:8],
+                current_sig[:8],
+            )
+
+            # If we're in a breached state, this is a violation
+            if self._daily_loss_hit:
+                self._log.critical(
+                    "MANUAL TRADE VIOLATION — new positions after risk breach on client=%s",
+                    self.client_id,
+                )
+
+            self._last_position_signature = current_sig
+            self._save_state()
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -718,6 +810,8 @@ class AccountRiskManager:
         self._daily_loss_hit     = False
         self._warning_sent       = False
         self._force_exit_triggered = False
+        self._manual_trade_detected = False
+        self._last_position_signature = None
         # NOTE: _lockout_until is intentionally NOT reset here
         self._save_state()
 
@@ -740,6 +834,8 @@ class AccountRiskManager:
                 ),
                 "consecutive_loss_days": self._consecutive_loss_days,
                 "force_exit_triggered":  self._force_exit_triggered,
+                "manual_trade_detected": self._manual_trade_detected,
+                "position_signature":    self._last_position_signature,
                 # Snapshot of active risk params for diagnostics
                 "config": {
                     "max_daily_loss":    self._config.max_daily_loss,
@@ -796,6 +892,8 @@ class AccountRiskManager:
             self._daily_loss_hit     = bool( state.get("daily_loss_hit",    False))
             self._warning_sent       = bool( state.get("warning_sent",      False))
             self._force_exit_triggered = bool(state.get("force_exit_triggered", False))
+            self._manual_trade_detected = bool(state.get("manual_trade_detected", False))
+            self._last_position_signature = state.get("position_signature")
 
             self._log.info(
                 "Restored state — pnl=%.0f loss_hit=%s consec=%d lockout=%s",

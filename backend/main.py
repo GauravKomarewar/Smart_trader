@@ -253,6 +253,15 @@ async def on_startup():
     except Exception as exc:
         logger.warning("PositionSLManager start failed (non-fatal): %s", exc)
 
+    # ── Start ManualPositionManager (orphan/manual-position rules) ──────────
+    try:
+        from trading.services.manual_position_manager import ManualPositionManager
+        _manual_pos_mgr = ManualPositionManager()
+        _manual_pos_mgr.start()
+        logger.info("ManualPositionManager started — orphan/manual-position rule engine active")
+    except Exception as exc:
+        logger.warning("ManualPositionManager start failed (non-fatal): %s", exc)
+
     # ── Start SessionScheduler (SEBI daily login/logout) ─────────────────────
     try:
         from trading.session_scheduler import session_scheduler

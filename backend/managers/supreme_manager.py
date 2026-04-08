@@ -119,7 +119,51 @@ class SupremeManager:
         return [mgr.get_health() for mgr in self._managers.values()]
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  READ-SIDE API — All data comes from PostgreSQL
+    #  STALE-CACHE FALLBACK — Direct-broker fetch when mgr_ tables are empty
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _broker_fallback(
+        user_id: str,
+        config_id: str | None,
+        method_name: str,
+    ) -> list[dict]:
+        """
+        When mgr_ tables are empty but broker sessions are live, fetch directly
+        from broker adapters so the dashboard isn't blank during startup or
+        manager lag.  Returns raw adapter dicts tagged with account metadata.
+        """
+        from broker.multi_broker import registry as mb
+
+        results: list[dict] = []
+        sessions = mb.get_all_sessions()
+
+        for sess in sessions:
+            if sess.user_id != user_id:
+                continue
+            if config_id and sess.config_id != config_id:
+                continue
+            if not sess.is_live:
+                continue
+
+            try:
+                adapter_fn = getattr(sess, method_name, None)
+                if not adapter_fn:
+                    continue
+                raw = adapter_fn() or []
+                for item in raw:
+                    d = item if isinstance(item, dict) else item.__dict__
+                    d["_config_id"] = sess.config_id
+                    d["_broker_id"] = sess.broker_id
+                    d["_client_id"] = sess.client_id
+                    results.append(d)
+            except Exception as exc:
+                logger.debug("Broker fallback %s for %s/%s failed: %s",
+                             method_name, sess.broker_id, sess.config_id, exc)
+        return results
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  READ-SIDE API — Data from PostgreSQL with broker-direct fallback
     #  These are called by WebSocket feed and REST endpoints
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -127,7 +171,8 @@ class SupremeManager:
 
     @staticmethod
     def get_positions(user_id: str, config_id: str | None = None) -> list[dict]:
-        """Get all positions for a user (optionally filtered by config_id)."""
+        """Get all positions for a user (optionally filtered by config_id).
+        Falls back to direct broker fetch if mgr_positions is empty but sessions are live."""
         conn = get_trading_conn()
         try:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -142,9 +187,17 @@ class SupremeManager:
                     "SELECT * FROM mgr_positions WHERE user_id = %s ORDER BY symbol",
                     (user_id,),
                 )
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+            if rows:
+                return rows
         finally:
             conn.close()
+
+        # Fallback: fetch directly from broker when DB is empty
+        fallback = SupremeManager._broker_fallback(user_id, config_id, "get_positions")
+        if fallback:
+            logger.debug("positions: DB empty, served %d rows from broker fallback", len(fallback))
+        return fallback
 
     # ── Orders ─────────────────────────────────────────────────────────────
 
@@ -164,9 +217,16 @@ class SupremeManager:
                     "SELECT * FROM mgr_orders WHERE user_id = %s ORDER BY fetched_at DESC",
                     (user_id,),
                 )
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+            if rows:
+                return rows
         finally:
             conn.close()
+
+        fallback = SupremeManager._broker_fallback(user_id, config_id, "get_order_book")
+        if fallback:
+            logger.debug("orders: DB empty, served %d rows from broker fallback", len(fallback))
+        return fallback
 
     # ── Holdings ───────────────────────────────────────────────────────────
 
@@ -186,9 +246,16 @@ class SupremeManager:
                     "SELECT * FROM mgr_holdings WHERE user_id = %s ORDER BY symbol",
                     (user_id,),
                 )
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+            if rows:
+                return rows
         finally:
             conn.close()
+
+        fallback = SupremeManager._broker_fallback(user_id, config_id, "get_holdings")
+        if fallback:
+            logger.debug("holdings: DB empty, served %d rows from broker fallback", len(fallback))
+        return fallback
 
     # ── Tradebook ──────────────────────────────────────────────────────────
 
@@ -208,9 +275,16 @@ class SupremeManager:
                     "SELECT * FROM mgr_tradebook WHERE user_id = %s ORDER BY fetched_at DESC",
                     (user_id,),
                 )
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+            if rows:
+                return rows
         finally:
             conn.close()
+
+        fallback = SupremeManager._broker_fallback(user_id, config_id, "get_tradebook")
+        if fallback:
+            logger.debug("tradebook: DB empty, served %d rows from broker fallback", len(fallback))
+        return fallback
 
     # ── Funds ──────────────────────────────────────────────────────────────
 
@@ -229,9 +303,16 @@ class SupremeManager:
                     "SELECT * FROM mgr_funds WHERE user_id = %s",
                     (user_id,),
                 )
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+            if rows:
+                return rows
         finally:
             conn.close()
+
+        fallback = SupremeManager._broker_fallback(user_id, config_id, "get_funds")
+        if fallback:
+            logger.debug("funds: DB empty, served %d rows from broker fallback", len(fallback))
+        return fallback
 
     # ── Sessions ───────────────────────────────────────────────────────────
 
