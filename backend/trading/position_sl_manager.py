@@ -364,7 +364,23 @@ class PositionSLManager:
 
             result = registry.execute_order(user_id, config_id, order)
             if result.get("success"):
+                order_id = result.get("order_id", "")
                 logger.info("Exit order placed: %s %d %s — %s (result=%s)", symbol, qty, exit_side, reason, result)
+
+                # Verify the order was actually filled / not rejected by exchange
+                if order_id:
+                    verified = self._verify_order_fill(
+                        user_id, config_id, order_id, symbol,
+                        max_wait=6.0, poll_interval=1.5,
+                    )
+                    if verified is False:
+                        logger.error(
+                            "Exit order REJECTED by exchange after placement: %s order_id=%s — keeping SL active",
+                            symbol, order_id,
+                        )
+                        return False
+                    # verified is True (filled) or None (timeout/unknown) — treat both as success
+                    # to avoid re-triggering if the order is still pending at exchange
                 return True
             else:
                 logger.error("Exit order FAILED: %s — %s (result=%s)", symbol, result.get("message"), result)
@@ -372,6 +388,58 @@ class PositionSLManager:
         except Exception as e:
             logger.error("_fire_exit error: %s", e, exc_info=True)
             return False
+
+    def _verify_order_fill(
+        self,
+        user_id: str,
+        config_id: str,
+        order_id: str,
+        symbol: str,
+        max_wait: float = 6.0,
+        poll_interval: float = 1.5,
+    ) -> Optional[bool]:
+        """Poll order book to verify an exit order was filled.
+
+        Returns:
+            True  — order confirmed COMPLETE/FILLED
+            False — order confirmed REJECTED/CANCELLED
+            None  — could not determine (timeout / order not found)
+        """
+        import time
+        from broker.multi_broker import registry
+
+        COMPLETE_STATUSES = {"COMPLETE", "FILLED", "FIL"}
+        REJECTED_STATUSES = {"REJECTED", "CANCELLED", "CANCELED"}
+        elapsed = 0.0
+        while elapsed < max_wait:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+            try:
+                sess = registry.get_session(user_id, config_id)
+                if not sess:
+                    continue
+                orders = sess.get_order_book()
+                for o in orders:
+                    oid = str(o.get("orderId") or o.get("order_id") or o.get("id") or "")
+                    if oid == order_id:
+                        status = str(o.get("status") or "").upper()
+                        logger.info(
+                            "ORDER-VERIFY %s order_id=%s status=%s",
+                            symbol, order_id, status,
+                        )
+                        if status in COMPLETE_STATUSES:
+                            return True
+                        if status in REJECTED_STATUSES:
+                            return False
+                        # Still pending — keep polling
+                        break
+            except Exception as e:
+                logger.warning("ORDER-VERIFY error for %s: %s", order_id, e)
+        logger.warning(
+            "ORDER-VERIFY timeout for %s order_id=%s after %.1fs — assuming success",
+            symbol, order_id, max_wait,
+        )
+        return None
 
     # ── Public API for saving settings ────────────────────────────────────────
 
