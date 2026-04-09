@@ -466,6 +466,7 @@ async def on_shutdown():
         get_session().logout()
     except Exception:
         pass
+
     logger.info("Smart Trader Backend shutting down")
 
 

@@ -220,8 +220,9 @@ export function useAuthCheck() {
         }
       })
       .catch((err: any) => {
-        // Only clear token on 401 (expired/invalid). Network errors (service restart) keep the token.
-        if (err?.status === 401) {
+        // Clear token on auth errors (401=expired/invalid, 404=user deleted).
+        // Network errors (no status) keep the token so a service restart doesn't force re-login.
+        if (err?.status === 401 || err?.status === 404) {
           localStorage.removeItem('st_token')
         }
       })

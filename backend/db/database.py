@@ -1,41 +1,41 @@
 """
-Smart Trader — SQLite database with SQLAlchemy async engine.
+Smart Trader — PostgreSQL database with SQLAlchemy engine.
 
 Tables:
   users          — platform users (email/password, role)
   broker_configs — per-user broker credentials (encrypted .env)
   broker_sessions— live session tokens & state
-  audit_log      — login/action audit trail
+  auth_audit_log — login/action audit trail
 """
 
 import os
-from pathlib import Path
+import logging
 from datetime import datetime, timezone
+
+from collections.abc import Generator
 
 from sqlalchemy import (
     Column, String, Boolean, Integer, Float, Text,
     DateTime, ForeignKey, JSON, UniqueConstraint,
-    create_engine, event,
+    create_engine,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 
-_HERE = Path(__file__).parent.parent
-DB_PATH = os.getenv("DATABASE_URL", f"sqlite:///{_HERE}/data/smarttrader.db")
+logger = logging.getLogger("smart_trader.database")
 
-# Ensure data dir exists
-(Path(_HERE) / "data").mkdir(exist_ok=True)
-
-engine = create_engine(
-    DB_PATH,
-    connect_args={"check_same_thread": False},
-    echo=False,
+# ── PostgreSQL connection (same PG cluster as trading DB) ──────────────────────
+_PG_DSN = os.getenv(
+    "AUTH_DATABASE_URL",
+    "postgresql://smarttrader:st_trading_2026@localhost:5432/smart_trader_trading",
 )
 
-# Enable WAL mode for better concurrent reads
-@event.listens_for(engine, "connect")
-def _set_wal(dbapi_conn, _):
-    dbapi_conn.execute("PRAGMA journal_mode=WAL")
-    dbapi_conn.execute("PRAGMA foreign_keys=ON")
+engine = create_engine(
+    _PG_DSN,
+    pool_size=5,
+    max_overflow=10,
+    pool_pre_ping=True,
+    echo=False,
+)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -110,7 +110,7 @@ class BrokerSession(Base):
 
 
 class AuditLog(Base):
-    __tablename__ = "audit_log"
+    __tablename__ = "auth_audit_log"
 
     id         = Column(Integer, primary_key=True, autoincrement=True)
     user_id    = Column(String(36), ForeignKey("users.id"), nullable=True)
@@ -118,7 +118,7 @@ class AuditLog(Base):
     resource   = Column(String(200), nullable=True)
     ip_address = Column(String(50), nullable=True)
     user_agent = Column(String(500), nullable=True)
-    status     = Column(String(20), default="success")   # success|failure
+    status     = Column(String(500), default="success")   # success|failure
     details    = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
@@ -128,10 +128,12 @@ class AuditLog(Base):
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
 def create_tables():
+    """Create all auth tables in PostgreSQL if they don't exist."""
     Base.metadata.create_all(bind=engine)
+    logger.info("Auth DB tables initialized (PostgreSQL)")
 
 
-def get_db() -> Session:
+def get_db() -> Generator[Session, None, None]:
     """FastAPI dependency — yields a database session."""
     db = SessionLocal()
     try:

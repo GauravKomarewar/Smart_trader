@@ -79,6 +79,7 @@ BROKER_FIELD_DEFS = {
         {"key": "SECRET_KEY",   "label": "Secret Key",               "type": "password", "required": True},
         {"key": "TOTP_KEY",     "label": "TOTP Secret",              "type": "password", "required": False},
         {"key": "PIN",          "label": "PIN",                      "type": "password", "required": False},
+        {"key": "REDIRECT_URL", "label": "Redirect URL",             "type": "text",     "required": False, "hint": "From Fyers MyAPI dashboard. Leave blank for default."},
     ],
     "angel": [
         {"key": "CLIENT_ID",    "label": "Client ID",               "type": "text",     "required": True},
