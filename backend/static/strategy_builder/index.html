@@ -355,8 +355,8 @@ button,input,select,textarea{font-family:var(--sans);}
           <option value="custom">Custom</option>
         </select>
       </div>
-      <div class="f-group"><label class="f-label">Symbol *</label>
-        <select class="f-select" id="sSymbol" onchange="onSymbolChange()"><option value="">Loading…</option></select>
+      <div class="f-group" style="display:none"><label class="f-label">Symbol</label>
+        <select class="f-select" id="sSymbol" onchange="onSymbolChange()"><option value="NIFTY">NIFTY</option></select>
       </div>
       <div class="f-group"><label class="f-label">Lot Multiplier</label>
         <input class="f-input" id="sLots" type="number" value="1" min="1" oninput="markDirty()">
@@ -364,7 +364,7 @@ button,input,select,textarea{font-family:var(--sans);}
       </div>
     </div>
     <div class="f-row c4">
-      <div class="f-group"><label class="f-label">Exchange</label><input class="f-input" id="sExchange" readonly></div>
+      <div class="f-group" style="display:none"><label class="f-label">Exchange</label><input class="f-input" id="sExchange" readonly></div>
       <div class="f-group"><label class="f-label">Product Type</label>
         <select class="f-select" id="sProductType">
           <option value="NRML">NRML</option><option value="MIS">MIS</option><option value="CNC">CNC</option>
@@ -2254,7 +2254,7 @@ function buildJSON(){
   const out={
     schema_version:'4.0',name:gv('sName')||'Unnamed',id:gv('sId')||'UNNAMED',
     description:gv('sDesc'),type:gv('sType'),enabled:true,status:'IDLE',
-    identity:{exchange:gv('sExchange')||'NFO',underlying:sym,instrument_type:ST.preserve.instrument_type||'OPTIDX',product_type:gv('sProductType'),order_type:gv('sOrderType'),lots:parseInt(gv('sLots'))||1},
+    identity:{instrument_type:ST.preserve.instrument_type||'OPTIDX',product_type:gv('sProductType'),order_type:gv('sOrderType'),lots:parseInt(gv('sLots'))||1},
     timing:{entry_window_start:gv('schEntry'),entry_window_end:gv('schEntryEnd'),eod_exit_time:gv('schExit')},
     market_data:{source:'sqlite'},
     entry:{

@@ -251,6 +251,9 @@ function OptionChainTable() {
 
     if (symbols.length === 0) return
 
+    // Clear stale overlay from previous underlying/expiry
+    setTickOverlay({})
+
     marketWs.connect()
     marketWs.subscribe(symbols)
 
@@ -262,7 +265,11 @@ function OptionChainTable() {
       }
     })
 
-    return () => { unsub() }
+    return () => {
+      unsub()
+      // Unsubscribe old symbols — visible strikes only pattern
+      marketWs.unsubscribe(symbols)
+    }
   }, [data?.underlying, data?.expiry, data?.rows?.length])
 
   // Apply tick overlay to get effective LTP for a side

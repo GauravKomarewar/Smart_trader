@@ -1896,7 +1896,7 @@ class PerStrategyExecutor:
                     logger.info(f"FILLED via reconciliation | {leg.tag}")
                 elif matching_order.status in ("FAILED", "CANCELLED", "REJECTED"):
                     leg.order_status = "FAILED"
-                    leg.is_active = False
+                    leg.close()
                     logger.warning(f"FAILED via reconciliation | {leg.tag}")
                 # else SENT_TO_BROKER or CREATED – remain pending
             else:
@@ -1966,7 +1966,7 @@ class PerStrategyExecutor:
                 if leg.order_placed_at and (datetime.now() - leg.order_placed_at).total_seconds() > 60:
                     logger.warning(f"PENDING TIMEOUT | {leg.tag} – marking FAILED")
                     leg.order_status = "FAILED"
-                    leg.is_active = False
+                    leg.close()
 
         # Handle CLOSE_PENDING timeout (adjustment close orders)
         for leg in list(self.state.legs.values()):
@@ -1976,7 +1976,7 @@ class PerStrategyExecutor:
                 logger.warning(f"CLOSE_PENDING TIMEOUT | {leg.tag} – marking CLOSED")
                 leg.order_status = "CLOSED"
                 self.state.cumulative_daily_pnl += leg.pnl
-                leg.is_active = False
+                leg.close()
 
     def notify_fill(self, symbol: str, side: str, qty: int, price: float,
                     delta: Optional[float], broker_order_id: str, command_id: Optional[str] = None):
@@ -2018,7 +2018,7 @@ class PerStrategyExecutor:
                 continue
             leg.order_status = "CLOSED"
             self.state.cumulative_daily_pnl += leg.pnl
-            leg.is_active = False
+            leg.close(price)
             leg.order_id = broker_order_id
             logger.info(f"CLOSE FILL NOTIFIED | {self.name} | {symbol} {side} {qty} @ {price}")
             return
@@ -2380,7 +2380,7 @@ class PerStrategyExecutor:
                             )
                             pnl_snapshot = self.state.combined_pnl
                             for leg in self.state.legs.values():
-                                leg.is_active = False
+                                leg.close()
                             self.state.cumulative_daily_pnl += pnl_snapshot
                             self.state.entered_today = True
                             self.cycle_completed = True
@@ -2429,7 +2429,7 @@ class PerStrategyExecutor:
             pnl_snapshot = self.state.combined_pnl
             # Mark all legs inactive
             for leg in self.state.legs.values():
-                leg.is_active = False
+                leg.close()
             self.state.cumulative_daily_pnl += pnl_snapshot
             # BUG-H3 FIX: Reset trailing stop and profit step state for clean re-entry.
             self.state.trailing_stop_active = False
@@ -2470,7 +2470,7 @@ class PerStrategyExecutor:
                 logger.info(f"Partial close: closing {close_qty} lots of {leg.tag}")
                 leg.qty -= close_qty
                 if leg.qty == 0:
-                    leg.is_active = False
+                    leg.close()
                 self.state.cumulative_daily_pnl += leg.pnl  # Approximate PnL from closed portion
             else:
                 logger.warning("partial_lots: no active legs to close")
@@ -2494,7 +2494,7 @@ class PerStrategyExecutor:
                         close_qty = max(1, int(leg.qty * 0.25))
                         leg.qty -= close_qty
                         if leg.qty <= 0:
-                            leg.is_active = False
+                            leg.close()
                 logger.info("Profit step closed 25% of position")
 
         # NEW: Handle trail/lock_trail profit target actions
@@ -2527,7 +2527,7 @@ class PerStrategyExecutor:
                     for leg, qty in reductions:
                         leg.qty = max(0, int(leg.qty) - qty)
                         if leg.qty == 0:
-                            leg.is_active = False
+                            leg.close()
             logger.info(f"Partial 50% exit for {self.name} — {len(alert_legs)} legs submitted")
         else:
             logger.warning(f"Unhandled exit action: {action}")
@@ -2660,11 +2660,7 @@ class PerStrategyExecutor:
                 for leg, qty in reductions:
                     leg.qty = max(0, int(leg.qty) - qty)
                     if leg.qty == 0:
-                        leg.is_active = False
-
-    def _resolve_leg_rule_targets(self, rule: Dict[str, Any]) -> List[LegState]:
-        ref = rule.get("exit_leg_ref", "all")
-        group = rule.get("group")
+                        leg.close()
         if ref == "all":
             return [leg for leg in self.state.legs.values() if leg.is_active]
         if ref == "group" and group:
@@ -2880,7 +2876,7 @@ class PerStrategyExecutor:
                 self.state.legs[new_tag] = new_leg
                 new_legs.append(new_leg)
                 # Deactivate old leg
-                leg.is_active = False
+                leg.close()
             except Exception as e:
                 logger.error(f"Roll failed for {leg.tag}: {e}")
         logger.info(f"Rolled {len(new_legs)} legs to next expiry")

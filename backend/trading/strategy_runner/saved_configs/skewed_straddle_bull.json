@@ -1,14 +1,12 @@
 {
   "schema_version": "4.0",
-  "name": "nifty_skewed_straddle_bull",
-  "id": "NIFTY_SKEW_BULL",
+  "name": "skewed_straddle_bull",
+  "id": "SKEWED_STRADDLE_BULL",
   "description": "Directional premium selling strategy with a BULL bias. Sells 2 lots of PE (expecting market to hold/rise) and 1 lot of CE. The extra PE lot gives more premium on the bullish side. If market confirms the bullish view, CE decays fast and PE premium is collected. Three adjustment modes: view confirmed (convert to 1-sided), view wrong (emergency rebalance), and flat (convert to symmetric DNSS). Use when you have a mild bullish view but want to still collect premium if flat.",
   "type": "spread",
-  "enabled": true,
-  "status": "RUNNING",
+  "enabled": false,
+  "status": "STOPPED",
   "identity": {
-    "exchange": "NFO",
-    "underlying": "NIFTY",
     "instrument_type": "OPTIDX",
     "product_type": "NRML",
     "order_type": "MARKET",

@@ -518,15 +518,24 @@ class FyersAdapter(BrokerAdapter):
 
             # Fyers rejects limitPrice=0 for MCX MARKET orders (tick-size validation).
             # For MARKET orders with price=0, use LTP ± 1% buffer as protection price.
-            # Round to whole number — MCX tick sizes are typically 1.0.
+            # Use actual tick_size from symbol DB for correct rounding.
             if fyers_order["type"] == 2 and fyers_order["limitPrice"] == 0:
                 ltp_fallback = float(order.get("ltp") or 0)
                 if ltp_fallback > 0:
-                    buffer = max(1.0, ltp_fallback * 0.01)  # 1% buffer
-                    if side_int == 1:   # BUY — Use higher price (ceil)
-                        fyers_order["limitPrice"] = float(math.ceil(ltp_fallback + buffer))
-                    else:               # SELL — Use lower price (floor)
-                        fyers_order["limitPrice"] = float(math.floor(max(1.0, ltp_fallback - buffer)))
+                    # Resolve tick_size from symbol DB
+                    tick_size = 1.0  # default for MCX
+                    try:
+                        if inst and getattr(inst, 'tick_size', None) and inst.tick_size > 0:
+                            tick_size = inst.tick_size
+                    except Exception:
+                        pass
+                    buffer = max(tick_size, ltp_fallback * 0.01)  # 1% buffer
+                    raw_buy = ltp_fallback + buffer
+                    raw_sell = max(tick_size, ltp_fallback - buffer)
+                    if side_int == 1:   # BUY — round up to nearest tick
+                        fyers_order["limitPrice"] = float(math.ceil(raw_buy / tick_size) * tick_size)
+                    else:               # SELL — round down to nearest tick
+                        fyers_order["limitPrice"] = float(math.floor(raw_sell / tick_size) * tick_size)
             result = client.place_order(data=fyers_order)
             # FyersModel.place_order returns dict: {"s": "ok", "id": "...", "code": 1101, "message": "..."}
             if isinstance(result, dict):

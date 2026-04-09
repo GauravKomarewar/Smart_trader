@@ -1,14 +1,12 @@
 {
   "schema_version": "4.0",
-  "name": "Momentum Scalping with Greeks",
-  "id": "MOMENTUM_GREEK_SCALP",
+  "name": "momentum_scalp_greeks",
+  "id": "MOMENTUM_SCALP_GREEKS",
   "description": "Buy ATM call when spot rises >0.5% and call delta >0.6; buy ATM put when spot falls >0.5% and put delta < -0.6.",
   "type": "directional",
-  "enabled": true,
-  "status": "RUNNING",
+  "enabled": false,
+  "status": "STOPPED",
   "identity": {
-    "exchange": "NFO",
-    "underlying": "NIFTY",
     "instrument_type": "OPTIDX",
     "product_type": "NRML",
     "order_type": "MARKET",

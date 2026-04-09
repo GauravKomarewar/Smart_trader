@@ -17,6 +17,8 @@ import StrategyBuilderPage from './pages/StrategyBuilderPage'
 import SettingsPage from './pages/SettingsPage'
 import HistoricalAnalyticsPage from './pages/HistoricalAnalyticsPage'
 import BrokerAccountsPage from './pages/BrokerAccountsPage'
+import GreeksDashboardPage from './pages/GreeksDashboardPage'
+import PositionManagerPage from './pages/PositionManagerPage'
 import ToastContainer from './components/common/ToastContainer'
 
 /* ── Apply theme + font globally (works on every page) ── */
@@ -106,6 +108,8 @@ export default function App() {
           <Route path="analytics" element={<HistoricalAnalyticsPage />} />
           <Route path="broker-accounts" element={<BrokerAccountsPage />} />
           <Route path="broker-diagnostics" element={<BrokerAccountsPage initialTab="diagnostics" />} />
+          <Route path="greeks" element={<GreeksDashboardPage />} />
+          <Route path="positions" element={<PositionManagerPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="settings/:tab" element={<SettingsPage />} />
         </Route>

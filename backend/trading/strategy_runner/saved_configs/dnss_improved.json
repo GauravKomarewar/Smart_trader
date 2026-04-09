@@ -1,14 +1,12 @@
 {
   "schema_version": "4.0",
-  "name": "nifty_dnss_improved",
-  "id": "NIFTY_DNSS_IMPROVED",
+  "name": "dnss_improved",
+  "id": "DNSS_IMPROVED",
   "description": "Improved DNSS with VIX spike defense, panic adj rule, breakeven guard, and trailing SL. Handles sudden directional moves and VIX spikes (war/event scenarios).",
   "type": "neutral",
-  "enabled": true,
-  "status": "RUNNING",
+  "enabled": false,
+  "status": "STOPPED",
   "identity": {
-    "exchange": "NFO",
-    "underlying": "NIFTY",
     "instrument_type": "OPTIDX",
     "product_type": "NRML",
     "order_type": "MARKET",

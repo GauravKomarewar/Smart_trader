@@ -105,17 +105,28 @@ class LegState:
         """Broker contract quantity = lots * lot_size."""
         return self.qty * max(1, self.lot_size)
 
+    def close(self, price: Optional[float] = None):
+        """Close this leg, freeze exit_price and mark inactive."""
+        self.is_active = False
+        self.exit_price = price if (price is not None and price > 0) else self.ltp
+        self.exit_timestamp = datetime.now()
+
     @property
     def pnl(self) -> float:
         """PnL in absolute currency terms (price_diff * lots * lot_size).
+        For closed legs, uses exit_price if available.
         Uses entry_price as effective LTP when ltp is 0 or None (no tick received yet),
         so pnl returns 0 rather than a spuriously large value.
         """
-        ltp = self.ltp if (self.ltp is not None and self.ltp != 0.0) else self.entry_price
-        if self.side == Side.BUY:
-            return (ltp - self.entry_price) * self.order_qty
+        # For closed legs, prefer frozen exit_price
+        if not self.is_active and self.exit_price is not None and self.exit_price > 0:
+            effective = self.exit_price
         else:
-            return (self.entry_price - ltp) * self.order_qty
+            effective = self.ltp if (self.ltp is not None and self.ltp != 0.0) else self.entry_price
+        if self.side == Side.BUY:
+            return (effective - self.entry_price) * self.order_qty
+        else:
+            return (self.entry_price - effective) * self.order_qty
 
     @property
     def pnl_pct(self) -> float:

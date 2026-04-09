@@ -28,7 +28,7 @@ class BrokerReconciliation:
         for tag, leg in self.state.legs.items():
             if leg.is_active and tag not in broker_tags:
                 warnings.append(f"Leg {tag} is active in state but missing in broker")
-                leg.is_active = False
+                leg.close()
 
         for pos in broker_positions:
             tag = pos.get("tag")
@@ -46,7 +46,7 @@ class BrokerReconciliation:
                 if "qty" in pos:
                     leg.qty = pos["qty"]
                     if leg.qty == 0:
-                        leg.is_active = False
+                        leg.close()
 
         return warnings
 
@@ -172,7 +172,7 @@ class BrokerReconciliation:
                     f"Leg {tag} ({sym}): state=ACTIVE but broker netqty=0 -> marking inactive"
                 )
                 logger.warning(f"RECONCILE | {tag} ({sym}) | state says active but broker is flat")
-                leg.is_active = False
+                leg.close()
             else:
                 # ✅ BUG-003 FIX: Verify side matches broker direction
                 broker_side = Side.BUY if net > 0 else Side.SELL

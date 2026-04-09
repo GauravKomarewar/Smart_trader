@@ -1,14 +1,12 @@
 {
   "schema_version": "4.0",
-  "name": "nifty_vix_mean_reversion",
-  "id": "NIFTY_VIX_MEAN_REV",
+  "name": "vix_mean_reversion",
+  "id": "VIX_MEAN_REVERSION",
   "description": "Enters ONLY when India VIX spikes above 18 (fear/event-driven). Sells wider strikes (0.20 delta) and profits from the inevitable VIX mean-reversion (IV crush). This is the strategy specifically designed for the Iran/war/gap-down scenario \u2014 it WAITS for the spike, then sells into it. Uses a 2-day holding strategy with Thursday/Friday focus.",
   "type": "neutral",
-  "enabled": true,
-  "status": "COMPLETED",
+  "enabled": false,
+  "status": "STOPPED",
   "identity": {
-    "exchange": "NFO",
-    "underlying": "NIFTY",
     "instrument_type": "OPTIDX",
     "product_type": "NRML",
     "order_type": "MARKET",

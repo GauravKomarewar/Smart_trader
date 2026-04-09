@@ -246,6 +246,121 @@ CREATE TABLE IF NOT EXISTS market_ohlcv (
 CREATE INDEX IF NOT EXISTS idx_ohlcv_sym_tf_time ON market_ohlcv(symbol, timeframe, bar_time DESC);
 """
 
+# ── Strategy persistence tables ──────────────────────────────────────────────
+
+_CREATE_STRATEGY_RUNS = """
+CREATE TABLE IF NOT EXISTS strategy_runs (
+    id              BIGSERIAL PRIMARY KEY,
+    run_id          TEXT NOT NULL UNIQUE,
+    strategy_name   TEXT NOT NULL,
+    config_name     TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    exchange        TEXT NOT NULL DEFAULT 'NFO',
+    paper_mode      BOOLEAN NOT NULL DEFAULT TRUE,
+    broker_config_id TEXT,
+    status          TEXT NOT NULL DEFAULT 'RUNNING',
+    config_snapshot JSONB NOT NULL DEFAULT '{}',
+    spot_price      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    spot_open       DOUBLE PRECISION NOT NULL DEFAULT 0,
+    atm_strike      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    fut_ltp         DOUBLE PRECISION NOT NULL DEFAULT 0,
+    entered_today   BOOLEAN NOT NULL DEFAULT FALSE,
+    entry_time      TIMESTAMPTZ,
+    cumulative_daily_pnl DOUBLE PRECISION NOT NULL DEFAULT 0,
+    adjustments_today    INTEGER NOT NULL DEFAULT 0,
+    total_trades_today   INTEGER NOT NULL DEFAULT 0,
+    trailing_stop_active BOOLEAN NOT NULL DEFAULT FALSE,
+    trailing_stop_level  DOUBLE PRECISION NOT NULL DEFAULT 0,
+    peak_pnl        DOUBLE PRECISION NOT NULL DEFAULT 0,
+    current_profit_step  INTEGER NOT NULL DEFAULT 0,
+    entry_reason    TEXT NOT NULL DEFAULT '',
+    exit_reason     TEXT NOT NULL DEFAULT '',
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    stopped_at      TIMESTAMPTZ,
+    last_tick_at    TIMESTAMPTZ,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_runs_name ON strategy_runs(strategy_name, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_runs_status ON strategy_runs(status);
+"""
+
+_CREATE_STRATEGY_LEGS = """
+CREATE TABLE IF NOT EXISTS strategy_legs (
+    id              BIGSERIAL PRIMARY KEY,
+    run_id          TEXT NOT NULL REFERENCES strategy_runs(run_id) ON DELETE CASCADE,
+    tag             TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    instrument      TEXT NOT NULL DEFAULT 'OPT',
+    option_type     TEXT,
+    strike          DOUBLE PRECISION,
+    expiry          TEXT,
+    side            TEXT NOT NULL,
+    qty             INTEGER NOT NULL DEFAULT 1,
+    lot_size        INTEGER NOT NULL DEFAULT 1,
+    entry_price     DOUBLE PRECISION NOT NULL DEFAULT 0,
+    ltp             DOUBLE PRECISION NOT NULL DEFAULT 0,
+    exit_price      DOUBLE PRECISION,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    trading_symbol  TEXT NOT NULL DEFAULT '',
+    order_id        TEXT,
+    command_id      TEXT,
+    order_status    TEXT NOT NULL DEFAULT 'PENDING',
+    filled_qty      INTEGER NOT NULL DEFAULT 0,
+    order_placed_at TIMESTAMPTZ,
+    delta           DOUBLE PRECISION NOT NULL DEFAULT 0,
+    gamma           DOUBLE PRECISION NOT NULL DEFAULT 0,
+    theta           DOUBLE PRECISION NOT NULL DEFAULT 0,
+    vega            DOUBLE PRECISION NOT NULL DEFAULT 0,
+    iv              DOUBLE PRECISION NOT NULL DEFAULT 0,
+    oi              INTEGER NOT NULL DEFAULT 0,
+    volume          INTEGER NOT NULL DEFAULT 0,
+    group_name      TEXT NOT NULL DEFAULT '',
+    label           TEXT NOT NULL DEFAULT '',
+    entry_reason    TEXT NOT NULL DEFAULT '',
+    exit_reason     TEXT NOT NULL DEFAULT '',
+    entry_timestamp TIMESTAMPTZ,
+    exit_timestamp  TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(run_id, tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_legs_run ON strategy_legs(run_id);
+CREATE INDEX IF NOT EXISTS idx_strategy_legs_active ON strategy_legs(run_id, is_active);
+"""
+
+_CREATE_STRATEGY_EVENTS = """
+CREATE TABLE IF NOT EXISTS strategy_events (
+    id              BIGSERIAL PRIMARY KEY,
+    run_id          TEXT NOT NULL REFERENCES strategy_runs(run_id) ON DELETE CASCADE,
+    event_type      TEXT NOT NULL,
+    leg_tag         TEXT,
+    reason          TEXT NOT NULL DEFAULT '',
+    details         JSONB NOT NULL DEFAULT '{}',
+    pnl_at_event    DOUBLE PRECISION NOT NULL DEFAULT 0,
+    spot_at_event   DOUBLE PRECISION NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_events_run ON strategy_events(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_strategy_events_type ON strategy_events(run_id, event_type);
+"""
+
+_CREATE_PNL_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS pnl_snapshots (
+    id              BIGSERIAL PRIMARY KEY,
+    run_id          TEXT NOT NULL REFERENCES strategy_runs(run_id) ON DELETE CASCADE,
+    pnl             DOUBLE PRECISION NOT NULL DEFAULT 0,
+    spot_price      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    active_legs     INTEGER NOT NULL DEFAULT 0,
+    net_delta       DOUBLE PRECISION NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pnl_snapshots_run ON pnl_snapshots(run_id, created_at);
+"""
+
 # ─── Connection factory ─────────────────────────────────────────────────────
 
 def get_trading_conn():
@@ -308,6 +423,10 @@ def init_trading_db():
         _CREATE_POSITION_SL_SETTINGS,
         _CREATE_MARKET_TICKS,
         _CREATE_MARKET_OHLCV,
+        _CREATE_STRATEGY_RUNS,
+        _CREATE_STRATEGY_LEGS,
+        _CREATE_STRATEGY_EVENTS,
+        _CREATE_PNL_SNAPSHOTS,
     ]
     with get_trading_conn() as conn:
         cur = conn.cursor()

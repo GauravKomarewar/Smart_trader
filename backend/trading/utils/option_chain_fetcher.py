@@ -165,7 +165,7 @@ def fetch_and_store_from_broker(
         from broker.fyers_client import get_fyers_client
         fyers = get_fyers_client()
         if fyers.is_live:
-            raw = fyers.get_option_chain(sym)
+            raw = fyers.get_option_chain(sym, exchange=exchange)
             if raw:
                 result = _process_fyers_chain(exchange, sym, raw)
                 if result:
@@ -416,16 +416,20 @@ def _process_shoonya_chain(exchange: str, symbol: str, data: Dict) -> Optional[s
 def _fyers_date_to_dd_mmm_yyyy(date_str: str) -> str:
     """
     Convert Fyers date format to MarketReader format.
-    '2026-04-10' → '10-Apr-2026'
+    '2026-04-10' or '16-04-2026' → '10-Apr-2026'
     """
     if not date_str:
         return ""
-    try:
-        dt = datetime.strptime(date_str.strip(), "%Y-%m-%d")
-        return dt.strftime("%-d-%b-%Y")  # e.g. "10-Apr-2026"
-    except ValueError:
-        # Already in DD-Mon-YYYY format?
-        return date_str
+    s = date_str.strip()
+    # Try YYYY-MM-DD first
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            return dt.strftime("%-d-%m-%Y")  # e.g. "10-04-2026"
+        except ValueError:
+            continue
+    # Already in DD-MM-YYYY or DD-Mon-YYYY format — return as-is
+    return s
 
 
 def get_db_path(exchange: str, symbol: str, expiry: str) -> Path:

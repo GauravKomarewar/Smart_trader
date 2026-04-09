@@ -25,8 +25,8 @@ def time_to_expiry(expiry: str, time_str: str) -> float:
     Returns:
         Time to expiry in years
     """
-    # 1. Parse the date (e.g., "28DEC25")
-    expiry_date = datetime.strptime(expiry, "%d%b%y")
+    # 1. Parse the date (e.g., "28DEC25" or "28-Apr-2026" or "28-04-2026")
+    expiry_date = _parse_expiry_date(expiry)
     
     # 2. Parse the time (e.g., "15:30")
     time_parts = datetime.strptime(time_str, "%H:%M")
@@ -42,6 +42,16 @@ def time_to_expiry(expiry: str, time_str: str) -> float:
     return max(delta / (365 * 24 * 3600), 0)
 
 
+def _parse_expiry_date(expiry_str: str) -> datetime:
+    """Parse expiry date string in any common format."""
+    for fmt in ("%d%b%y", "%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d", "%d%b%Y"):
+        try:
+            return datetime.strptime(expiry_str.strip(), fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Cannot parse expiry date: {expiry_str!r}")
+
+
 def time_to_expiry_seconds(
     expiry_str: str,
     market_close_time: str
@@ -51,7 +61,7 @@ def time_to_expiry_seconds(
     Black–Scholes compatible and numerically stable.
     
     Args:
-        expiry_str: Expiry date in DDMMMYY format
+        expiry_str: Expiry date (e.g. "28APR26", "28-Apr-2026", "28-04-2026")
         market_close_time: Market close time in HH:MM format
     
     Returns:
@@ -59,7 +69,7 @@ def time_to_expiry_seconds(
     """
     now = datetime.now()
 
-    expiry_date = datetime.strptime(expiry_str, "%d%b%y")
+    expiry_date = _parse_expiry_date(expiry_str)
     close_h, close_m = map(int, market_close_time.split(":"))
 
     expiry_dt = expiry_date.replace(
@@ -99,7 +109,7 @@ def get_trading_time_fraction(
         Trading time fraction (years)
     """
     now = datetime.now()
-    expiry_date = datetime.strptime(expiry_str, "%d%b%y")
+    expiry_date = _parse_expiry_date(expiry_str)
     
     # 1. Calculate Total Trading Seconds in the Year
     year = expiry_date.year

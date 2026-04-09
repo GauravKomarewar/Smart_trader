@@ -57,8 +57,15 @@ class StrategyExecutor:
 
         # OMS + broker integration (injected externally via set_oms)
         self._oms: Optional[Any] = None
+        self._db_persistence: Optional[Any] = None
         self._paper_mode: bool = identity.get("paper_mode", True)
         self._strategy_id: str = self.config.get("id", self.config.get("name", "unknown"))
+
+        # Live tick overlay — receives real-time LTP from LiveTickService
+        # keyed by (strike, option_type) for options, or "SPOT" / "FUT" for spot/futures
+        self._live_ltp: dict = {}           # {key: {"ltp": float, "ts": float, ...}}
+        self._tick_service: Optional[Any] = None
+        self._subscribed_symbols: set = set()
 
         # NEW: Sequential entry state (not fully implemented in base executor)
         self._sequential_pending = False
@@ -112,6 +119,55 @@ class StrategyExecutor:
         """Inject OMS for live/paper order placement."""
         self._oms = oms
         logger.info("OMS injected into executor (paper=%s)", self._paper_mode)
+
+    def set_db_persistence(self, db_persist: Any) -> None:
+        """Inject DB persistence for restart-safe state storage."""
+        self._db_persistence = db_persist
+        logger.info("DB persistence injected for strategy %s", self._strategy_id)
+
+    def set_tick_service(self, tick_service: Any) -> None:
+        """Inject LiveTickService for real-time LTP overlay on SQLite data."""
+        self._tick_service = tick_service
+        logger.info("LiveTickService injected for real-time LTP in strategy %s", self._strategy_id)
+
+    def subscribe_leg_symbols(self) -> None:
+        """Subscribe all active leg trading symbols to LiveTickService for real-time LTP."""
+        if not self._tick_service:
+            return
+        symbols_to_sub: list = []
+        for leg in self.state.legs.values():
+            if not leg.is_active:
+                continue
+            tsym = leg.trading_symbol or leg.symbol
+            if tsym and tsym not in self._subscribed_symbols:
+                symbols_to_sub.append(tsym)
+                self._subscribed_symbols.add(tsym)
+        if symbols_to_sub:
+            try:
+                self._tick_service.subscribe(symbols_to_sub)
+                logger.info("Subscribed %d leg symbols to LiveTickService: %s",
+                            len(symbols_to_sub), symbols_to_sub)
+            except Exception as e:
+                logger.warning("Failed to subscribe leg symbols: %s", e)
+
+    def unsubscribe_all(self) -> None:
+        """Unsubscribe all leg symbols from LiveTickService on strategy stop."""
+        if self._tick_service and self._subscribed_symbols:
+            try:
+                self._tick_service.unsubscribe(list(self._subscribed_symbols))
+                logger.info("Unsubscribed %d symbols from LiveTickService", len(self._subscribed_symbols))
+            except Exception:
+                pass
+            self._subscribed_symbols.clear()
+
+    def _get_live_ltp(self, trading_symbol: str) -> Optional[float]:
+        """Get real-time LTP from LiveTickService for a trading symbol."""
+        if not self._tick_service:
+            return None
+        tick = self._tick_service.get_latest(trading_symbol)
+        if tick and tick.get("ltp", 0) > 0:
+            return float(tick["ltp"])
+        return None
 
     def _place_entry_order(self, leg: LegState) -> None:
         """Place an entry order for a leg via OMS."""
@@ -270,35 +326,55 @@ class StrategyExecutor:
         if exit_action and exit_action != "profit_step_adj":
             logger.info(f"Exit triggered: {exit_action}")
             self._execute_exit(exit_action)
+            self._log_event("EXIT", reason=exit_action)
             self._save_state()  # Save immediately on significant event
             return
 
         # Check if we should enter today
         if self._should_enter(now):
             self._execute_entry()
+            self._log_event("ENTRY", reason=f"{len(self.state.legs)} legs entered")
             self._save_state()  # ✅ BUG-022 FIX: Save immediately after entry
         elif (self.state.entered_today
-              and not any(l.is_active for l in self.state.legs.values())
+              and len(self.state.legs) == 0
               and self.state.spot_price > 0):
-            # Entry was marked but no active legs (stale entry from when market data was missing)
-            logger.warning("entered_today=True but no active legs and spot is live — resetting for re-entry")
+            # Entry was marked but NO legs were ever created (entry_engine returned 0 legs
+            # after _execute_entry set entered_today prematurely — defensive guard).
+            # Only reset if there are literally zero legs; if legs exist but are all closed
+            # (is_active=False), that means an exit has already happened — do NOT re-enter.
+            logger.warning("entered_today=True but zero legs in state — resetting for re-entry")
             self.state.entered_today = False
+            if self.state.total_trades_today > 0:
+                self.state.total_trades_today -= 1
 
         # Check adjustments
         actions = self.adjustment_engine.check_and_apply(now)
         for a in actions:
             logger.info(f"Adjustment: {a}")
         if actions:
+            self._log_event("ADJUSTMENT", reason="; ".join(str(a) for a in actions))
             self._save_state()  # ✅ BUG-022 FIX: Save immediately after any adjustment
 
-        # Periodic save (every minute) as a safety net
+        # Periodic save + PnL snapshot (every minute) as a safety net
         if now.second == 0:
             self._save_state()
+            self._snapshot_pnl()
 
     def _update_market_data(self):
-        """Update spot, ATM, futures, per‑leg LTP, greeks, bid/ask, OI change, and index data."""
+        """Update spot, ATM, futures, per‑leg LTP, greeks, bid/ask, OI change, and index data.
+        Uses SQLite option chain as base, then overlays real-time LTP from LiveTickService."""
         self.state.current_time = datetime.now()
         self.state.spot_price = self.market.get_spot_price(self._cycle_expiry_date)
+
+        # Overlay live spot price from tick service (more current than 30s SQLite)
+        if self._tick_service:
+            identity = self.config.get("identity", {})
+            underlying = identity.get("underlying", "")
+            if underlying:
+                live_spot = self._get_live_ltp(underlying)
+                if live_spot and live_spot > 0:
+                    self.state.spot_price = live_spot
+
         if not self.state.spot_open and self.state.spot_price:
             self.state.spot_open = self.state.spot_price
         self.state.atm_strike = self.market.get_atm_strike(self._cycle_expiry_date)
@@ -312,6 +388,9 @@ class StrategyExecutor:
         self.state.oi_buildup_ce = float(chain_metrics.get("oi_buildup_ce", 0.0) or 0.0)
         self.state.oi_buildup_pe = float(chain_metrics.get("oi_buildup_pe", 0.0) or 0.0)
 
+        # Subscribe any new leg symbols to LiveTickService
+        self.subscribe_leg_symbols()
+
         # Update each active leg
         for leg in self.state.legs.values():
             if not leg.is_active:
@@ -322,8 +401,7 @@ class StrategyExecutor:
                 try:
                     opt_data = self.market.get_option_at_strike(leg.strike, leg.option_type, leg.expiry)
                     if opt_data:
-                        # Update standard fields
-                        leg.ltp = opt_data.get("ltp", leg.ltp)
+                        # Update standard fields from SQLite (greeks, OI, etc.)
                         leg.delta = opt_data.get("delta", leg.delta)
                         leg.gamma = opt_data.get("gamma", leg.gamma)
                         leg.theta = opt_data.get("theta", leg.theta)
@@ -331,24 +409,54 @@ class StrategyExecutor:
                         leg.iv = opt_data.get("iv", leg.iv)
                         leg.volume = opt_data.get("volume", leg.volume)
 
-                        # NEW: Bid/Ask fields
-                        leg.bid = opt_data.get("bid", leg.bid)
-                        leg.ask = opt_data.get("ask", leg.ask)
+                        # LTP: prefer live tick service, fall back to SQLite
+                        tsym = leg.trading_symbol or leg.symbol
+                        live_ltp = self._get_live_ltp(tsym)
+                        if live_ltp and live_ltp > 0:
+                            leg.ltp = live_ltp
+                        else:
+                            leg.ltp = opt_data.get("ltp", leg.ltp)
+
+                        # Bid/Ask: use live tick data if available
+                        if self._tick_service:
+                            tick = self._tick_service.get_latest(tsym)
+                            if tick:
+                                if tick.get("bid", 0) > 0:
+                                    leg.bid = float(tick["bid"])
+                                if tick.get("ask", 0) > 0:
+                                    leg.ask = float(tick["ask"])
+                            else:
+                                leg.bid = opt_data.get("bid", leg.bid)
+                                leg.ask = opt_data.get("ask", leg.ask)
+                        else:
+                            leg.bid = opt_data.get("bid", leg.bid)
+                            leg.ask = opt_data.get("ask", leg.ask)
                         leg.bid_qty = opt_data.get("bid_qty", leg.bid_qty)
                         leg.ask_qty = opt_data.get("ask_qty", leg.ask_qty)
                         # Update bid-ask spread
                         leg.bid_ask_spread = (leg.ask - leg.bid) if leg.ask > 0 and leg.bid > 0 else 0.0
 
-                        # NEW: OI change calculation
+                        # OI change calculation
                         if "oi" in opt_data:
                             old_oi = leg.oi
                             leg.oi = opt_data["oi"]
                             leg.oi_change = leg.oi - old_oi
                             leg.prev_oi = old_oi
+                    else:
+                        # No SQLite data — try live tick only
+                        tsym = leg.trading_symbol or leg.symbol
+                        live_ltp = self._get_live_ltp(tsym)
+                        if live_ltp and live_ltp > 0:
+                            leg.ltp = live_ltp
 
                 except Exception as e:
                     logger.debug(f"Could not update leg {leg.tag}: {e}")
-            # For futures legs, we might need a separate update – currently not implemented
+            elif leg.instrument == InstrumentType.FUT:
+                # Futures leg — try live LTP
+                tsym = leg.trading_symbol or leg.symbol
+                live_ltp = self._get_live_ltp(tsym)
+                if live_ltp and live_ltp > 0:
+                    leg.ltp = live_ltp
 
         # NEW: Fetch index data from live feed
         try:
@@ -417,9 +525,12 @@ class StrategyExecutor:
             return False
 
         if start_t <= now.time() <= end_t:
-            # Also check active days
+            # Also check active days (empty list = all weekdays allowed)
             day_name = now.strftime("%a").lower()[:3]
             active_days = schedule.get("active_days", [])
+            if not active_days:
+                # Default: all weekdays
+                active_days = ["mon", "tue", "wed", "thu", "fri"]
             if day_name in active_days:
                 return True
         return False
@@ -462,10 +573,15 @@ class StrategyExecutor:
         for leg in new_legs:
             self.state.legs[leg.tag] = leg
             self._place_entry_order(leg)
-        self.state.entered_today = True
-        self.state.total_trades_today += 1
-        self.state.entry_time = datetime.now()
-        logger.info(f"Entered {len(new_legs)} legs")
+        if new_legs:
+            self.state.entered_today = True
+            self.state.total_trades_today += 1
+            self.state.entry_time = datetime.now()
+            logger.info(f"Entered {len(new_legs)} legs")
+            # Subscribe entered leg symbols to LiveTickService for real-time LTP
+            self.subscribe_leg_symbols()
+        else:
+            logger.warning("Entry produced 0 legs — NOT marking as entered")
 
     def _execute_exit(self, action: str):
         # NEW: Handle partial_lots exit action
@@ -479,7 +595,7 @@ class StrategyExecutor:
                 self._place_exit_order(leg)
                 leg.qty -= close_qty
                 if leg.qty == 0:
-                    leg.is_active = False
+                    leg.close()
                 self.state.cumulative_daily_pnl += leg.pnl
             else:
                 logger.warning("partial_lots: no active legs to close")
@@ -500,7 +616,7 @@ class StrategyExecutor:
                         self._place_exit_order(leg)
                         leg.qty -= close_qty
                         if leg.qty <= 0:
-                            leg.is_active = False
+                            leg.close()
                 logger.info("Profit step closed 25% of position")
 
         elif action.startswith("exit_all") or action in ("combined_conditions", "time_exit"):
@@ -509,7 +625,7 @@ class StrategyExecutor:
             for leg in self.state.legs.values():
                 if leg.is_active:
                     self._place_exit_order(leg)
-                leg.is_active = False
+                leg.close()
             self.state.cumulative_daily_pnl += pnl_snapshot
             sl_cfg = self.exit_engine.exit_config.get("stop_loss", {})
             if sl_cfg.get("allow_reentry"):
@@ -535,13 +651,13 @@ class StrategyExecutor:
                     for leg in targets:
                         self._place_exit_order(leg)
                         self.state.cumulative_daily_pnl += leg.pnl
-                        leg.is_active = False
+                        leg.close()
                 elif leg_action == "close_all":
                     pnl_snapshot = self.state.combined_pnl
                     for leg in self.state.legs.values():
                         if leg.is_active:
                             self._place_exit_order(leg)
-                        leg.is_active = False
+                        leg.close()
                     self.state.cumulative_daily_pnl += pnl_snapshot
                 else:
                     logger.warning(f"Unhandled leg_rule action: {leg_action}")
@@ -628,11 +744,48 @@ class StrategyExecutor:
                 self.state.legs[new_tag] = new_leg
                 new_legs.append(new_leg)
                 # Deactivate old leg
-                leg.is_active = False
+                leg.close()
             except Exception as e:
                 logger.error(f"Roll failed for {leg.tag}: {e}")
         logger.info(f"Rolled {len(new_legs)} legs to next expiry")
 
     def _save_state(self):
         StatePersistence.save(self.state, self.state_path)
-        logger.info(f"State saved to {self.state_path}")
+        # Also persist to DB if available
+        db = getattr(self, "_db_persistence", None)
+        if db:
+            try:
+                db.save(self.state)
+            except Exception as e:
+                logger.warning("DB state save failed: %s", e)
+
+    def _log_event(self, event_type: str, reason: str = "",
+                   leg_tag: str = None, details: dict = None):
+        """Log a strategy decision event to the DB."""
+        db = getattr(self, "_db_persistence", None)
+        if db:
+            try:
+                pnl = self.state.combined_pnl + getattr(self.state, 'cumulative_daily_pnl', 0)
+                db.log_event(
+                    event_type=event_type,
+                    reason=reason,
+                    leg_tag=leg_tag,
+                    pnl=pnl,
+                    spot=self.state.spot_price,
+                    details=details,
+                )
+            except Exception as e:
+                logger.warning("DB event log failed: %s", e)
+
+    def _snapshot_pnl(self):
+        """Snapshot PnL for charting (called every minute)."""
+        db = getattr(self, "_db_persistence", None)
+        if db:
+            try:
+                pnl = self.state.combined_pnl + getattr(self.state, 'cumulative_daily_pnl', 0)
+                active = sum(1 for l in self.state.legs.values() if l.is_active)
+                delta = sum(l.delta * (1 if l.side.value == 'BUY' else -1)
+                            for l in self.state.legs.values() if l.is_active)
+                db.snapshot_pnl(pnl, self.state.spot_price, active, delta)
+            except Exception as e:
+                logger.warning("DB pnl snapshot failed: %s", e)

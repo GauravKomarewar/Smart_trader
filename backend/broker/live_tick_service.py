@@ -214,7 +214,7 @@ _ohlcv_agg = OhlcvAggregator()
 
 _TICK_BUFFER: List[dict] = []
 _TICK_BUFFER_LOCK = threading.Lock()
-_TICK_FLUSH_INTERVAL = 5  # seconds
+_TICK_FLUSH_INTERVAL = 0.1  # 100ms — near-realtime for scalping
 
 
 def _buffer_tick(tick: dict) -> None:
@@ -340,14 +340,16 @@ class LiveTickService:
     # ── Internal tick handler ──────────────────────────────────────────────────
 
     def _on_tick(self, tick: dict) -> None:
-        """Called from any thread when a tick arrives (Fyers or Shoonya)."""
+        """Called from any thread when a tick arrives (Fyers or Shoonya).
+        Zero-copy broadcast: serialize JSON once, send to all clients."""
         sym = tick.get("symbol", "")
         if not sym:
             return
         self._tick_store[sym] = tick
         _ohlcv_agg.push(tick)
         _buffer_tick(tick)
-        self._broadcast(tick)
+        # Pre-serialize once — all clients get the same bytes
+        self._broadcast_preserialized(tick)
 
     def _broadcast(self, tick: dict) -> None:
         """Schedule broadcast to all WS clients from the event loop."""
@@ -360,6 +362,21 @@ class LiveTickService:
         for cb in list(self._callbacks):
             try:
                 asyncio.run_coroutine_threadsafe(cb(msg), loop)
+            except Exception as e:
+                logger.debug("Broadcast error: %s", e)
+
+    def _broadcast_preserialized(self, tick: dict) -> None:
+        """Zero-copy broadcast: serialize JSON once, send pre-built message to all WS clients."""
+        if not self._callbacks:
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        # Pre-serialize the tick message once
+        msg_str = json.dumps({"type": "tick", "data": tick})
+        for cb in list(self._callbacks):
+            try:
+                asyncio.run_coroutine_threadsafe(cb(msg_str, True), loop)
             except Exception as e:
                 logger.debug("Broadcast error: %s", e)
 
@@ -532,12 +549,24 @@ class LiveTickService:
         if upper_orig in {"NIFTY BANK", "BANK NIFTY"}: return "NSE:NIFTYBANK-INDEX"
         if upper_orig in {"FIN NIFTY"}: return "NSE:FINNIFTY-INDEX"
 
+        # MCX commodities (plain name without CE/PE/FUT) — subscribe as MCX
+        for kw in _MCX_KEYWORDS:
+            if upper == kw:
+                return f"MCX:{upper}"
+
         # Option symbols: contain CE or PE preceded by digits (e.g. NIFTY24APR22500CE, NIFTY2290030JUN26CE)
         import re
         if re.search(r'\d{3,}(CE|PE)', upper):
+            # Detect MCX options by commodity keyword prefix
+            for kw in _MCX_KEYWORDS:
+                if upper.startswith(kw):
+                    return f"MCX:{upper}"
             return f"NFO:{upper}"
         # Futures: end with FUT and contain digits (e.g. NIFTY24APRFUT)
         if re.search(r'\d+FUT$', upper):
+            for kw in _MCX_KEYWORDS:
+                if upper.startswith(kw):
+                    return f"MCX:{upper}"
             return f"NFO:{upper}"
         # Try ScriptMaster lookup for accurate exchange detection
         try:

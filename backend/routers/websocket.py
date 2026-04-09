@@ -90,6 +90,7 @@ async def market_websocket(websocket: WebSocket):
     await manager.connect(websocket)
     session = get_session()
     subscribed: Set[str] = set()
+    subscribed_norm: Set[str] = set()   # pre-computed normalized set for O(1) lookup
     stop_event = asyncio.Event()
 
     # Register per-connection broadcast callback for this client
@@ -98,17 +99,30 @@ async def market_websocket(websocket: WebSocket):
         loop = asyncio.get_event_loop()
         tick_svc.set_event_loop(loop)
 
-    async def _send_tick(msg: dict) -> None:
-        """Forward a tick only to symbols this client has subscribed."""
-        sym = msg.get("data", {}).get("symbol", "")
+    async def _send_tick(msg_or_str, is_preserialized: bool = False) -> None:
+        """Forward a tick only to symbols this client has subscribed.
+        Supports both pre-serialized string (zero-copy) and dict messages."""
+        if is_preserialized:
+            # Extract symbol from pre-serialized JSON for filtering
+            # Quick JSON parse for symbol check
+            try:
+                msg = json.loads(msg_or_str)
+            except Exception:
+                return
+            sym = msg.get("data", {}).get("symbol", "")
+        else:
+            sym = msg_or_str.get("data", {}).get("symbol", "")
         if not sym:
             return
-        # Normalize both sides so "NIFTY50" matches subscribed "NIFTY 50"
+        # O(1) normalized symbol matching
         sym_norm = _normalize_sym(sym)
-        if sym.upper() not in subscribed and sym_norm not in {_normalize_sym(s) for s in subscribed}:
+        if sym.upper() not in subscribed and sym_norm not in subscribed_norm:
             return
         try:
-            await websocket.send_text(json.dumps(msg))
+            if is_preserialized:
+                await websocket.send_text(msg_or_str)
+            else:
+                await websocket.send_text(json.dumps(msg_or_str))
         except Exception:
             pass
 
@@ -143,6 +157,7 @@ async def market_websocket(websocket: WebSocket):
             if action == "subscribe":
                 new_symbols = [s for s in symbols if s not in subscribed]
                 subscribed.update(new_symbols)
+                subscribed_norm.update(_normalize_sym(s) for s in new_symbols)
                 logger.info("WS subscribe: %s (total=%d)", new_symbols, len(subscribed))
 
                 # Pass new subscriptions to the live tick service
@@ -165,6 +180,7 @@ async def market_websocket(websocket: WebSocket):
 
             elif action == "unsubscribe":
                 subscribed -= set(symbols)
+                subscribed_norm = {_normalize_sym(s) for s in subscribed}
                 logger.info("WS unsubscribe: %s (remaining=%d)", symbols, len(subscribed))
                 await websocket.send_text(json.dumps({
                     "type": "unsubscribed",

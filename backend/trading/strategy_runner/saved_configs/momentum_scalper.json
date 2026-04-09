@@ -1,14 +1,12 @@
 {
   "schema_version": "4.0",
-  "name": "nifty_momentum_scalper",
-  "id": "NIFTY_MOM_SCALP",
+  "name": "momentum_scalper",
+  "id": "MOMENTUM_SCALPER",
   "description": "Pure intraday option buying scalper. Detects 3 types of momentum signals: (1) fast spot move (spot_change crosses 0.4% threshold), (2) PCR collapse below 0.75 (pure bullish surge), (3) OI buildup on call side (short covering). Buys near-ATM options (0.45-0.50 delta) for quick 35-50% gains. Maximum 3 trades per day. 45-minute cooldown prevents overtrading. Works any time between 09:30 and 14:30.",
   "type": "directional",
-  "enabled": true,
-  "status": "RUNNING",
+  "enabled": false,
+  "status": "STOPPED",
   "identity": {
-    "exchange": "NFO",
-    "underlying": "NIFTY",
     "instrument_type": "OPTIDX",
     "product_type": "MIS",
     "order_type": "MARKET",

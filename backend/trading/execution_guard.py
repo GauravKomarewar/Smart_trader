@@ -159,11 +159,21 @@ class ExecutionGuard:
                 raise RuntimeError(f"Non-positive qty for {i.symbol}: {i.qty}")
 
     def _check_cross_strategy_conflicts(self, intents: List[LegIntent]):
-        """Block if another strategy already holds an opposing position in same symbol."""
+        """Block if another strategy already holds an opposing position in same symbol.
+        
+        Manual orders (strategy_id starting with 'manual_') are exempt from
+        cross-strategy conflict checks — users should be able to hedge freely.
+        """
         incoming_strategy = intents[0].strategy_id
+        # Manual orders are never blocked by cross-strategy conflicts
+        if incoming_strategy.startswith("manual"):
+            return
         for intent in intents:
             for sid, positions in self._strategy_positions.items():
                 if sid == incoming_strategy:
+                    continue
+                # Skip conflict check against manual positions
+                if sid.startswith("manual"):
                     continue
                 if intent.symbol in positions:
                     other_pos = positions[intent.symbol]

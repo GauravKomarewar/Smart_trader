@@ -1256,6 +1256,15 @@ class MarketReader:
                 "max_pain_strike": 0.0,
             }
 
+    def _parse_date_str(self, date_str: str) -> date:
+        """Parse a date string in any supported format (DD-MMM-YYYY, DD-MM-YYYY, YYYY-MM-DD)."""
+        for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(date_str, fmt).date()
+            except ValueError:
+                continue
+        raise ValueError(f"Cannot parse date: {date_str}")
+
     def resolve_expiry_mode(self, mode: str) -> str:
         """
         Convert an expiry mode string (e.g., 'weekly_current', 'weekly_next')
@@ -1265,7 +1274,7 @@ class MarketReader:
         Raises ValueError if mode cannot be resolved.
         """
         # If it's already a date-like string (contains digits and hyphens), assume it's a date.
-        if re.match(r'\d{1,2}-[A-Za-z]{3}-\d{4}', mode):
+        if re.match(r'\d{1,2}-[A-Za-z]{3}-\d{4}', mode) or re.match(r'\d{1,2}-\d{2}-\d{4}', mode) or re.match(r'\d{4}-\d{2}-\d{2}', mode):
             return mode
 
         # Determine target based on mode
@@ -1315,7 +1324,7 @@ class MarketReader:
             # - if nearest expiry day is today -> use next expiry
             # - otherwise -> use nearest expiry
             current = self.resolve_expiry_mode("weekly_current")
-            cur_date = datetime.strptime(current, "%d-%b-%Y").date()
+            cur_date = self._parse_date_str(current)
             if cur_date != today:
                 return current
             for exp_date, exp_str in expiries:
@@ -1327,7 +1336,7 @@ class MarketReader:
         elif mode == "weekly_next":
             # Find the first expiry after the current weekly (which we take as the first future expiry)
             current = self.resolve_expiry_mode("weekly_current")  # recursive but safe
-            cur_date = datetime.strptime(current, "%d-%b-%Y").date()
+            cur_date = self._parse_date_str(current)
             for exp_date, exp_str in expiries:
                 if exp_date > cur_date:
                     return exp_str
@@ -1336,7 +1345,7 @@ class MarketReader:
 
         elif mode == "monthly_next":
             current = self.resolve_expiry_mode("monthly_current")
-            cur_date = datetime.strptime(current, "%d-%b-%Y").date()
+            cur_date = self._parse_date_str(current)
             for exp_date, exp_str in expiries:
                 if exp_date > cur_date:
                     return exp_str
@@ -1373,11 +1382,15 @@ class MarketReader:
             if len(parts) < 3:
                 continue
             date_str = parts[2]
-            try:
-                exp_date = datetime.strptime(date_str, "%d-%b-%Y").date()
+            exp_date = None
+            for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d"):
+                try:
+                    exp_date = datetime.strptime(date_str, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if exp_date is not None:
                 expiries.append((exp_date, date_str))
-            except ValueError:
-                continue
 
         if not expiries:
             raise RuntimeError("No valid expiry dates found in filenames")
@@ -1386,7 +1399,7 @@ class MarketReader:
 
         # Parse current_expiry
         try:
-            cur_date = datetime.strptime(current_expiry, "%d-%b-%Y").date()
+            cur_date = self._parse_date_str(current_expiry)
         except ValueError:
             # Fallback: return the first future expiry
             today = datetime.now().date()

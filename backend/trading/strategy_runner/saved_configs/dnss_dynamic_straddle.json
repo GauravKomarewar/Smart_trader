@@ -1,25 +1,24 @@
 {
   "schema_version": "4.0",
-  "name": "banknifty_dnss",
-  "id": "BANKNIFTY_DNSS",
+  "name": "dnss_dynamic_straddle",
+  "id": "DNSS_DYNAMIC_STRADDLE",
   "description": "",
   "type": "neutral",
-  "enabled": true,
-  "status": "RUNNING",
+  "enabled": false,
+  "status": "STOPPED",
   "identity": {
-    "exchange": "NFO",
-    "underlying": "BANKNIFTY",
     "instrument_type": "OPTIDX",
     "product_type": "NRML",
     "order_type": "MARKET",
     "lots": 1,
     "paper_mode": true,
-    "test_mode": true,
-    "test_result": "SUCCESS"
+    "test_mode": "SUCCESS",
+    "underlying": "CRUDEOIL",
+    "exchange": "MCX"
   },
   "timing": {
     "entry_window_start": "09:18",
-    "entry_window_end": "15:10",
+    "entry_window_end": "23:10",
     "eod_exit_time": "15:28"
   },
   "market_data": {
@@ -76,7 +75,7 @@
         "max_per_day": 20,
         "max_total": null,
         "cooldown_sec": 60,
-        "retrigger": false,
+        "retriger": false,
         "leg_guard": "",
         "conditions": [
           {
@@ -162,13 +161,13 @@
   },
   "exit": {
     "profit_target": {
-      "amount": 20000,
+      "amount": null,
       "pct": null,
       "action": "exit_all",
       "lots": 1
     },
     "stop_loss": {
-      "amount": 3000,
+      "amount": 5000,
       "pct": null,
       "action": "exit_all",
       "allow_reentry": false
@@ -185,8 +184,8 @@
       "action": "adj"
     },
     "risk": {
-      "max_loss_per_day": 12000,
-      "max_delta": 0.7,
+      "max_loss_per_day": null,
+      "max_delta": null,
       "delta_breach_action": "hedge",
       "max_iv": null,
       "min_iv": null,
@@ -194,7 +193,7 @@
       "breakeven_buffer": null
     },
     "time": {
-      "strategy_exit_time": "15:28",
+      "strategy_exit_time": "23:28",
       "expiry_day_action": "none",
       "expiry_day_time": "09:15",
       "roll_target": "weekly_next"
@@ -215,7 +214,7 @@
       "fri"
     ],
     "entry_time": "09:18",
-    "entry_window_end": "15:10",
+    "entry_window_end": "23:10",
     "exit_time": "15:28",
     "expiry_mode": "weekly_auto",
     "dte_min": null,
@@ -226,9 +225,10 @@
   },
   "meta": {
     "schema_version": "4.0",
-    "created_at": "2026-03-19T03:30:10.741Z",
-    "updated_at": "2026-03-26T09:03:04.099964",
-    "status_updated_at": "2026-03-26T09:03:04.099964"
+    "created_at": "2026-04-09T12:41:42.811Z"
   },
-  "status_updated_at": "2026-04-02T15:15:13.236824"
+  "paper_mode": true,
+  "test_mode": true,
+  "_saved_at": "2026-04-09T12:41:42.590233",
+  "_saved_by": "d9791ead-cda0-4f98-9580-345c7a453f93"
 }

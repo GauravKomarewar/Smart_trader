@@ -164,15 +164,26 @@ class TradingBot:
                 try:
                     ltp = self.api.get_ltp(command.exchange, command.symbol)
                     if ltp and ltp > 0:
+                        # Resolve tick_size from symbol DB (default 0.05)
+                        tick_size = 0.05
+                        try:
+                            from broker.symbol_normalizer import lookup_by_trading_symbol
+                            inst = lookup_by_trading_symbol(command.symbol)
+                            if inst:
+                                ts = getattr(inst, 'tick_size', None)
+                                if ts and ts > 0:
+                                    tick_size = ts
+                        except Exception:
+                            pass
                         buffer = 1.005 if command.side == "BUY" else 0.995
                         smart_price = round(ltp * buffer, 2)
-                        smart_price = round(round(smart_price / 0.05) * 0.05, 2)
+                        smart_price = round(round(smart_price / tick_size) * tick_size, 2)
                         order_type = "LIMIT"
                         price = smart_price
                         logger.info(
-                            "SMART_LIMIT: MKT→LIMIT %s %s @ %.2f (LTP=%.2f, buffer=%.1f%%)",
+                            "SMART_LIMIT: MKT→LIMIT %s %s @ %.2f (LTP=%.2f, buffer=%.1f%%, tick=%.4f)",
                             command.side, command.symbol, smart_price, ltp,
-                            (buffer - 1) * 100,
+                            (buffer - 1) * 100, tick_size,
                         )
                     else:
                         logger.warning(
@@ -196,12 +207,27 @@ class TradingBot:
                 "trigger_price": getattr(command, "trigger_price", 0.0) or 0.0,
                 "remarks":       getattr(command, "comment", "") or "",
             })
+
+            # Check broker response for success/failure
+            broker_success = (resp or {}).get("success", True)  # default True for adapters that don't return 'success'
+            broker_message = (resp or {}).get("message", "")
             broker_order_id = (
                 (resp or {}).get("norenordno")
                 or (resp or {}).get("order_id")
                 or (resp or {}).get("orderid")
                 or ""
             )
+
+            if not broker_success:
+                logger.error(
+                    "ORDER_REJECTED | %s %s x%d @ %s | reason=%s",
+                    command.side, command.symbol, command.quantity,
+                    price if price else "MKT", broker_message,
+                )
+                record = repo.get_by_id(command.command_id)
+                if record:
+                    repo.update_status(command.command_id, "REJECTED")
+                return _ExecuteResult(False, error_message=broker_message or "Order rejected by broker")
 
             # Update DB: CREATED → SENT_TO_BROKER
             record = repo.get_by_id(command.command_id)

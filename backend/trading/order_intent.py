@@ -316,9 +316,17 @@ class OrderIntentProcessor:
                         }
 
             # ExecutionGuard validation
+            # For manual orders, use a unique strategy_id per order so the guard
+            # doesn't block sequential manual ENTRY orders as "duplicate ENTRY".
+            # For actual strategies, the strategy_name is used as-is for proper
+            # duplicate position detection.
+            guard_strategy_id = intent.strategy_name
+            if intent.strategy_name.lower() == "manual":
+                guard_strategy_id = f"manual_{uuid.uuid4().hex[:8]}"
+
             leg_intents = [
                 LegIntent(
-                    strategy_id=intent.strategy_name,
+                    strategy_id=guard_strategy_id,
                     symbol=leg.tradingsymbol,
                     direction=leg.direction.upper(),
                     qty=leg.qty,
@@ -403,7 +411,7 @@ class OrderIntentProcessor:
                         # Update ExecutionGuard on success
                         if exec_result and exec_result.success:
                             guard.on_fill(
-                                intent.strategy_name,
+                                guard_strategy_id,
                                 leg.tradingsymbol,
                                 leg.direction.upper(),
                                 actual_qty,

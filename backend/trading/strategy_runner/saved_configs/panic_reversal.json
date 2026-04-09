@@ -1,14 +1,12 @@
 {
   "schema_version": "4.0",
-  "name": "nifty_panic_detector_reversal",
-  "id": "NIFTY_PANIC_REV",
+  "name": "panic_reversal",
+  "id": "PANIC_REVERSAL",
   "description": "Two-phase buying strategy. Phase 1: detects sudden panic sell-off (spot drops > 1% quickly) and buys PE to ride the momentum. Phase 2: when PCR signals oversold / VIX starts mean-reverting, closes PE and opens CE to catch the bounce. This is specifically designed for war/event intraday panic spikes like Iran news, surgical strikes, flash crash.",
   "type": "directional",
-  "enabled": true,
-  "status": "COMPLETED",
+  "enabled": false,
+  "status": "STOPPED",
   "identity": {
-    "exchange": "NFO",
-    "underlying": "NIFTY",
     "instrument_type": "OPTIDX",
     "product_type": "MIS",
     "order_type": "MARKET",

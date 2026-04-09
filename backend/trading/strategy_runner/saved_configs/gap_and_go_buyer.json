@@ -1,14 +1,12 @@
 {
   "schema_version": "4.0",
-  "name": "nifty_gap_and_go_buyer",
-  "id": "NIFTY_GAP_GO",
+  "name": "gap_and_go_buyer",
+  "id": "GAP_AND_GO_BUYER",
   "description": "Pure option buying strategy. Detects gap opens (up or down) in first 15 minutes and buys ATM options to ride the directional momentum. Hard exit at 10:30 AM. This is a BUYING strategy \u2014 maximum loss is premium paid. Works best on budget day, RBI policy day, or any event-driven morning gap.",
   "type": "directional",
-  "enabled": true,
-  "status": "COMPLETED",
+  "enabled": false,
+  "status": "STOPPED",
   "identity": {
-    "exchange": "NFO",
-    "underlying": "NIFTY",
     "instrument_type": "OPTIDX",
     "product_type": "MIS",
     "order_type": "MARKET",

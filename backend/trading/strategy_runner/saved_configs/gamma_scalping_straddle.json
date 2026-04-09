@@ -1,17 +1,15 @@
 {
   "schema_version": "4.0",
-  "name": "Volatility Mean Reversion Strangle",
-  "id": "VOL_MEAN_REV_STRANGLE",
-  "description": "Sell 0.2 delta strangle when IV > 25, buy back when IV < 20 or profit target hit.",
-  "type": "volatility",
-  "enabled": true,
-  "status": "RUNNING",
+  "name": "gamma_scalping_straddle",
+  "id": "GAMMA_SCALPING_STRADDLE",
+  "description": "Long ATM straddle, roll to new ATM when spot moves 100 points from current strike.",
+  "type": "gamma_scalp",
+  "enabled": false,
+  "status": "STOPPED",
   "identity": {
-    "exchange": "NFO",
-    "underlying": "NIFTY",
     "instrument_type": "OPTIDX",
     "product_type": "NRML",
-    "order_type": "LIMIT",
+    "order_type": "MARKET",
     "lots": 1,
     "paper_mode": true,
     "test_mode": true
@@ -26,27 +24,21 @@
   },
   "entry": {
     "entry_sequence": "parallel",
-    "global_conditions": [
-      {
-        "parameter": "atm_iv",
-        "comparator": ">",
-        "value": 25
-      }
-    ],
+    "global_conditions": [],
     "legs": [
       {
         "tag": "LEG@1_CE",
-        "label": "Short OTM Call",
-        "group": "Strangle",
+        "label": "Long ATM Call",
+        "group": "",
         "instrument": "OPT",
-        "side": "SELL",
+        "side": "BUY",
         "option_type": "CE",
         "expiry": "strategy_default",
         "lots": 1,
-        "order_type": "LIMIT",
+        "order_type": "",
         "strike_mode": "standard",
-        "strike_selection": "delta",
-        "strike_value": 0.2,
+        "strike_selection": "straddle_delta",
+        "strike_value": 0.5,
         "conditions": [],
         "else_enabled": false,
         "else_conditions": null,
@@ -54,17 +46,17 @@
       },
       {
         "tag": "LEG@2_PE",
-        "label": "Short OTM Put",
-        "group": "Strangle",
+        "label": "Long ATM Put",
+        "group": "",
         "instrument": "OPT",
-        "side": "SELL",
+        "side": "BUY",
         "option_type": "PE",
         "expiry": "strategy_default",
         "lots": 1,
-        "order_type": "LIMIT",
+        "order_type": "",
         "strike_mode": "standard",
-        "strike_selection": "delta",
-        "strike_value": 0.2,
+        "strike_selection": "straddle_delta",
+        "strike_value": 0.5,
         "conditions": [],
         "else_enabled": false,
         "else_conditions": null,
@@ -76,45 +68,53 @@
     "enabled": true,
     "rules": [
       {
-        "name": "Close Call on IV drop",
+        "name": "Roll Straddle Up/Down",
         "priority": 1,
-        "max_per_day": 5,
+        "max_per_day": 10,
         "max_total": null,
-        "cooldown_sec": 0,
+        "cooldown_sec": 60,
         "leg_guard": "",
         "conditions": [
           {
-            "parameter": "atm_iv",
-            "comparator": "<",
-            "value": 20
-          }
-        ],
-        "action": {
-          "type": "close_leg",
-          "close_tag": "LEG@1_CE"
-        },
-        "else_enabled": false,
-        "else_conditions": [],
-        "else_action": null,
-        "retrigger": true
-      },
-      {
-        "name": "Close Put on IV drop",
-        "priority": 2,
-        "max_per_day": 5,
-        "max_total": null,
-        "cooldown_sec": 0,
-        "leg_guard": "",
-        "conditions": [
+            "parameter": "spot_price",
+            "comparator": ">",
+            "value": "tag.LEG@1_CE.strike + 100",
+            "join": "OR"
+          },
           {
-            "parameter": "atm_iv",
+            "parameter": "spot_price",
             "comparator": "<",
-            "value": 20
+            "value": "tag.LEG@1_CE.strike - 100"
           }
         ],
         "action": {
-          "type": "close_leg",
-          "close_tag": "LEG@2_PE"
+          "type": "simple_close_open_new",
+          "leg_swaps": [
+            {
+              "close_tag": "LEG@1_CE",
+              "new_leg": {
+                "side": "BUY",
+                "option_type": "CE",
+                "lots": 1,
+                "order_type": "",
+                "strike_mode": "standard",
+                "strike_selection": "straddle_delta",
+                "strike_value": 0.5
+              }
+            },
+            {
+              "close_tag": "LEG@2_PE",
+              "new_leg": {
+                "side": "BUY",
+                "option_type": "PE",
+                "lots": 1,
+                "order_type": "",
+                "strike_mode": "standard",
+                "strike_selection": "straddle_delta",
+                "strike_value": 0.5
+              }
+            }
+          ]
         },
         "else_enabled": false,
         "else_conditions": [],
@@ -125,14 +125,14 @@
   },
   "exit": {
     "profit_target": {
-      "amount": 2000,
-      "pct": 50,
+      "amount": 5000,
+      "pct": null,
       "action": "exit_all",
       "lots": null
     },
     "stop_loss": {
-      "amount": 4000,
-      "pct": 100,
+      "amount": 3000,
+      "pct": null,
       "action": "exit_all",
       "allow_reentry": false
     },
@@ -149,16 +149,16 @@
     },
     "risk": {
       "max_loss_per_day": 10000,
-      "max_delta": 0.3,
-      "delta_breach_action": "adjust",
-      "max_iv": 30,
-      "min_iv": 15,
+      "max_delta": 0.5,
+      "delta_breach_action": "alert",
+      "max_iv": null,
+      "min_iv": null,
       "max_lots": 4,
-      "breakeven_buffer": 50
+      "breakeven_buffer": null
     },
     "time": {
       "strategy_exit_time": "15:15",
-      "expiry_day_action": "exit",
+      "expiry_day_action": "none",
       "expiry_day_time": "09:15",
       "roll_target": "weekly_next"
     },
@@ -181,16 +181,16 @@
     "entry_window_end": "14:00",
     "exit_time": "15:15",
     "expiry_mode": "weekly_auto",
-    "dte_min": 1,
-    "dte_max": 5,
-    "square_off_before_min": 30,
+    "dte_min": null,
+    "dte_max": null,
+    "square_off_before_min": null,
     "entry_on_expiry_day": false,
     "max_reentries_per_day": 1
   },
   "meta": {
-    "schema_version": "4.0",
-    "created_at": "2025-03-21T10:00:00.000Z"
-  },
-  "updated_at": "2026-03-10T18:01:19",
-  "status_updated_at": "2026-03-11T09:00:25.400729"
+    "created_at": "2026-03-10T17:55:32Z",
+    "exit_time_note": "strategy_exit_time matches timing.eod_exit_time and schedule.exit_time",
+    "updated_at": "2026-03-10T17:55:32Z",
+    "status_updated_at": "2026-03-16T14:40:43.479381Z"
+  }
 }

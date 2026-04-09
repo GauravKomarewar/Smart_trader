@@ -234,7 +234,7 @@ class AdjustmentEngine:
             )
 
             if leg.qty <= 0:
-                leg.is_active = False
+                leg.close()
                 logger.info("ADJUSTMENT_EXECUTED | %s fully closed", close_tag)
 
         elif action_type == "reduce_by_pct":
@@ -282,7 +282,7 @@ class AdjustmentEngine:
 
             leg.qty = new_qty
             if leg.qty <= 0:
-                leg.is_active = False
+                leg.close()
                 logger.info("ADJUSTMENT_EXECUTED | %s fully closed", close_tag)
 
         elif action_type == "open_hedge":
@@ -382,7 +382,7 @@ class AdjustmentEngine:
             self.state.legs[new_tag] = new_leg
 
             # **Now** deactivate the old leg
-            old_leg.is_active = False
+            old_leg.close()
 
         elif action_type == "convert_to_spread":
             # Convert unlimited-risk position to defined-risk spread.

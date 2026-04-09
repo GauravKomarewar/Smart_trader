@@ -1,14 +1,12 @@
 {
   "schema_version": "4.0",
-  "name": "nifty_dynamic_iron_condor",
-  "id": "NIFTY_DYNAMIC_IC",
+  "name": "dynamic_iron_condor",
+  "id": "DYNAMIC_IRON_CONDOR",
   "description": "VIX-aware Iron Condor. Sell strikes at 0.25 delta, buy wings at 0.10 delta for defined risk. Automatically rolls short strikes inward when VIX falls (collect more premium) and exits wings early when position profits 60% of max profit. Much safer than naked strangle in volatile markets.",
   "type": "spread",
-  "enabled": true,
-  "status": "RUNNING",
+  "enabled": false,
+  "status": "STOPPED",
   "identity": {
-    "exchange": "NFO",
-    "underlying": "NIFTY",
     "instrument_type": "OPTIDX",
     "product_type": "NRML",
     "order_type": "MARKET",

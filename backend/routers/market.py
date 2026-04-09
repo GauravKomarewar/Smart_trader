@@ -160,6 +160,35 @@ async def get_quote(
     return _make_demo_quote(sym_upper)
 
 
+# ── /market/depth/{symbol} ─────────────────────────────────────────────────────
+
+@router.get("/depth/{symbol}")
+async def get_market_depth(
+    symbol: str,
+    exchange: str = Query("NSE", description="Exchange: NSE / BSE / NFO / MCX"),
+):
+    """Get market depth (best 5 bids/asks) for a symbol via Fyers depth API."""
+    fyers = get_fyers_client()
+    sym_upper = symbol.upper().strip()
+    effective_exchange = _detect_exchange(sym_upper, exchange)
+
+    if fyers.is_live:
+        depth_data = fyers.get_depth(sym_upper, effective_exchange)
+        if depth_data:
+            return depth_data
+
+    # Fallback: return empty depth structure
+    return {
+        "symbol": sym_upper,
+        "exchange": effective_exchange,
+        "bids": [],
+        "asks": [],
+        "ltp": 0, "open": 0, "high": 0, "low": 0, "close": 0,
+        "volume": 0, "oi": 0,
+        "total_buy_qty": 0, "total_sell_qty": 0,
+    }
+
+
 # ── /market/screener ───────────────────────────────────────────────────────────
 
 @router.get("/screener")

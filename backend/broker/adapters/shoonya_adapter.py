@@ -293,6 +293,7 @@ class ShoonyaAdapter(BrokerAdapter):
             sym = sym.split(":", 1)[1]
         exch = order.get("exchange", "NSE")
         # Look up Shoonya-specific trading symbol from symbol DB
+        inst = None
         try:
             from broker.symbol_normalizer import lookup_by_trading_symbol
             inst = lookup_by_trading_symbol(sym)
@@ -321,6 +322,22 @@ class ShoonyaAdapter(BrokerAdapter):
             "retention":     order.get("retention") or "DAY",
             "remarks":       order.get("tag") or order.get("remarks") or "smart_trader",
         }
+
+        # Round price and trigger_price to instrument's tick_size to avoid broker rejection
+        tick_size = 0.05  # default
+        try:
+            if inst and getattr(inst, 'tick_size', None) and inst.tick_size > 0:
+                tick_size = inst.tick_size
+        except Exception:
+            pass
+        if shoonya_params["price"] > 0:
+            shoonya_params["price"] = round(
+                round(shoonya_params["price"] / tick_size) * tick_size, 2
+            )
+        if shoonya_params["trigger_price"] > 0:
+            shoonya_params["trigger_price"] = round(
+                round(shoonya_params["trigger_price"] / tick_size) * tick_size, 2
+            )
 
         logger.info("Shoonya order: %s %s %s qty=%d px=%.2f type=%s",
                      shoonya_params["buy_or_sell"], shoonya_params["tradingsymbol"],

@@ -334,3 +334,174 @@ html[data-theme="light"] body {
 .oc-flash {
   animation: oc-value-flash 0.8s ease-out;
 }
+
+/* ═══════════════════════════════════════════════════
+   STRATEGY CARD — MODE & RUNNING ANIMATIONS
+   Inspired by Shoonya Platform trading terminal
+   ═══════════════════════════════════════════════════ */
+
+/* ── Spinning conic border for running cards ── */
+@property --spin-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes spin-border { to { --spin-angle: 360deg; } }
+
+@keyframes running-glow {
+  0%, 100% { box-shadow: 0 0 8px rgba(34, 197, 94, 0.15); }
+  50%      { box-shadow: 0 0 24px rgba(34, 197, 94, 0.40), 0 0 48px rgba(34, 197, 94, 0.10); }
+}
+
+/* LIVE mode card — deep red-crimson, high-stakes feel */
+.strat-card-live {
+  background: linear-gradient(135deg, rgba(120, 10, 25, 0.45) 0%, rgba(80, 5, 15, 0.55) 100%);
+  border-color: rgba(244, 63, 94, 0.35);
+  box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.08) inset;
+}
+.strat-card-live:hover {
+  background: linear-gradient(135deg, rgba(140, 15, 30, 0.55) 0%, rgba(100, 8, 20, 0.65) 100%);
+  border-color: rgba(244, 63, 94, 0.60);
+  box-shadow: 0 6px 28px rgba(200, 20, 40, 0.30), 0 0 0 1px rgba(244, 63, 94, 0.15) inset;
+}
+
+/* MOCK/PAPER mode card — deep teal-cyan, safe/test feel */
+.strat-card-mock {
+  background: linear-gradient(135deg, rgba(5, 55, 75, 0.45) 0%, rgba(2, 35, 55, 0.55) 100%);
+  border-color: rgba(34, 211, 238, 0.25);
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.06) inset;
+}
+.strat-card-mock:hover {
+  background: linear-gradient(135deg, rgba(8, 70, 95, 0.55) 0%, rgba(3, 45, 70, 0.65) 100%);
+  border-color: rgba(34, 211, 238, 0.50);
+  box-shadow: 0 6px 28px rgba(10, 150, 180, 0.25), 0 0 0 1px rgba(34, 211, 238, 0.12) inset;
+}
+
+/* Live pulsing border glow */
+@keyframes live-pulse {
+  0%, 100% { border-color: rgba(244, 63, 94, 0.0); box-shadow: 0 0 0 0 rgba(244, 50, 80, 0); }
+  50%      { border-color: rgba(244, 63, 94, 0.50); box-shadow: 0 0 14px 3px rgba(244, 50, 80, 0.18); }
+}
+/* Mock shimmer border */
+@keyframes mock-shimmer {
+  0%, 100% { border-color: rgba(34, 211, 238, 0.0); box-shadow: 0 0 0 0 rgba(20, 180, 210, 0); }
+  50%      { border-color: rgba(34, 211, 238, 0.40); box-shadow: 0 0 14px 3px rgba(20, 180, 210, 0.12); }
+}
+
+.strat-card-live::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 1px solid transparent;
+  animation: live-pulse 2.8s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+.strat-card-mock::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 1px solid transparent;
+  animation: mock-shimmer 4s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Running state — spinning conic-gradient border */
+.strat-card-running {
+  border: 2px solid transparent !important;
+  background-clip: padding-box;
+  animation: running-glow 2s ease-in-out infinite;
+  position: relative;
+}
+.strat-card-running::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(
+    from var(--spin-angle),
+    var(--conic-c1, #22c55e) 0%,
+    rgb(var(--c-brand)) 20%,
+    transparent 32%,
+    transparent 80%,
+    var(--conic-c1, #22c55e) 100%
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: spin-border 2.8s linear infinite;
+  pointer-events: none;
+  z-index: 1;
+}
+/* Suppress the mode ::after pulse while spinning border */
+.strat-card-running::after { animation: none !important; opacity: 0; }
+
+/* Live + Running — crimson conic */
+.strat-card-live.strat-card-running { --conic-c1: #f43f5e; }
+/* Mock + Running — cyan conic */
+.strat-card-mock.strat-card-running { --conic-c1: #22d3ee; }
+
+/* All card children above the ::before/::after pseudo-elements */
+.strat-card-live > *, .strat-card-mock > *,
+.strat-card-running > * { position: relative; z-index: 2; }
+
+/* ── Live dot blink ── */
+@keyframes live-dot-blink {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(0.75); }
+}
+.live-dot-blink {
+  animation: live-dot-blink 2s ease-in-out infinite;
+}
+
+/* ── Monitor value flash on data change ── */
+@keyframes val-flash {
+  0%   { background-color: rgba(34, 211, 238, 0.28); color: #fff; }
+  100% { background-color: transparent; }
+}
+.val-flash {
+  animation: val-flash 0.55s ease-out forwards;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+/* ── Tabular nums for aligned number columns ── */
+.tabular-nums { font-variant-numeric: tabular-nums; }
+
+/* ── Mode toggle pill button ── */
+.mode-toggle-live {
+  background: linear-gradient(135deg, rgba(244, 63, 94, 0.25), rgba(244, 63, 94, 0.15));
+  border: 1px solid rgba(244, 63, 94, 0.45);
+  color: #fda4af;
+  transition: all 0.2s ease;
+}
+.mode-toggle-live:hover {
+  background: linear-gradient(135deg, rgba(244, 63, 94, 0.40), rgba(244, 63, 94, 0.25));
+  border-color: rgba(244, 63, 94, 0.65);
+  box-shadow: 0 0 12px rgba(244, 63, 94, 0.25);
+}
+.mode-toggle-mock {
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.20), rgba(34, 211, 238, 0.10));
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  color: #67e8f9;
+  transition: all 0.2s ease;
+}
+.mode-toggle-mock:hover {
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.35), rgba(34, 211, 238, 0.20));
+  border-color: rgba(34, 211, 238, 0.55);
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.25);
+}
+
+/* ── Slide-in animation for strategy cards ── */
+@keyframes strat-card-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.strat-card-enter {
+  animation: strat-card-in 0.3s ease-out both;
+}

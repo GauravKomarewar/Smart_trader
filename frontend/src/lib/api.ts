@@ -179,6 +179,8 @@ export const api = {
   subscribeSymbols: (symbols: string[]) => api.post('/market/subscribe', { symbols }),
   latestTick: (symbol: string, exchange = 'NSE') =>
     api.get<{ symbol: string; tick: any; source: string }>(`/market/tick/${encodeURIComponent(symbol)}?exchange=${exchange}`),
+  marketDepth: (symbol: string, exchange = 'NSE') =>
+    api.get<{ symbol: string; exchange: string; bids: any[]; asks: any[]; ltp: number; volume: number; oi: number; total_buy_qty: number; total_sell_qty: number }>(`/market/depth/${encodeURIComponent(symbol)}?exchange=${exchange}`),
   screener:   (params: Record<string, string>) => {
     const qs = new URLSearchParams(params).toString()
     return api.get(`/market/screener?${qs}`)
@@ -223,8 +225,8 @@ export const api = {
     api.get<{ symbol: string; exchange: string }[]>('/dashboard/option-chain/active-symbols'),
 
   // ── Strategy Runner — run / stop / status ────────────────────────────────
-  runStrategy:  (name: string) =>
-    api.post<{ ok: boolean; name: string; status: string }>(`/strategy/run/${encodeURIComponent(name)}`, {}),
+  runStrategy:  (name: string, overrides?: { symbol?: string; exchange?: string; paper_mode?: boolean; broker_config_id?: string }) =>
+    api.post<{ ok: boolean; name: string; status: string }>(`/strategy/run/${encodeURIComponent(name)}`, overrides || {}),
   stopStrategy: (name: string) =>
     api.post<{ ok: boolean; name: string; status: string }>(`/strategy/stop/${encodeURIComponent(name)}`, {}),
   strategyStatus: () =>
@@ -235,6 +237,26 @@ export const api = {
     api.get<any>(`/strategy/monitor/${encodeURIComponent(name)}`),
   strategyPositions: () =>
     api.get<any[]>('/strategy/monitor'),
-}
 
-export { ApiError }
+  // ── Broker & Symbol selection ────────────────────────────────────────────
+  strategyBrokers: () =>
+    api.get<any[]>('/strategy/brokers'),
+  availableSymbols: () =>
+    api.get<any[]>('/strategy/available-symbols'),
+
+  // ── Strategy Run History ─────────────────────────────────────────────────
+  strategyRuns: (params?: { strategy_name?: string; status?: string; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.strategy_name) qs.set('strategy_name', params.strategy_name)
+    if (params?.status) qs.set('status', params.status)
+    if (params?.limit) qs.set('limit', String(params.limit))
+    const q = qs.toString()
+    return api.get<any[]>(`/strategy/runs${q ? '?' + q : ''}`)
+  },
+  strategyRunDetail: (runId: string) =>
+    api.get<any>(`/strategy/runs/${encodeURIComponent(runId)}`),
+  strategyRunEvents: (runId: string) =>
+    api.get<any[]>(`/strategy/runs/${encodeURIComponent(runId)}/events`),
+  strategyRunPnl: (runId: string) =>
+    api.get<any[]>(`/strategy/runs/${encodeURIComponent(runId)}/pnl`),
+}

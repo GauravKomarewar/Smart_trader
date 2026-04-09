@@ -11,6 +11,7 @@ build/
 # Node / Frontend
 frontend/node_modules/
 frontend/build/
+frontend/dist/
 frontend/.env.local
 
 # Environment & secrets
@@ -26,7 +27,11 @@ certs/
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+backend/data/
 
 # Logs & temp
 *.log

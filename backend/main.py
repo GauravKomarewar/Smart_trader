@@ -222,6 +222,13 @@ async def on_startup():
 
     logger.info("FastAPI startup complete — listening on %s:%d", config.HOST, config.PORT)
 
+    # ── Reset any strategy configs left as RUNNING from previous session ──
+    try:
+        from routers.strategy import cleanup_stale_configs
+        cleanup_stale_configs()
+    except Exception as exc:
+        logger.warning("Strategy config cleanup failed (non-fatal): %s", exc)
+
     # ── Restore broker sessions from DB ──────────────────────────────────────
     # This allows sessions to survive server restarts (session tokens are persistent)
     try:

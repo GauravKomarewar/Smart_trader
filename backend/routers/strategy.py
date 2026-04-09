@@ -47,6 +47,28 @@ _running: Dict[str, Dict[str, Any]] = {}  # safe_name → state dict
 _lock = threading.Lock()
 
 
+def cleanup_stale_configs() -> None:
+    """Reset config files left as RUNNING from a previous server session.
+    Call once at startup when _running is empty."""
+    count = 0
+    for path in SAVED_CONFIGS_DIR.glob("*.json"):
+        if path.name.endswith(".schema.json"):
+            continue
+        try:
+            with open(path) as fp:
+                cfg = json.load(fp)
+            if cfg.get("status") == "RUNNING" or cfg.get("enabled") is True:
+                cfg["status"] = "STOPPED"
+                cfg["enabled"] = False
+                with open(path, "w") as fp:
+                    json.dump(cfg, fp, indent=2)
+                count += 1
+        except Exception as exc:
+            logger.warning("cleanup_stale_configs: %s: %s", path.name, exc)
+    if count:
+        logger.info("cleanup_stale_configs: Reset %d stale config(s) to STOPPED", count)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _safe_name(raw: str) -> str:
@@ -177,15 +199,306 @@ async def delete_config(name: str, payload: dict = Depends(current_user)):
 
 @router.get("/dashboard/option-chain/active-symbols")
 async def active_symbols(payload: dict = Depends(current_user)):
-    """Return supported option-chain underlyings for the strategy builder."""
+    """Return all FNO indices, FNO stocks, BSE indices, and MCX commodities with option chains."""
     return [
-        {"symbol": "NIFTY",      "exchange": "NFO"},
-        {"symbol": "BANKNIFTY",  "exchange": "NFO"},
-        {"symbol": "FINNIFTY",   "exchange": "NFO"},
-        {"symbol": "MIDCPNIFTY", "exchange": "NFO"},
-        {"symbol": "SENSEX",     "exchange": "BFO"},
-        {"symbol": "BANKEX",     "exchange": "BFO"},
+        # ── NSE Indices (NFO) ──────────────────────────────
+        {"symbol": "NIFTY",        "exchange": "NFO", "category": "index"},
+        {"symbol": "BANKNIFTY",    "exchange": "NFO", "category": "index"},
+        {"symbol": "FINNIFTY",     "exchange": "NFO", "category": "index"},
+        {"symbol": "MIDCPNIFTY",   "exchange": "NFO", "category": "index"},
+        {"symbol": "NIFTYNXT50",   "exchange": "NFO", "category": "index"},
+        # ── BSE Indices (BFO) ─────────────────────────────
+        {"symbol": "SENSEX",       "exchange": "BFO", "category": "index"},
+        {"symbol": "BANKEX",       "exchange": "BFO", "category": "index"},
+        {"symbol": "SENSEX50",     "exchange": "BFO", "category": "index"},
+        # ── MCX Commodities (MCX) ─────────────────────────
+        {"symbol": "CRUDEOIL",     "exchange": "MCX", "category": "commodity"},
+        {"symbol": "NATURALGAS",   "exchange": "MCX", "category": "commodity"},
+        {"symbol": "GOLD",         "exchange": "MCX", "category": "commodity"},
+        {"symbol": "GOLDM",        "exchange": "MCX", "category": "commodity"},
+        {"symbol": "SILVER",       "exchange": "MCX", "category": "commodity"},
+        {"symbol": "SILVERM",      "exchange": "MCX", "category": "commodity"},
+        {"symbol": "COPPER",       "exchange": "MCX", "category": "commodity"},
+        {"symbol": "ZINC",         "exchange": "MCX", "category": "commodity"},
+        {"symbol": "LEAD",         "exchange": "MCX", "category": "commodity"},
+        {"symbol": "ALUMINIUM",    "exchange": "MCX", "category": "commodity"},
+        {"symbol": "NICKEL",       "exchange": "MCX", "category": "commodity"},
+        # ── NSE FNO Stocks (NFO) — top liquid names ──────
+        {"symbol": "RELIANCE",     "exchange": "NFO", "category": "stock"},
+        {"symbol": "TCS",          "exchange": "NFO", "category": "stock"},
+        {"symbol": "HDFCBANK",     "exchange": "NFO", "category": "stock"},
+        {"symbol": "INFY",         "exchange": "NFO", "category": "stock"},
+        {"symbol": "ICICIBANK",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "SBIN",         "exchange": "NFO", "category": "stock"},
+        {"symbol": "BHARTIARTL",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "AXISBANK",     "exchange": "NFO", "category": "stock"},
+        {"symbol": "ITC",          "exchange": "NFO", "category": "stock"},
+        {"symbol": "KOTAKBANK",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "LT",           "exchange": "NFO", "category": "stock"},
+        {"symbol": "HINDUNILVR",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "BAJFINANCE",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "MARUTI",       "exchange": "NFO", "category": "stock"},
+        {"symbol": "TATAMOTORS",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "SUNPHARMA",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "TITAN",        "exchange": "NFO", "category": "stock"},
+        {"symbol": "HCLTECH",      "exchange": "NFO", "category": "stock"},
+        {"symbol": "WIPRO",        "exchange": "NFO", "category": "stock"},
+        {"symbol": "TATASTEEL",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "ADANIENT",     "exchange": "NFO", "category": "stock"},
+        {"symbol": "ADANIPORTS",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "POWERGRID",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "NTPC",         "exchange": "NFO", "category": "stock"},
+        {"symbol": "ONGC",         "exchange": "NFO", "category": "stock"},
+        {"symbol": "JSWSTEEL",     "exchange": "NFO", "category": "stock"},
+        {"symbol": "M&M",          "exchange": "NFO", "category": "stock"},
+        {"symbol": "COALINDIA",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "BPCL",         "exchange": "NFO", "category": "stock"},
+        {"symbol": "DRREDDY",      "exchange": "NFO", "category": "stock"},
+        {"symbol": "DIVISLAB",     "exchange": "NFO", "category": "stock"},
+        {"symbol": "CIPLA",        "exchange": "NFO", "category": "stock"},
+        {"symbol": "APOLLOHOSP",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "TECHM",        "exchange": "NFO", "category": "stock"},
+        {"symbol": "ULTRACEMCO",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "INDUSINDBK",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "PIDILITIND",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "TATACONSUM",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "DABUR",        "exchange": "NFO", "category": "stock"},
+        {"symbol": "HAVELLS",      "exchange": "NFO", "category": "stock"},
+        {"symbol": "GRASIM",       "exchange": "NFO", "category": "stock"},
+        {"symbol": "HEROMOTOCO",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "EICHERMOT",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "BAJAJ-AUTO",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "BRITANNIA",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "NESTLEIND",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "TRENT",        "exchange": "NFO", "category": "stock"},
+        {"symbol": "BEL",          "exchange": "NFO", "category": "stock"},
+        {"symbol": "HAL",          "exchange": "NFO", "category": "stock"},
+        {"symbol": "PNB",          "exchange": "NFO", "category": "stock"},
+        {"symbol": "BANKBARODA",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "IDFCFIRSTB",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "IDEA",         "exchange": "NFO", "category": "stock"},
+        {"symbol": "ZOMATO",       "exchange": "NFO", "category": "stock"},
+        {"symbol": "PAYTM",       "exchange": "NFO", "category": "stock"},
+        {"symbol": "IRCTC",        "exchange": "NFO", "category": "stock"},
+        {"symbol": "DLF",          "exchange": "NFO", "category": "stock"},
+        {"symbol": "GODREJCP",     "exchange": "NFO", "category": "stock"},
+        {"symbol": "VOLTAS",       "exchange": "NFO", "category": "stock"},
+        {"symbol": "BHEL",         "exchange": "NFO", "category": "stock"},
+        {"symbol": "RECLTD",       "exchange": "NFO", "category": "stock"},
+        {"symbol": "PFC",          "exchange": "NFO", "category": "stock"},
+        {"symbol": "SAIL",         "exchange": "NFO", "category": "stock"},
+        {"symbol": "GAIL",         "exchange": "NFO", "category": "stock"},
+        {"symbol": "IOC",          "exchange": "NFO", "category": "stock"},
+        {"symbol": "HINDPETRO",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "LICHSGFIN",    "exchange": "NFO", "category": "stock"},
+        {"symbol": "MUTHOOTFIN",   "exchange": "NFO", "category": "stock"},
+        {"symbol": "CANBK",        "exchange": "NFO", "category": "stock"},
     ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BROKER LIST & AVAILABLE SYMBOLS  (used by strategy run UI)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/strategy/brokers")
+async def list_brokers(payload: dict = Depends(current_user)):
+    """Return connected broker sessions available for strategy execution."""
+    try:
+        from broker.multi_broker import registry as broker_registry
+        sessions = broker_registry.get_all_sessions()
+        result = []
+        for sess in sessions:
+            result.append({
+                "config_id": getattr(sess, "config_id", None),
+                "broker_id": getattr(sess, "broker_id", "unknown"),
+                "client_id": getattr(sess, "client_id", None),
+                "mode": "LIVE" if getattr(sess, "is_live", False) else "PAPER",
+                "label": f"{getattr(sess, 'broker_id', '?').upper()} — {getattr(sess, 'client_id', '?')}",
+            })
+        # Always include paper option
+        result.insert(0, {
+            "config_id": "__paper__",
+            "broker_id": "paper",
+            "client_id": "PAPER",
+            "mode": "PAPER",
+            "label": "🧪 Paper Trading (Simulated)",
+        })
+        return result
+    except Exception as e:
+        logger.warning("Failed to list brokers: %s", e)
+        return [{"config_id": "__paper__", "broker_id": "paper", "client_id": "PAPER", "mode": "PAPER", "label": "🧪 Paper Trading (Simulated)"}]
+
+
+@router.get("/strategy/available-symbols")
+async def available_symbols(payload: dict = Depends(current_user)):
+    """Return symbols that have option chain data available today, plus known FNO/MCX symbols."""
+    from datetime import date as _date
+    chain_dir = Path(__file__).parent.parent / "data" / "option_chain"
+
+    today = _date.today()
+    symbols_seen: Dict[str, Dict[str, Any]] = {}
+
+    # Scan sqlite files for symbols with actual data
+    if chain_dir.exists():
+        for f in chain_dir.glob("*.sqlite"):
+            parts = f.stem.split("_", 2)
+            if len(parts) < 3:
+                continue
+            exchange, symbol = parts[0], parts[1]
+            key = f"{exchange}:{symbol}"
+            try:
+                file_date_str = parts[2]
+                from datetime import datetime as _dt
+                file_date = _dt.strptime(file_date_str, "%d-%m-%Y").date()
+            except Exception:
+                file_date = None
+
+            if key not in symbols_seen:
+                symbols_seen[key] = {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "has_today": False,
+                    "latest_file": f.name,
+                    "category": "stock",
+                }
+            if file_date == today:
+                symbols_seen[key]["has_today"] = True
+
+    # Always include the full active symbols list as fallback
+    full_list = await active_symbols(payload)
+    for item in full_list:
+        key = f"{item['exchange']}:{item['symbol']}"
+        if key not in symbols_seen:
+            symbols_seen[key] = {
+                "symbol": item["symbol"],
+                "exchange": item["exchange"],
+                "has_today": False,
+                "category": item.get("category", "stock"),
+            }
+        else:
+            symbols_seen[key]["category"] = item.get("category", symbols_seen[key].get("category", "stock"))
+
+    result = sorted(symbols_seen.values(), key=lambda x: (not x.get("has_today", False), x["symbol"]))
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STRATEGY RUN HISTORY
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/strategy/runs")
+async def list_strategy_runs(
+    strategy_name: str = None,
+    status: str = None,
+    limit: int = 50,
+    payload: dict = Depends(current_user),
+):
+    """List strategy runs (completed, stopped, error, or running) with summary info."""
+    from db.trading_db import trading_cursor
+    with trading_cursor() as cur:
+        where_clauses = []
+        params = []
+        if strategy_name:
+            where_clauses.append("strategy_name = %s")
+            params.append(strategy_name)
+        if status:
+            where_clauses.append("status = %s")
+            params.append(status)
+        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        params.append(min(limit, 200))
+        cur.execute(f"""
+            SELECT run_id, strategy_name, config_name, symbol, exchange,
+                   paper_mode, broker_config_id, status,
+                   cumulative_daily_pnl, peak_pnl,
+                   adjustments_today, total_trades_today,
+                   entry_reason, exit_reason,
+                   entered_today, entry_time,
+                   started_at, stopped_at, last_tick_at,
+                   (SELECT COUNT(*) FROM strategy_legs sl WHERE sl.run_id = sr.run_id) AS total_legs,
+                   (SELECT COUNT(*) FROM strategy_legs sl WHERE sl.run_id = sr.run_id AND sl.is_active = true) AS active_legs,
+                   (SELECT COUNT(*) FROM strategy_events se WHERE se.run_id = sr.run_id) AS event_count
+            FROM strategy_runs sr
+            {where_sql}
+            ORDER BY started_at DESC
+            LIMIT %s
+        """, params)
+        rows = cur.fetchall()
+    # Convert datetime fields to ISO strings for JSON response
+    result = []
+    for r in rows:
+        row = dict(r)
+        for key in ('entry_time', 'started_at', 'stopped_at', 'last_tick_at'):
+            if row.get(key):
+                row[key] = row[key].isoformat()
+        result.append(row)
+    return result
+
+
+@router.get("/strategy/runs/{run_id}")
+async def get_strategy_run(run_id: str, payload: dict = Depends(current_user)):
+    """Get full detail of a strategy run including all legs."""
+    from db.trading_db import trading_cursor
+    with trading_cursor() as cur:
+        cur.execute("SELECT * FROM strategy_runs WHERE run_id = %s", (run_id,))
+        run = cur.fetchone()
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        cur.execute(
+            "SELECT * FROM strategy_legs WHERE run_id = %s ORDER BY created_at",
+            (run_id,),
+        )
+        legs = cur.fetchall()
+    run_dict = dict(run)
+    for key in ('entry_time', 'started_at', 'stopped_at', 'last_tick_at', 'updated_at'):
+        if run_dict.get(key):
+            run_dict[key] = run_dict[key].isoformat()
+    legs_list = []
+    for leg in legs:
+        ld = dict(leg)
+        for key in ('order_placed_at', 'entry_timestamp', 'exit_timestamp', 'created_at', 'updated_at'):
+            if ld.get(key):
+                ld[key] = ld[key].isoformat()
+        legs_list.append(ld)
+    run_dict["legs"] = legs_list
+    return run_dict
+
+
+@router.get("/strategy/runs/{run_id}/events")
+async def get_run_events(run_id: str, payload: dict = Depends(current_user)):
+    """Get all events for a strategy run (decision audit trail)."""
+    from db.trading_db import trading_cursor
+    with trading_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM strategy_events WHERE run_id = %s ORDER BY created_at",
+            (run_id,),
+        )
+        rows = cur.fetchall()
+    result = []
+    for r in rows:
+        rd = dict(r)
+        if rd.get("created_at"):
+            rd["created_at"] = rd["created_at"].isoformat()
+        result.append(rd)
+    return result
+
+
+@router.get("/strategy/runs/{run_id}/pnl")
+async def get_run_pnl(run_id: str, payload: dict = Depends(current_user)):
+    """Get PnL time series for charting."""
+    from db.trading_db import trading_cursor
+    with trading_cursor() as cur:
+        cur.execute(
+            "SELECT pnl, spot_price, active_legs, net_delta, created_at FROM pnl_snapshots WHERE run_id = %s ORDER BY created_at",
+            (run_id,),
+        )
+        rows = cur.fetchall()
+    result = []
+    for r in rows:
+        rd = dict(r)
+        if rd.get("created_at"):
+            rd["created_at"] = rd["created_at"].isoformat()
+        result.append(rd)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -199,6 +512,7 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
     """
     logger.info("Strategy thread started: %s", safe_name)
     executor = None
+    db_persist = None
     try:
         from trading.strategy_runner.config_schema import validate_config  # type: ignore[import]
         with open(config_path) as fp:
@@ -237,6 +551,30 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
         from trading.strategy_runner.executor import StrategyExecutor
         executor = StrategyExecutor(config_path, state_path)
 
+        # Wire DB persistence for restart-safe state
+        db_persist = None
+        try:
+            from trading.strategy_runner.db_persistence import DBPersistence
+            db_persist = DBPersistence(safe_name, cfg)
+            # Check if there's a resumable run from a previous crash
+            resumable = DBPersistence.find_resumable_run(safe_name)
+            if resumable:
+                db_persist.attach_run(resumable)
+                db_state = db_persist.load()
+                if db_state and db_state.legs:
+                    executor.state = db_state
+                    logger.info("RESUME | Restored %d legs from DB run %s", len(db_state.legs), resumable)
+                else:
+                    # No useful state — start fresh with new run
+                    db_persist.mark_stopped("stale_no_legs")
+                    db_persist = DBPersistence(safe_name, cfg)
+                    db_persist.create_run(executor.state)
+            else:
+                db_persist.create_run(executor.state)
+            executor.set_db_persistence(db_persist)
+        except Exception as db_err:
+            logger.warning("DB persistence setup failed (non-fatal): %s", db_err)
+
         # Wire OMS into the executor for order placement
         try:
             from trading.oms import OrderManagementSystem
@@ -257,17 +595,73 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
         except Exception as oms_err:
             logger.warning("OMS injection failed, executor will run without OMS: %s", oms_err)
 
+        # Wire LiveTickService for real-time LTP overlay (replaces stale 30s SQLite reads)
+        try:
+            from broker.live_tick_service import get_tick_service
+            tick_svc = get_tick_service()
+            executor.set_tick_service(tick_svc)
+            # Subscribe the spot/underlying symbol for live spot price at strategy start
+            spot_symbols = [underlying]
+            tick_svc.subscribe(spot_symbols)
+            logger.info("LiveTickService injected + spot symbol subscribed: %s", spot_symbols)
+            # If resuming with existing legs, subscribe their symbols too
+            if executor.state.legs:
+                executor.subscribe_leg_symbols()
+        except Exception as ts_err:
+            logger.warning("LiveTickService injection failed (non-fatal): %s", ts_err)
+
         # Store executor reference for monitoring endpoints
         with _lock:
             if safe_name in _running:
                 _running[safe_name]["executor"] = executor
 
+        # ── COMPREHENSIVE STARTUP LOG ──────────────────────────────────
+        _identity = cfg.get("identity", {})
+        _timing = cfg.get("timing", {})
+        _entry = cfg.get("entry", {})
+        _exit_cfg = cfg.get("exit", {})
+        _adj = cfg.get("adjustment", {})
+        _schedule = cfg.get("schedule", {})
+        _broker_id = cfg.get("_broker_config_id", "none (paper)")
+        _legs_def = _entry.get("legs", [])
         logger.info(
-            "Strategy '%s' executor initialized | underlying=%s exchange=%s paper=%s",
+            "━━━ STRATEGY RUN START ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "  Name       : %s\n"
+            "  Symbol     : %s  Exchange: %s\n"
+            "  Paper Mode : %s\n"
+            "  Broker CFG : %s\n"
+            "  Lots       : %s  Order Type: %s  Product: %s\n"
+            "  Entry Window: %s → %s   EOD Exit: %s\n"
+            "  Schedule   : %s  Days: %s\n"
+            "  Expiry Mode: %s  Max Re-entries: %s\n"
+            "  Legs (%d)  :\n%s\n"
+            "  Exit Rules : SL=%.1f%%  Target=%.1f%%  Trail=%s  TimeExit=%s\n"
+            "  Risk       : MaxLoss=%s  MaxDelta=%s  MaxLots=%s\n"
+            "  Adjustments: %d rules defined\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             safe_name,
-            cfg.get("identity", {}).get("underlying", "?"),
-            cfg.get("identity", {}).get("exchange", "?"),
-            cfg.get("identity", {}).get("paper_mode", True),
+            _identity.get("underlying", "?"), _identity.get("exchange", "?"),
+            _identity.get("paper_mode", True),
+            _broker_id,
+            _identity.get("lots", 1), _identity.get("order_type", "MARKET"), _identity.get("product_type", "NRML"),
+            _timing.get("entry_window_start", "?"), _timing.get("entry_window_end", "?"), _timing.get("eod_exit_time", "?"),
+            _schedule.get("frequency", "daily"), _schedule.get("active_days", []),
+            _schedule.get("expiry_mode", "weekly_auto"), _schedule.get("max_reentries_per_day", 1),
+            len(_legs_def),
+            "\n".join(
+                f"    [{i+1}] {ld.get('tag','')} {ld.get('side','?')} {ld.get('option_type','?')} "
+                f"strike={ld.get('strike_selection','?')}({ld.get('strike_value','?')}) "
+                f"lots={ld.get('lots',1)}"
+                for i, ld in enumerate(_legs_def)
+            ) or "    (none)",
+            _exit_cfg.get("per_leg", {}).get("stop_loss_pct", 0) or 0,
+            _exit_cfg.get("per_leg", {}).get("target_pct", 0) or 0,
+            _exit_cfg.get("per_leg", {}).get("trailing", {}).get("enabled", False),
+            _exit_cfg.get("time", {}).get("strategy_exit_time", "?"),
+            _exit_cfg.get("risk", {}).get("max_loss_per_day", "none"),
+            _exit_cfg.get("risk", {}).get("max_delta", "none"),
+            _exit_cfg.get("risk", {}).get("max_lots", "none"),
+            len(_adj.get("rules", [])),
         )
 
         # Main tick loop — replaces the old heartbeat
@@ -321,10 +715,20 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
         # Clean shutdown — save final state
         if executor:
             try:
+                executor.unsubscribe_all()  # Release WS subscriptions
+            except Exception:
+                pass
+            try:
                 executor._save_state()
                 logger.info("Strategy '%s' state saved on shutdown", safe_name)
             except Exception as e:
                 logger.warning("Failed to save state for '%s': %s", safe_name, e)
+        # Mark DB run as stopped
+        if db_persist:
+            try:
+                db_persist.mark_stopped("normal_stop")
+            except Exception as e:
+                logger.warning("Failed to mark DB run stopped for '%s': %s", safe_name, e)
 
     except Exception as exc:
         logger.error("Strategy '%s' error: %s", safe_name, exc, exc_info=True)
@@ -332,6 +736,12 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
             if safe_name in _running:
                 _running[safe_name]["status"] = "error"
                 _running[safe_name]["error"] = str(exc)
+        # Mark DB run as error
+        if db_persist:
+            try:
+                db_persist.mark_error(str(exc))
+            except Exception:
+                pass
         return
 
     with _lock:
@@ -341,8 +751,19 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
 
 
 @router.post("/strategy/run/{name}")
-async def run_strategy(name: str, payload: dict = Depends(current_user)):
-    """Enable and start a strategy (paper mode background thread)."""
+async def run_strategy(
+    name: str,
+    body: Dict[str, Any] = Body(default={}),
+    payload: dict = Depends(current_user),
+):
+    """
+    Enable and start a strategy.
+    Optional body fields for runtime overrides (config file is NOT modified):
+      symbol      — underlying symbol (e.g. "NIFTY", "BANKNIFTY")
+      exchange    — exchange code (e.g. "NFO", "BFO")
+      paper_mode  — true/false
+      broker_config_id — config_id of a connected broker session
+    """
     safe = _safe_name(name)
     path = _config_path(name)
     if not path.exists():
@@ -353,12 +774,39 @@ async def run_strategy(name: str, payload: dict = Depends(current_user)):
         thread: Optional[threading.Thread] = entry.get("thread")
         if thread and thread.is_alive():
             raise HTTPException(status_code=409, detail=f"Strategy '{name}' is already running")
+        # Clean up stale entry if thread is dead
+        if thread and not thread.is_alive():
+            logger.info("Cleaning up stale running entry for '%s' (thread dead)", safe)
+            _running.pop(safe, None)
 
     # Pre-validate config before spawning thread
+    # Apply overrides FIRST so validation sees the runtime symbol/exchange
     warnings_list: List[str] = []
     try:
         with open(path) as fp:
             cfg = json.load(fp)
+
+        # Apply runtime overrides before validation
+        override_symbol = body.get("symbol")
+        override_exchange = body.get("exchange")
+        override_paper = body.get("paper_mode")
+        override_broker = body.get("broker_config_id")
+        identity = cfg.setdefault("identity", {})
+        if override_symbol:
+            identity["underlying"] = override_symbol
+        if override_exchange:
+            identity["exchange"] = override_exchange
+        # Set sensible defaults if still missing (symbol-agnostic configs)
+        identity.setdefault("underlying", "NIFTY")
+        identity.setdefault("exchange", "NFO")
+        if override_paper is not None:
+            identity["paper_mode"] = bool(override_paper)
+        if override_broker and override_broker != "__paper__":
+            identity["paper_mode"] = False
+            cfg["_broker_config_id"] = override_broker
+        elif override_broker == "__paper__":
+            identity["paper_mode"] = True
+
         from trading.strategy_runner.config_schema import validate_config
         ok, errors = validate_config(cfg)
         if not ok:
@@ -377,14 +825,24 @@ async def run_strategy(name: str, payload: dict = Depends(current_user)):
 
     # Patch config file BEFORE starting thread to avoid race condition
     try:
-        with open(path) as fp:
-            cfg = json.load(fp)
         cfg["enabled"] = True
         cfg["status"] = "RUNNING"
+
         with open(path, "w") as fp:
             json.dump(cfg, fp, indent=2)
     except Exception as exc:
         logger.warning("Could not update enabled flag for %s: %s", name, exc)
+
+    # Clear old state file so the strategy starts fresh (0 PnL).
+    # State files are only useful for crash recovery, not for manual re-starts.
+    state_dir = SAVED_CONFIGS_DIR / "state"
+    old_state = state_dir / f"{safe}_state.json"
+    if old_state.exists():
+        try:
+            old_state.unlink()
+            logger.info("Cleared old state file for fresh start: %s", old_state.name)
+        except Exception as exc:
+            logger.warning("Could not remove old state file %s: %s", old_state, exc)
 
     with _lock:
         stop_evt = threading.Event()
@@ -504,7 +962,21 @@ def _executor_legs_to_positions(executor, safe_name: str) -> List[Dict[str, Any]
         tsym = leg.trading_symbol or f"{leg.symbol}{leg.expiry}{strike_str}{opt_type_str}"
 
         side_sign = 1 if leg.side == StratSide.BUY else -1
-        netqty = side_sign * leg.order_qty
+        order_qty = leg.order_qty               # total contracts = lots * lot_size
+        netqty = side_sign * order_qty
+
+        # For closed legs, use exit_price if available, otherwise the frozen ltp
+        effective_exit = leg.exit_price if (leg.exit_price is not None and leg.exit_price > 0) else leg.ltp
+        if leg.is_active:
+            unrealized = leg.pnl
+            realized = 0.0
+        else:
+            # Closed: compute realized using effective exit price
+            if leg.side == StratSide.BUY:
+                realized = (effective_exit - leg.entry_price) * order_qty
+            else:
+                realized = (leg.entry_price - effective_exit) * order_qty
+            unrealized = 0.0
 
         positions.append({
             # Fields the LiveMonitorPanel reads
@@ -512,14 +984,15 @@ def _executor_legs_to_positions(executor, safe_name: str) -> List[Dict[str, Any]
             "symbol": leg.symbol,
             "tradingsymbol": tsym,
             "netqty": netqty if leg.is_active else 0,
-            "qty": leg.qty,
+            "qty": order_qty,                    # total contracts (lots * lot_size)
+            "order_qty": order_qty,              # explicit total contracts
             "ltp": leg.ltp,
             "avgprc": leg.entry_price,
             "avg_price": leg.entry_price,
-            "urmtom": leg.pnl if leg.is_active else 0.0,
-            "unrealized_pnl": leg.pnl if leg.is_active else 0.0,
-            "rpnl": 0.0 if leg.is_active else leg.pnl,
-            "realized_pnl": 0.0 if leg.is_active else leg.pnl,
+            "urmtom": unrealized,
+            "unrealized_pnl": unrealized,
+            "rpnl": realized,
+            "realized_pnl": realized,
             "prd": "NRML",
             "product": "NRML",
             # Extra strategy-specific fields
@@ -536,9 +1009,10 @@ def _executor_legs_to_positions(executor, safe_name: str) -> List[Dict[str, Any]
             "option_type": opt_type_str,
             "expiry": leg.expiry,
             "instrument": leg.instrument.value,
-            "lots": leg.qty,
-            "lot_size": leg.lot_size,
+            "lots": leg.qty,                     # number of lots
+            "lot_size": leg.lot_size,            # contracts per lot
             "entry_price": leg.entry_price,
+            "exit_price": effective_exit if not leg.is_active else None,
             "order_status": leg.order_status,
         })
     return positions
@@ -588,6 +1062,9 @@ async def strategy_monitor(name: str, payload: dict = Depends(current_user)):
         "summary": {
             "combined_pnl": state.combined_pnl,
             "combined_pnl_pct": state.combined_pnl_pct,
+            "realised_pnl": state.cumulative_daily_pnl,
+            "unrealised_pnl": state.combined_pnl,
+            "total_pnl": state.combined_pnl + state.cumulative_daily_pnl,
             "net_delta": state.net_delta,
             "portfolio_gamma": state.portfolio_gamma,
             "portfolio_theta": state.portfolio_theta,

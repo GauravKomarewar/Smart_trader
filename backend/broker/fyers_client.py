@@ -51,6 +51,60 @@ def _near_month_suffix() -> str:
     return now.strftime("%y%b").upper()
 
 
+def _next_month_suffix() -> str:
+    """Return '26MAY' style suffix for the next-month contract."""
+    now = datetime.now()
+    if now.month == 12:
+        nxt = datetime(now.year + 1, 1, 1)
+    else:
+        nxt = datetime(now.year, now.month + 1, 1)
+    return nxt.strftime("%y%b").upper()
+
+
+def _month_suffix(offset: int) -> str:
+    """Return '26JUN' style suffix for current_month + offset."""
+    now = datetime.now()
+    month = now.month + offset
+    year = now.year
+    while month > 12:
+        month -= 12
+        year += 1
+    return datetime(year, month, 1).strftime("%y%b").upper()
+
+
+# MCX symbols that use futures contracts as option chain underlying
+_MCX_SYMBOLS = {
+    "CRUDEOIL", "GOLD", "GOLDM", "SILVER", "SILVERM", "SILVERMIC",
+    "NATURALGAS", "COPPER", "ALUMINIUM", "ZINC", "LEAD", "NICKEL",
+    "GOLDPETAL",
+}
+
+
+def _resolve_oc_symbol(underlying: str, exchange: str = "NFO") -> list[str]:
+    """
+    Resolve the Fyers optionchain API symbol for a given underlying+exchange.
+    Returns a list of candidate symbols to try (first match wins).
+
+    - Indices:       NSE:NIFTY50-INDEX  (static map)
+    - MCX commodity: MCX:{SYM}{YYMM}FUT  (try current thru +4 months ahead)
+    - NFO/BFO stock: NSE:{SYM}-EQ
+    """
+    sym = underlying.upper()
+    exch = exchange.upper()
+
+    # 1. Static index map (highest priority)
+    if sym in OC_SYMBOL_MAP:
+        return [OC_SYMBOL_MAP[sym]]
+
+    # 2. MCX commodities — underlying is the futures contract
+    #    Try current month through +4 ahead (covers GOLD bi-monthly cycles)
+    if exch == "MCX" or sym in _MCX_SYMBOLS:
+        return [f"MCX:{sym}{_month_suffix(i)}FUT" for i in range(5)]
+
+    # 3. NFO / BFO stocks — underlying is the equity symbol
+    return [f"NSE:{sym}-EQ"]
+
+
 # ── Fyers Client ───────────────────────────────────────────────────────────────
 
 class FyersDataClient:
@@ -323,31 +377,85 @@ class FyersDataClient:
             "source":    "fyers",
         }
 
-    def get_option_chain(self, underlying: str, expiry_ts: str = "") -> Optional[Dict]:
+    def get_depth(self, symbol: str, exchange: str = "NSE") -> Optional[Dict]:
+        """Get market depth (best 5 bid/ask levels) via Fyers depth API."""
+        f = self._get()
+        if not f:
+            return None
+        # Build Fyers symbol
+        fyers_sym = OC_SYMBOL_MAP.get(symbol.upper(), None)
+        if not fyers_sym:
+            inst = None
+            try:
+                from broker.symbol_normalizer import lookup_by_trading_symbol
+                inst = lookup_by_trading_symbol(symbol.upper())
+                if inst and inst.fyers_symbol:
+                    fyers_sym = inst.fyers_symbol
+            except Exception:
+                pass
+            if not fyers_sym:
+                if exchange in ("NFO", "MCX", "BFO"):
+                    fyers_sym = f"{exchange}:{symbol.upper().replace(' ', '')}"
+                else:
+                    fyers_sym = f"{exchange}:{symbol.upper().replace(' ', '')}-EQ"
+        try:
+            resp = f.depth({"symbol": fyers_sym, "ohlcv_flag": 1})
+            if resp.get("code") != 200:
+                logger.debug("Fyers depth error: %s", resp)
+                return None
+            d = resp.get("d", {}).get(fyers_sym, resp.get("d", {}))
+            # Normalize the response
+            bids = []
+            asks = []
+            for b in d.get("bids", []):
+                bids.append({"price": b.get("price", 0), "qty": b.get("volume", b.get("quantity", 0)), "orders": b.get("number", 0)})
+            for a in d.get("ask", d.get("asks", [])):
+                asks.append({"price": a.get("price", 0), "qty": a.get("volume", a.get("quantity", 0)), "orders": a.get("number", 0)})
+            return {
+                "symbol": symbol.upper(),
+                "exchange": exchange,
+                "bids": bids,
+                "asks": asks,
+                "ltp": d.get("lp", d.get("ltp", 0)),
+                "open": d.get("open_price", d.get("open", 0)),
+                "high": d.get("high_price", d.get("high", 0)),
+                "low": d.get("low_price", d.get("low", 0)),
+                "close": d.get("prev_close_price", d.get("close", 0)),
+                "volume": d.get("volume", d.get("vol_traded_today", 0)),
+                "oi": d.get("oi", 0),
+                "total_buy_qty": d.get("totalbuyqty", d.get("total_buy_qty", 0)),
+                "total_sell_qty": d.get("totalsellqty", d.get("total_sell_qty", 0)),
+                "upper_circuit": d.get("upper_ckt", d.get("upper_circuit", 0)),
+                "lower_circuit": d.get("lower_ckt", d.get("lower_circuit", 0)),
+            }
+        except Exception as e:
+            logger.debug("Fyers depth error: %s", e)
+            return None
+
+    def get_option_chain(self, underlying: str, expiry_ts: str = "", exchange: str = "NFO") -> Optional[Dict]:
         """
         Fetch option chain from Fyers.
-        underlying: e.g. "NIFTY", "BANKNIFTY"
+        underlying: e.g. "NIFTY", "BANKNIFTY", "CRUDEOIL", "RELIANCE"
         expiry_ts:  Fyers timestamp string; empty = nearest expiry
+        exchange:   "NFO", "MCX", "BFO" — used to resolve the Fyers symbol
         """
         f = self._get()
         if not f:
             return None
-        fyers_sym = OC_SYMBOL_MAP.get(underlying.upper())
-        if not fyers_sym:
-            return None
-        try:
-            resp = f.optionchain({
-                "symbol":      fyers_sym,
-                "strikecount": 10,
-                "timestamp":   expiry_ts,
-            })
-            if resp.get("code") != 200:
-                logger.debug("Fyers OC error: %s", resp)
-                return None
-            return resp["data"]
-        except Exception as e:
-            logger.debug("Fyers get_option_chain error: %s", e)
-            return None
+        candidates = _resolve_oc_symbol(underlying, exchange)
+        for fyers_sym in candidates:
+            try:
+                resp = f.optionchain({
+                    "symbol":      fyers_sym,
+                    "strikecount": 10,
+                    "timestamp":   expiry_ts,
+                })
+                if resp.get("code") == 200 and resp.get("data", {}).get("optionsChain"):
+                    return resp["data"]
+                logger.debug("Fyers OC %s: code=%s", fyers_sym, resp.get("code"))
+            except Exception as e:
+                logger.debug("Fyers get_option_chain %s error: %s", fyers_sym, e)
+        return None
 
     def get_screener(self, symbols: List[str]) -> List[Dict]:
         """Batch fetch quotes for a list of NSE symbols and return screener rows."""
