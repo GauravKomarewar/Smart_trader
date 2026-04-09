@@ -249,9 +249,11 @@ async def live_feed_websocket(websocket: WebSocket):
         return hashlib.md5(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()
 
     async def _push_loop():
-        """Background task: read all views from PostgreSQL via SupremeManager."""
+        """Background task: read all views from PostgreSQL via SupremeManager.
+        Wakes instantly when event_bus signals new data (order/position change)."""
         nonlocal _last_good_dashboard, _last_good_accounts, _last_dash_hash, _last_acct_hash
         from managers.supreme_manager import supreme
+        from core.event_bus import event_bus
         cycle = 0
         while not stop_event.is_set():
             try:
@@ -359,7 +361,17 @@ async def live_feed_websocket(websocket: WebSocket):
                 stop_event.set()
                 return
 
-            await asyncio.sleep(1)
+            # ── Instant events: drain & push any order/position events ────
+            instant_events = event_bus.drain(user_id)
+            for ev in instant_events:
+                try:
+                    await websocket.send_text(json.dumps(ev))
+                except Exception:
+                    break
+
+            # Event-driven sleep: wake instantly when event_bus fires,
+            # otherwise fall back to 1-second cycle
+            await event_bus.wait(user_id, timeout=1.0)
 
     push_task = asyncio.create_task(_push_loop())
 
@@ -402,6 +414,11 @@ async def live_feed_websocket(websocket: WebSocket):
     finally:
         stop_event.set()
         push_task.cancel()
+        try:
+            from core.event_bus import event_bus
+            event_bus.cleanup(user_id)
+        except Exception:
+            pass
         try:
             await push_task
         except asyncio.CancelledError:

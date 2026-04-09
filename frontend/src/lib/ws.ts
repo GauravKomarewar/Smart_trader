@@ -11,6 +11,7 @@ type WsEventType =
   | 'dashboard' | 'broker_accounts' | 'broker_data'
   | 'broker_subscribed' | 'broker_unsubscribed' | 'pong'
   | 'risk_alerts' | 'risk_snapshot'
+  | 'force_refresh'
 
 interface WsMessage {
   type: WsEventType

@@ -371,6 +371,19 @@ async def place_order(
         response["message"] = (
             f"Order intent processed through {len(broker_accounts)} account(s)"
         )
+        # Instant push: notify WS feed immediately
+        try:
+            from core.event_bus import event_bus
+            event_bus.emit("order_update", {
+                "user_id": user_id,
+                "action": "placed",
+                "symbol": req.symbol,
+                "direction": direction,
+                "qty": actual_qty,
+                "order_type": canonical_order_type,
+            })
+        except Exception:
+            pass
     else:
         detail = "; ".join(response.get("errors", ["Order failed"]))
         raise HTTPException(status_code=400, detail=detail)
@@ -425,6 +438,16 @@ async def squareoff_position(
     if not result.success:
         detail = "; ".join(result.errors) if result.errors else "Squareoff failed"
         raise HTTPException(status_code=400, detail=detail)
+    # Instant push: notify WS feed immediately
+    try:
+        from core.event_bus import event_bus
+        event_bus.emit("position_update", {
+            "user_id": user_id,
+            "action": "squareoff",
+            "symbol": req.symbol,
+        })
+    except Exception:
+        pass
     return {"success": True, "symbol": req.symbol}
 
 
@@ -481,6 +504,17 @@ async def squareoff_all(
         except Exception as e:
             errors.append(f"{norm.get('tradingsymbol', '?')}: {e}")
 
+    # Instant push: notify WS feed immediately
+    try:
+        from core.event_bus import event_bus
+        event_bus.emit("position_update", {
+            "user_id": user_id,
+            "action": "squareoff_all",
+            "account_id": req.accountId,
+            "count": success_count,
+        })
+    except Exception:
+        pass
     return {
         "success": len(errors) == 0,
         "placed": success_count,
@@ -511,6 +545,16 @@ async def cancel_order(
         {"status": "CANCELLED", "remarks": result.get("message") or "Cancelled"},
     )
     _update_order_db(user_id, broker_order_id, status="CANCELLED")
+    # Instant push: notify WS feed immediately
+    try:
+        from core.event_bus import event_bus
+        event_bus.emit("order_update", {
+            "user_id": user_id,
+            "action": "cancelled",
+            "order_id": broker_order_id,
+        })
+    except Exception:
+        pass
     return result
 
 
@@ -525,6 +569,16 @@ async def cancel_all_orders(
     result = registry.cancel_all_orders(user_id, account_id)
     if not result.get("success"):
         raise HTTPException(400, result.get("message", "Cancel all failed"))
+    # Instant push: notify WS feed immediately
+    try:
+        from core.event_bus import event_bus
+        event_bus.emit("order_update", {
+            "user_id": user_id,
+            "action": "cancelled_all",
+            "account_id": account_id,
+        })
+    except Exception:
+        pass
     return result
 
 

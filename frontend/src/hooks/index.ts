@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
-import { ws } from '../lib/ws'
+import { ws, marketWs, type MarketTick } from '../lib/ws'
 import {
   useAuthStore, useDashboardStore, useMarketStore,
   useOptionChainStore, useToastStore, useBrokerAccountsStore,
@@ -128,10 +128,31 @@ export function useLiveData() {
       }
     }
 
+    // Instant order/position updates — show toast + trigger immediate refresh
+    const onOrderUpdate = (data: any) => {
+      if (!data) return
+      const action = data.action || ''
+      const symbol = data.symbol || ''
+      if (action === 'placed') {
+        toast(`Order placed: ${symbol}`, 'success', '✅ Order', 3000)
+      } else if (action === 'cancelled' || action === 'cancelled_all') {
+        toast(`Order cancelled${symbol ? ': ' + symbol : ''}`, 'info', '🚫 Cancelled', 3000)
+      }
+    }
+    const onPositionUpdate = (data: any) => {
+      if (!data) return
+      const action = data.action || ''
+      if (action === 'squareoff' || action === 'squareoff_all') {
+        toast(`Position squared off`, 'info', '📊 Position', 3000)
+      }
+    }
+
     ws.on('dashboard', onDashboard)
     ws.on('broker_accounts', onBrokerAccounts)
     ws.on('broker_data', onBrokerData)
     ws.on('risk_alerts', onRiskAlerts)
+    ws.on('order_update', onOrderUpdate)
+    ws.on('position_update', onPositionUpdate)
     ws.connect(token)
     connectedRef.current = true
 
@@ -140,6 +161,8 @@ export function useLiveData() {
       ws.off('broker_accounts', onBrokerAccounts)
       ws.off('broker_data', onBrokerData)
       ws.off('risk_alerts', onRiskAlerts)
+      ws.off('order_update', onOrderUpdate)
+      ws.off('position_update', onPositionUpdate)
       ws.disconnect()
       connectedRef.current = false
     }
@@ -262,10 +285,13 @@ export function useDashboardData() {
   }, [fetch])
 }
 
-// ── Market indices polling ───────────────────────
+// ── Market indices polling + WS live overlay ─────
+const _INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX']
+
 export function useMarketIndices() {
   const { setIndices } = useMarketStore()
   const { isAuthenticated } = useAuthStore()
+  const indicesRef = useRef<any[]>([])
 
   useEffect(() => {
     const load = async () => {
@@ -274,6 +300,7 @@ export function useMarketIndices() {
         const res = await api.indices() as any
         const data = Array.isArray(res) ? res : (res.data ?? [])
         if (data.length > 0) {
+          indicesRef.current = data
           setIndices(data)
           return
         }
@@ -282,8 +309,36 @@ export function useMarketIndices() {
       setIndices([])
     }
     load()
-    const t = setInterval(load, 5000)
-    return () => clearInterval(t)
+    // Reduced from 5s to 15s since WS ticks provide real-time updates
+    const t = setInterval(load, 15000)
+
+    // Subscribe index symbols to marketWs for instant LTP updates
+    marketWs.connect()
+    marketWs.subscribe(_INDEX_SYMBOLS)
+    const normSym = (s: string) => s.toUpperCase().replace(/-INDEX|-EQ|-BE/g, '').replace(/\s/g, '').replace('NIFTY50', 'NIFTY').replace('NIFTYBANK', 'BANKNIFTY')
+    const unsubTick = marketWs.onTick((tick: MarketTick) => {
+      const sym = normSym(tick.symbol)
+      const idx = indicesRef.current.findIndex(
+        (i: any) => normSym(i.symbol ?? i.name ?? '') === sym
+      )
+      if (idx < 0) return
+      const updated = [...indicesRef.current]
+      updated[idx] = {
+        ...updated[idx],
+        ltp: tick.ltp,
+        change: tick.change ?? updated[idx].change,
+        changePct: tick.changePct ?? updated[idx].changePct,
+        high: tick.high || updated[idx].high,
+        low: tick.low || updated[idx].low,
+      }
+      indicesRef.current = updated
+      setIndices(updated)
+    })
+
+    return () => {
+      clearInterval(t)
+      unsubTick()
+    }
   }, [isAuthenticated])
 }
 
@@ -325,7 +380,7 @@ export function useGlobalMarkets() {
       } catch { /* silent */ }
     }
     load()
-    const t = setInterval(load, 5000)
+    const t = setInterval(load, 15000)
     return () => clearInterval(t)
   }, [isAuthenticated])
 }

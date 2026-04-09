@@ -13,6 +13,7 @@ import { useUIStore } from '../../stores'
 import { cn } from '../../lib/utils'
 import { X, BarChart2, CandlestickChart, TrendingUp, Volume2, Loader2, AlertCircle } from 'lucide-react'
 import { api } from '../../lib/api'
+import { marketWs, type MarketTick } from '../../lib/ws'
 import type { ChartInterval } from '../../types'
 import {
   computeSMA, computeEMA, computeBB, computeRSI, computeMACD,
@@ -54,6 +55,7 @@ export default function ChartModal() {
   const subContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const subChartRef = useRef<IChartApi | null>(null)
+  const unsubTickRef = useRef<(() => void) | null>(null)
 
   const [interval, setInterval] = useState<ChartInterval>('15m')
   const [chartType, setChartType] = useState<ChartType>('candlestick')
@@ -275,6 +277,52 @@ export default function ChartModal() {
         chart.timeScale().fitContent()
         subChart?.timeScale().fitContent()
         setLoading(false)
+
+        /* ── Live tick streaming — update current candle in real-time ── */
+        const _normSym = (s: string) => s.toUpperCase().replace(/-INDEX|-EQ|-BE/g, '').replace(/\s/g, '')
+        marketWs.connect()
+        marketWs.subscribe([symbol])
+        const _TF_SEC: Record<string, number> = {
+          '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+          '1h': 3600, '4h': 14400, 'D': 86400, 'W': 604800,
+        }
+        const barSec = _TF_SEC[interval] ?? 60
+        let curBar: { time: number; open: number; high: number; low: number; close: number } | null = null
+
+        unsubTickRef.current = marketWs.onTick((tick: MarketTick) => {
+          if (_normSym(tick.symbol) !== _normSym(symbol)) return
+          const ltp = tick.ltp
+          if (!ltp || !chart) return
+
+          const nowSec = Math.floor(Date.now() / 1000)
+          const barTime = Math.floor(nowSec / barSec) * barSec
+
+          if (!curBar || curBar.time !== barTime) {
+            curBar = { time: barTime, open: ltp, high: ltp, low: ltp, close: ltp }
+          } else {
+            curBar.high = Math.max(curBar.high, ltp)
+            curBar.low = Math.min(curBar.low, ltp)
+            curBar.close = ltp
+          }
+
+          try {
+            if (chartType === 'area' || chartType === 'line') {
+              mainSeries.update({ time: curBar.time as UTCTimestamp, value: curBar.close })
+            } else {
+              mainSeries.update({
+                time: curBar.time as UTCTimestamp,
+                open: curBar.open, high: curBar.high, low: curBar.low, close: curBar.close,
+              })
+            }
+            if (showVolume) {
+              volSeries.update({
+                time: curBar.time as UTCTimestamp,
+                value: tick.volume ?? 0,
+                color: curBar.close >= curBar.open ? 'rgba(34,197,94,.35)' : 'rgba(244,63,94,.35)',
+              })
+            }
+          } catch { /* lightweight-charts may throw if bar already exists in wrong order */ }
+        })
       })
       .catch(err => {
         if (!cancelled) { setError(err?.message ?? 'Failed to fetch chart data'); setLoading(false) }
@@ -285,6 +333,7 @@ export default function ChartModal() {
     return () => {
       cancelled = true
       cancelAnimationFrame(rafId)
+      if (unsubTickRef.current) { unsubTickRef.current(); unsubTickRef.current = null }
       chartRef.current?.remove()
       subChartRef.current?.remove()
       chartRef.current = null

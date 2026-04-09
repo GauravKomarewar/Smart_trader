@@ -2,12 +2,13 @@
    Option Chain Page
    Full chain + analytics + basket order
    ════════════════════════════════════════════ */
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useOptionChain } from '../hooks'
 import { useOptionChainStore, useUIStore, useToastStore } from '../stores'
 import { cn, fmtNum, fmtOI, fmtINR, ivColor } from '../lib/utils'
 import { api } from '../lib/api'
 import { uid } from '../lib/utils'
+import { marketWs, type MarketTick } from '../lib/ws'
 import {
   Layers, ShoppingCart, BarChart2, RefreshCw, Plus, Minus,
   Trash2, CheckCircle2, AlertCircle, Settings2, ChevronDown,
@@ -231,6 +232,48 @@ function OptionChainTable() {
   const [highlightOI, setHighlightOI] = useState(true)
   const flashSet = useValueFlash(data?.rows)
 
+  // ── Live tick overlay for instant LTP updates between REST polls ──
+  const [tickOverlay, setTickOverlay] = useState<Record<string, number>>({})
+
+  useEffect(() => {
+    if (!data?.rows?.length) return
+    // Collect all option trading symbols for subscription
+    const symbols: string[] = []
+    for (const row of data.rows) {
+      const callSym = (row.call as any)?.trading_symbol
+      const putSym = (row.put as any)?.trading_symbol
+      if (callSym) symbols.push(callSym)
+      if (putSym) symbols.push(putSym)
+    }
+    // Also subscribe to underlying for spot price
+    const underlying = data.underlying
+    if (underlying) symbols.push(underlying)
+
+    if (symbols.length === 0) return
+
+    marketWs.connect()
+    marketWs.subscribe(symbols)
+
+    const normSym = (s: string) => s.toUpperCase().replace(/-INDEX|-EQ|-BE/g, '').replace(/\s/g, '')
+    const unsub = marketWs.onTick((tick: MarketTick) => {
+      const sym = normSym(tick.symbol)
+      if (tick.ltp > 0) {
+        setTickOverlay(prev => ({ ...prev, [sym]: tick.ltp }))
+      }
+    })
+
+    return () => { unsub() }
+  }, [data?.underlying, data?.expiry, data?.rows?.length])
+
+  // Apply tick overlay to get effective LTP for a side
+  const getLtp = useCallback((side: any): number => {
+    const tradingSym = side?.trading_symbol
+    if (tradingSym && tickOverlay[tradingSym.toUpperCase().replace(/-INDEX|-EQ|-BE/g, '').replace(/\s/g, '')] != null) {
+      return tickOverlay[tradingSym.toUpperCase().replace(/-INDEX|-EQ|-BE/g, '').replace(/\s/g, '')]
+    }
+    return side?.ltp ?? 0
+  }, [tickOverlay])
+
   // Helper: returns flash CSS class if this cell's value just changed
   const flashCls = (strike: number, side: 'call' | 'put', field: string) =>
     flashSet.has(`${strike}:${side}:${field}`) ? 'oc-flash' : ''
@@ -362,7 +405,7 @@ function OptionChainTable() {
                     className={cn('px-2 py-1.5 text-right font-mono font-bold text-profit bg-profit/5 cursor-pointer hover:underline', flashCls(row.strike, 'call', 'ltp'))}
                     onClick={() => openOrderModal((row.call as any)?.trading_symbol || data.underlying + `${row.strike}CE`, (data as any)?.exchange || UNDERLYING_MAP[data.underlying] || 'NFO')}
                   >
-                    {fmtNum(row.call.ltp)}
+                    {fmtNum(getLtp(row.call))}
                   </td>
 
                   {/* STRIKE */}
@@ -377,7 +420,7 @@ function OptionChainTable() {
                     className={cn('px-2 py-1.5 text-left font-mono font-bold text-loss bg-loss/5 cursor-pointer hover:underline', flashCls(row.strike, 'put', 'ltp'))}
                     onClick={() => openOrderModal((row.put as any)?.trading_symbol || data.underlying + `${row.strike}PE`, (data as any)?.exchange || UNDERLYING_MAP[data.underlying] || 'NFO')}
                   >
-                    {fmtNum(row.put.ltp)}
+                    {fmtNum(getLtp(row.put))}
                   </td>
                   {/* PUT SIDE */}
                   {putCols.map(col => renderPutCell(col, row))}
