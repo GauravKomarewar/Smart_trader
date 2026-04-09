@@ -381,6 +381,7 @@ class FyersDataClient:
         """Get market depth (best 5 bid/ask levels) via Fyers depth API."""
         f = self._get()
         if not f:
+            logger.warning("Fyers depth: client not available")
             return None
         # Build Fyers symbol
         fyers_sym = OC_SYMBOL_MAP.get(symbol.upper(), None)
@@ -396,12 +397,24 @@ class FyersDataClient:
             if not fyers_sym:
                 if exchange in ("NFO", "MCX", "BFO"):
                     fyers_sym = f"{exchange}:{symbol.upper().replace(' ', '')}"
+                elif exchange == "NSE":
+                    # Indices need -INDEX suffix; equities need -EQ suffix
+                    up = symbol.upper().replace(' ', '')
+                    if up in ("NIFTY50", "NIFTY 50", "NIFTY"):
+                        fyers_sym = "NSE:NIFTY50-INDEX"
+                    elif up in ("NIFTYBANK", "BANKNIFTY"):
+                        fyers_sym = "NSE:NIFTYBANK-INDEX"
+                    elif up in ("FINNIFTY",):
+                        fyers_sym = "NSE:FINNIFTY-INDEX"
+                    else:
+                        fyers_sym = f"NSE:{up}-EQ"
                 else:
                     fyers_sym = f"{exchange}:{symbol.upper().replace(' ', '')}-EQ"
+        logger.info("Fyers depth: symbol=%s exchange=%s → fyers_sym=%s", symbol, exchange, fyers_sym)
         try:
             resp = f.depth({"symbol": fyers_sym, "ohlcv_flag": 1})
             if resp.get("code") != 200:
-                logger.debug("Fyers depth error: %s", resp)
+                logger.warning("Fyers depth error for %s: code=%s msg=%s", fyers_sym, resp.get("code"), resp.get("message", resp.get("s", "")))
                 return None
             d = resp.get("d", {}).get(fyers_sym, resp.get("d", {}))
             # Normalize the response
@@ -429,7 +442,7 @@ class FyersDataClient:
                 "lower_circuit": d.get("lower_ckt", d.get("lower_circuit", 0)),
             }
         except Exception as e:
-            logger.debug("Fyers depth error: %s", e)
+            logger.warning("Fyers depth exception for %s: %s", fyers_sym, e)
             return None
 
     def get_option_chain(self, underlying: str, expiry_ts: str = "", exchange: str = "NFO") -> Optional[Dict]:

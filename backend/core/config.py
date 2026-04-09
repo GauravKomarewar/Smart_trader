@@ -16,7 +16,7 @@ else:
 class Config:
     # ── Server ──────────────────────────────────────────
     HOST: str            = os.getenv("BACKEND_HOST", "0.0.0.0")
-    PORT: int            = int(os.getenv("BACKEND_PORT", "8001"))
+    PORT: int            = int(os.getenv("BACKEND_PORT", "5173"))
     DEBUG: bool          = os.getenv("DEBUG", "false").lower() == "true"
     CORS_ORIGINS: list   = os.getenv(
         "CORS_ORIGINS",

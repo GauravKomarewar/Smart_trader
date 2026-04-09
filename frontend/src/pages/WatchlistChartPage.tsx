@@ -444,6 +444,32 @@ function MarketDepthPanel({ symbol, exchange }: { symbol: string; exchange: stri
 
   const bids = depth.bids?.slice(0, 5) ?? []
   const asks = depth.asks?.slice(0, 5) ?? []
+
+  // When no depth data available, show a helpful message with LTP from tick
+  if (!bids.length && !asks.length) {
+    const liveQ = getLiveQuote(symbol, exchange)
+    return (
+      <div className="p-2 space-y-2">
+        <div className="text-[11px] font-semibold text-text-bright px-1 flex items-center gap-1.5">
+          <BookOpen className="w-3.5 h-3.5 text-brand" /> Market Depth
+        </div>
+        {liveQ.ltp > 0 && (
+          <div className="text-center py-2">
+            <div className="text-[10px] text-text-muted">LTP</div>
+            <div className="text-[16px] font-mono font-bold text-text-bright">{fmtNum(liveQ.ltp)}</div>
+            <div className={cn('text-[11px] font-mono', changeCls(liveQ.changePct))}>
+              {liveQ.changePct >= 0 ? '+' : ''}{liveQ.changePct.toFixed(2)}%
+            </div>
+          </div>
+        )}
+        <div className="text-center text-[10px] text-text-muted py-4">
+          Depth data unavailable
+          <div className="text-[9px] mt-1 opacity-60">Market may be closed or broker not connected</div>
+        </div>
+      </div>
+    )
+  }
+
   const maxQty = Math.max(
     ...bids.map((b: any) => b.qty || 0),
     ...asks.map((a: any) => a.qty || 0),
@@ -575,6 +601,11 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
     if (!containerRef.current) return
     let cancelled = false
     const container = containerRef.current
+    // Track resources created inside RAF for proper cleanup
+    let _chart: IChartApi | null = null
+    let _subChart: IChartApi | null = null
+    let _unsubTick: (() => void) | null = null
+    let _ro: ResizeObserver | null = null
 
     const rafId = requestAnimationFrame(() => {
       if (cancelled || !container.isConnected) return
@@ -589,6 +620,7 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
         handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true },
         handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true, axisDoubleClickReset: true },
       })
+      _chart = chart
       chartRef.current = chart
 
       // Sub chart for RSI/MACD/ATR
@@ -601,6 +633,7 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
           rightPriceScale: { borderColor: '#252b3b' },
           timeScale: { borderColor: '#252b3b', timeVisible: true, visible: true },
         })
+        _subChart = subChart
       }
 
       // Main series — support Heikin Ashi as chart type
@@ -819,25 +852,26 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
           }
         } catch { /* bar order */ }
       })
+      _unsubTick = unsubTick
 
       const ro = new ResizeObserver(() => {
         if (containerRef.current) chart.resize(containerRef.current.clientWidth, containerRef.current.clientHeight)
         if (subContainerRef.current && subChart) subChart.resize(subContainerRef.current.clientWidth, subContainerRef.current.clientHeight)
       })
+      _ro = ro
       ro.observe(container)
-
-      return () => {
-        cancelled = true
-        unsubTick()
-        ro.disconnect()
-        chart.remove()
-        subChart?.remove()
-        chartRef.current = null
-        mainSeriesRef.current = null
-      }
     }) // end raf
 
-    return () => { cancelled = true; cancelAnimationFrame(rafId) }
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(rafId)
+      _unsubTick?.()
+      _ro?.disconnect()
+      if (_chart) { try { _chart.remove() } catch {} }
+      if (_subChart) { try { _subChart.remove() } catch {} }
+      chartRef.current = null
+      mainSeriesRef.current = null
+    }
   }, [symbol, exchange, interval, chartType, showVolume, activeIndicators])
 
   // Drawing click handler
