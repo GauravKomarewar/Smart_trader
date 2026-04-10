@@ -6,7 +6,7 @@ SEBI guideline: broker sessions must be freshly authenticated daily.
 
 Schedule:
   08:45 IST — Auto-login: connect ALL active broker configs for ALL users
-  23:55 IST — Auto-logout: disconnect ALL live sessions for ALL users
+  23:45 IST — Auto-logout: disconnect ALL live sessions for ALL users
 
 Auto-login is supported for brokers with TOTP-based credentials:
   • Shoonya — OAuth via headless Firefox + TOTP
@@ -33,7 +33,7 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 # Schedule times (IST)
 _LOGIN_HOUR, _LOGIN_MIN = 8, 45
-_LOGOUT_HOUR, _LOGOUT_MIN = 23, 55
+_LOGOUT_HOUR, _LOGOUT_MIN = 23, 45
 
 # ── Standalone helpers for 3-tier Shoonya login ───────────────────────────────
 
@@ -166,7 +166,7 @@ def _shoonya_quick_auth(creds: dict, log) -> str | None:
 
 class SessionScheduler:
     """
-    Daemon thread that runs auto-login at 08:45 IST and auto-logout at 23:55 IST.
+    Daemon thread that runs auto-login at 08:45 IST and auto-logout at 23:45 IST.
     Uses minute-granularity polling (checks every 30s).
     """
 
@@ -229,7 +229,7 @@ class SessionScheduler:
                 logger.exception("Auto-login failed")
             self._last_login_date = today
 
-        # Auto-logout at 23:55 IST
+        # Auto-logout at 23:45 IST
         if (
             self._last_logout_date != today
             and now.hour == _LOGOUT_HOUR

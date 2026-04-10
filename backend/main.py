@@ -281,7 +281,7 @@ async def on_startup():
     try:
         from trading.session_scheduler import session_scheduler
         session_scheduler.start()
-        logger.info("SessionScheduler started — auto-login@08:45 IST, auto-logout@23:55 IST")
+        logger.info("SessionScheduler started — auto-login@08:45 IST, auto-logout@23:45 IST")
     except Exception as exc:
         logger.warning("SessionScheduler start failed (non-fatal): %s", exc)
 
