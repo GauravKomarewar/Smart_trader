@@ -538,7 +538,7 @@ function StrategyRunDetail({ name }: { name: string }) {
    is React-managed; everything inside is direct DOM.
    ════════════════════════════════════════════════ */
 
-const POLL_MS = 1500   // 1.5s for near-tick responsiveness
+const POLL_MS = 1000   // 1s polling to match strategy tick cadence
 
 // ── Helpers (same as Shoonya) ─────────────────────
 const f2 = (n: unknown) => { const v = Number(n || 0); return Number.isFinite(v) ? v.toFixed(2) : '0.00' }
@@ -546,6 +546,30 @@ const pSign = (n: unknown) => { const v = Number(n || 0); return (v >= 0 ? '+' :
 const pCol = (n: unknown) => Number(n || 0) >= 0 ? 'var(--profit)' : 'var(--loss, #f43f5e)'
 const dCls = (n: unknown) => { const v = Number(n || 0); return v > 0.05 ? 'text-profit' : v < -0.05 ? 'text-loss' : 'text-text-muted' }
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m] || m))
+const intFmt = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 })
+const dec2Fmt = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const dec4Fmt = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 4, maximumFractionDigits: 4 })
+
+type SummaryFieldType = 'int' | 'pnl' | 'float2' | 'float4'
+
+function fmtSummaryValue(val: unknown, type: SummaryFieldType): string {
+  const num = Number(val || 0)
+  if (!Number.isFinite(num)) return type === 'int' ? '0' : '0.00'
+  if (type === 'int') return intFmt.format(num)
+  if (type === 'float4') return dec4Fmt.format(num)
+  if (type === 'float2') return dec2Fmt.format(num)
+  return (num >= 0 ? '+' : '') + dec2Fmt.format(num)
+}
+
+function stableLegs(legs: any[]): any[] {
+  return [...legs].sort((a: any, b: any) => {
+    const strikeDiff = Number(a.strike ?? 0) - Number(b.strike ?? 0)
+    if (strikeDiff !== 0) return strikeDiff
+    const sideDiff = String(a.side ?? '').localeCompare(String(b.side ?? ''))
+    if (sideDiff !== 0) return sideDiff
+    return String(a.tag ?? '').localeCompare(String(b.tag ?? ''))
+  })
+}
 
 function flashEl(el: Element) {
   el.classList.remove('val-flash')
@@ -571,9 +595,10 @@ function LiveMonitorPanel() {
   const prevGroupNamesRef = useRef('')
   const legCacheRef       = useRef<Record<string, string>>({})
   const initializedRef    = useRef(false)
+  const pollInFlightRef   = useRef(false)
 
   // ── Build monitor summary KPI grid ──
-  function renderSummaryGrid(cols: [string, unknown, string][]) {
+  function renderSummaryGrid(cols: [string, unknown, SummaryFieldType][]) {
     const container = summaryRef.current
     if (!container) return
     if (!container.querySelector('[data-mid]')) {
@@ -581,8 +606,8 @@ function LiveMonitorPanel() {
       container.innerHTML = cols.map(([label, val, type]) => `
         <div class="bg-bg-card border border-border rounded-lg px-3 py-2.5">
           <div class="text-[9px] text-text-muted uppercase tracking-wider font-semibold">${esc(label)}</div>
-          <div class="text-[17px] font-bold font-mono mt-1" data-mid="${esc(label)}"
-               style="${type === 'pnl' ? `color:${pCol(val)}` : 'color:rgb(var(--c-text-bright))'}">${type === 'pnl' ? pSign(val) : Number(val || 0).toLocaleString()}</div>
+          <div class="text-[17px] font-bold font-mono tabular-nums whitespace-nowrap mt-1" data-mid="${esc(label)}"
+               style="${type === 'pnl' ? `color:${pCol(val)}` : 'color:rgb(var(--c-text-bright))'}">${fmtSummaryValue(val, type)}</div>
         </div>`).join('')
       return
     }
@@ -590,7 +615,7 @@ function LiveMonitorPanel() {
     cols.forEach(([label, val, type]) => {
       const el = container.querySelector(`[data-mid="${CSS.escape(label)}"]`) as HTMLElement | null
       if (!el) return
-      const text = type === 'pnl' ? pSign(val) : Number(val || 0).toLocaleString()
+      const text = fmtSummaryValue(val, type)
       if (el.textContent !== text) { el.textContent = text; flashEl(el) }
       if (type === 'pnl') { const c = pCol(val); if (el.style.color !== c) el.style.color = c }
     })
@@ -599,6 +624,7 @@ function LiveMonitorPanel() {
   // ── Build leg table HTML with per-cell data attributes for in-place updates ──
   function legTableHtml(legs: any[]): string {
     if (!legs.length) return '<div class="text-text-muted text-[12px] py-2 px-1">No legs.</div>'
+    const orderedLegs = stableLegs(legs)
     return `
     <div class="overflow-x-auto">
       <table class="w-full text-[11px]" style="border-collapse:collapse;table-layout:fixed">
@@ -635,7 +661,7 @@ function LiveMonitorPanel() {
           </tr>
         </thead>
         <tbody>
-          ${legs.map((p: any) => {
+          ${orderedLegs.map((p: any) => {
             const uPnl = Number(p.unrealized_pnl ?? p.urmtom ?? 0)
             const rPnl = Number(p.realized_pnl ?? p.rpnl ?? 0)
             const tPnl = uPnl + rPnl
@@ -655,15 +681,15 @@ function LiveMonitorPanel() {
                 <span class="text-[9px] font-bold px-1.5 py-0.5 rounded ${p.side === 'BUY' ? 'text-profit bg-profit/10' : 'text-loss bg-loss/10'}">${esc(p.side ?? '')}</span>
               </td>
               <td class="px-2 py-1.5 font-mono text-text-bright text-[11px]">${p.strike ? `${Number(p.strike).toFixed(0)}${p.option_type || ''}` : p.instrument === 'FUT' ? 'FUT' : '—'}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums">${f2(p.entry_price ?? p.avg_price ?? p.avgprc)}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-bright tabular-nums" data-col="ltp">${f2(p.ltp)}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-bright tabular-nums" data-col="qty">${Math.abs(orderQty)}${lots != null && lotSz != null ? `<div class="text-[8px] text-text-muted leading-tight">${lots}L×${lotSz}</div>` : ''}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums" data-col="delta">${p.delta != null ? Number(p.delta).toFixed(3) : '—'}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums" data-col="theta">${p.theta != null ? Number(p.theta).toFixed(2) : '—'}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums" data-col="iv">${p.iv != null && Number(p.iv) > 0 ? Number(p.iv).toFixed(1) + '%' : '—'}</td>
-              <td class="px-2 py-1.5 text-right font-mono tabular-nums" data-col="upnl" style="color:${pCol(uPnl)}">${f2(uPnl)}</td>
-              <td class="px-2 py-1.5 text-right font-mono tabular-nums" data-col="rpnl" style="color:${pCol(rPnl)}">${f2(rPnl)}</td>
-              <td class="px-2 py-1.5 text-right font-mono font-bold tabular-nums" data-col="tpnl" style="color:${pCol(tPnl)}">${f2(tPnl)}</td>
+              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums whitespace-nowrap">${f2(p.entry_price ?? p.avg_price ?? p.avgprc)}</td>
+              <td class="px-2 py-1.5 text-right font-mono text-text-bright tabular-nums whitespace-nowrap" data-col="ltp">${f2(p.ltp)}</td>
+              <td class="px-2 py-1.5 text-right font-mono text-text-bright tabular-nums whitespace-nowrap" data-col="qty">${Math.abs(orderQty)}${lots != null && lotSz != null ? `<div class="text-[8px] text-text-muted leading-tight">${lots}L×${lotSz}</div>` : ''}</td>
+              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums whitespace-nowrap" data-col="delta">${p.delta != null ? Number(p.delta).toFixed(3) : '—'}</td>
+              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums whitespace-nowrap" data-col="theta">${p.theta != null ? Number(p.theta).toFixed(2) : '—'}</td>
+              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums whitespace-nowrap" data-col="iv">${p.iv != null && Number(p.iv) > 0 ? Number(p.iv).toFixed(1) + '%' : '—'}</td>
+              <td class="px-2 py-1.5 text-right font-mono tabular-nums whitespace-nowrap" data-col="upnl" style="color:${pCol(uPnl)}">${pSign(uPnl)}</td>
+              <td class="px-2 py-1.5 text-right font-mono tabular-nums whitespace-nowrap" data-col="rpnl" style="color:${pCol(rPnl)}">${pSign(rPnl)}</td>
+              <td class="px-2 py-1.5 text-right font-mono font-bold tabular-nums whitespace-nowrap" data-col="tpnl" style="color:${pCol(tPnl)}">${pSign(tPnl)}</td>
               <td class="px-2 py-1.5 text-center"><span class="text-[8px] px-1.5 py-0.5 rounded ${statusCls}" data-col="status">${esc(status)}</span></td>
             </tr>`
           }).join('')}
@@ -674,24 +700,25 @@ function LiveMonitorPanel() {
 
   /** Update a single leg table section in-place (per-cell). Rebuild only if leg count changes. */
   function updateLegTableInPlace(container: Element, legs: any[], cacheKey: string) {
+    const orderedLegs = stableLegs(legs)
     // Get current tags from DOM
     const existingTags: string[] = []
     container.querySelectorAll('tr[data-tag]').forEach(r => {
       const t = r.getAttribute('data-tag')
       if (t) existingTags.push(t)
     })
-    const newTags = legs.map((p: any) => esc(p.tag ?? '—'))
+    const newTags = orderedLegs.map((p: any) => esc(p.tag ?? '—'))
 
     // If leg count or tag set changed → full rebuild
     if (existingTags.length !== newTags.length || existingTags.join(',') !== newTags.join(',')) {
-      const html = legTableHtml(legs)
+      const html = legTableHtml(orderedLegs)
       legCacheRef.current[cacheKey] = html
       container.innerHTML = html
       return
     }
 
     // Same tags → update each cell in-place
-    for (const p of legs) {
+    for (const p of orderedLegs) {
       const tagVal = esc(p.tag ?? '—')
       const row = container.querySelector(`tr[data-tag="${CSS.escape(tagVal)}"]`)
       if (!row) continue
@@ -705,6 +732,18 @@ function LiveMonitorPanel() {
       if (ltpEl) {
         const ltpText = f2(p.ltp)
         if (ltpEl.textContent !== ltpText) { ltpEl.textContent = ltpText; flashEl(ltpEl) }
+      }
+
+      const qtyEl = row.querySelector('[data-col="qty"]') as HTMLElement | null
+      if (qtyEl) {
+        const orderQty = Number(p.order_qty ?? p.qty ?? p.netqty ?? 0)
+        const lots = p.lots != null ? Number(p.lots) : null
+        const lotSz = p.lot_size != null ? Number(p.lot_size) : null
+        const qtyText = `${Math.abs(orderQty)}${lots != null && lotSz != null ? `\n${lots}L×${lotSz}` : ''}`
+        const currentQtyText = qtyEl.innerText.trim()
+        if (currentQtyText !== qtyText.trim()) {
+          qtyEl.innerHTML = `${Math.abs(orderQty)}${lots != null && lotSz != null ? `<div class="text-[8px] text-text-muted leading-tight">${lots}L×${lotSz}</div>` : ''}`
+        }
       }
 
       // Delta
@@ -731,7 +770,7 @@ function LiveMonitorPanel() {
       // Unrealized PnL
       const upEl = row.querySelector('[data-col="upnl"]') as HTMLElement | null
       if (upEl) {
-        const ut = f2(uPnl)
+        const ut = pSign(uPnl)
         if (upEl.textContent !== ut) { upEl.textContent = ut; flashEl(upEl) }
         upEl.style.color = pCol(uPnl) as string
       }
@@ -739,7 +778,7 @@ function LiveMonitorPanel() {
       // Realized PnL
       const rpEl = row.querySelector('[data-col="rpnl"]') as HTMLElement | null
       if (rpEl) {
-        const rt = f2(rPnl)
+        const rt = pSign(rPnl)
         if (rpEl.textContent !== rt) { rpEl.textContent = rt; flashEl(rpEl) }
         rpEl.style.color = pCol(rPnl) as string
       }
@@ -747,9 +786,20 @@ function LiveMonitorPanel() {
       // Total PnL
       const tpEl = row.querySelector('[data-col="tpnl"]') as HTMLElement | null
       if (tpEl) {
-        const ttpnl = f2(tPnl)
+        const ttpnl = pSign(tPnl)
         if (tpEl.textContent !== ttpnl) { tpEl.textContent = ttpnl; flashEl(tpEl) }
         tpEl.style.color = pCol(tPnl) as string
+      }
+
+      const stEl = row.querySelector('[data-col="status"]') as HTMLElement | null
+      if (stEl) {
+        const isActive = p.is_active !== false
+        const status = p.order_status ?? (isActive ? 'ACTIVE' : 'CLOSED')
+        const statusCls = status === 'FAILED' ? 'text-loss bg-loss/10'
+          : status === 'SIMULATED' ? 'text-yellow-400 bg-yellow-400/10'
+          : isActive ? 'text-profit bg-profit/10' : 'text-text-muted bg-bg-elevated'
+        if (stEl.textContent !== status) stEl.textContent = status
+        stEl.className = `text-[8px] px-1.5 py-0.5 rounded ${statusCls}`
       }
     }
   }
@@ -759,8 +809,8 @@ function LiveMonitorPanel() {
     const s = mon?.summary ?? {}
     const md = mon?.market_data ?? {}
     const allLegs: any[] = mon?.legs ?? []
-    const activeLegs = allLegs.filter((l: any) => l.is_active !== false)
-    const closedLegs = allLegs.filter((l: any) => l.is_active === false)
+    const activeLegs = stableLegs(allLegs.filter((l: any) => l.is_active !== false))
+    const closedLegs = stableLegs(allLegs.filter((l: any) => l.is_active === false))
     const totalPnl = Number(s.total_pnl ?? (Number(s.combined_pnl ?? 0) + Number(s.realised_pnl ?? s.cumulative_daily_pnl ?? 0)))
     const unrealised = Number(s.unrealised_pnl ?? s.combined_pnl ?? 0)
     const realised = Number(s.realised_pnl ?? s.cumulative_daily_pnl ?? 0)
@@ -818,7 +868,7 @@ function LiveMonitorPanel() {
           ].map(([label, val, field]) => `
             <div class="px-3 py-2 text-center" style="border-right:1px solid rgba(255,255,255,0.04)">
               <div class="text-[9px] text-text-muted uppercase tracking-wider">${label}</div>
-              <div class="text-[12px] font-bold font-mono mt-0.5 text-text-bright" data-field="${field}"
+                <div class="text-[12px] font-bold font-mono tabular-nums whitespace-nowrap mt-0.5 text-text-bright" data-field="${field}"
                    ${field === 'pnl' || field === 'pnlpct' ? `style="color:${pCol(totalPnl)}"` : ''}>${val}</div>
             </div>`).join('')}
         </div>
@@ -862,8 +912,8 @@ function LiveMonitorPanel() {
     const s = mon?.summary ?? {}
     const md = mon?.market_data ?? {}
     const allLegs: any[] = mon?.legs ?? []
-    const activeLegs = allLegs.filter((l: any) => l.is_active !== false)
-    const closedLegs = allLegs.filter((l: any) => l.is_active === false)
+    const activeLegs = stableLegs(allLegs.filter((l: any) => l.is_active !== false))
+    const closedLegs = stableLegs(allLegs.filter((l: any) => l.is_active === false))
     const isRunning = mon?.status === 'running'
     const totalPnl = Number(s.total_pnl ?? (Number(s.combined_pnl ?? 0) + Number(s.realised_pnl ?? s.cumulative_daily_pnl ?? 0)))
     const unrealised = Number(s.unrealised_pnl ?? s.combined_pnl ?? 0)
@@ -884,6 +934,14 @@ function LiveMonitorPanel() {
     if (sd) {
       sd.className = `w-2.5 h-2.5 rounded-full shrink-0 ${isRunning ? 'bg-profit live-dot-blink' : 'bg-text-muted/50'}`
       sd.style.boxShadow = isRunning ? '0 0 8px rgba(34,197,94,0.6)' : ''
+    }
+
+    const badge = card.querySelector('[data-field="abadge"]') as HTMLElement | null
+    if (badge) {
+      badge.innerHTML = `${isRunning ? '<span class="w-1.5 h-1.5 rounded-full bg-current live-dot-blink"></span>' : ''}${isRunning ? 'RUNNING' : 'STOPPED'}`
+      badge.style.background = isRunning ? 'rgba(34,197,94,0.15)' : 'rgba(var(--c-bg-elevated),1)'
+      badge.style.color = isRunning ? '#22c55e' : 'rgb(var(--c-text-muted))'
+      badge.style.border = isRunning ? '1px solid rgba(34,197,94,0.4)' : '1px solid rgba(var(--c-border),1)'
     }
 
     // Entry info
@@ -926,6 +984,8 @@ function LiveMonitorPanel() {
   }
 
   const load = useCallback(async () => {
+    if (pollInFlightRef.current) return
+    pollInFlightRef.current = true
     try {
       // 1) Get all running strategies
       const statuses: any[] = await api.strategyStatus()
@@ -934,8 +994,8 @@ function LiveMonitorPanel() {
       if (running.length === 0) {
         // No running strategies
         renderSummaryGrid([
-          ['Running Strategies', 0, ''],
-          ['Active Legs', 0, ''],
+          ['Running Strategies', 0, 'int'],
+          ['Active Legs', 0, 'int'],
           ["Day's PnL", 0, 'pnl'],
         ])
         if (groupsRef.current && prevGroupNamesRef.current !== '') {
@@ -953,6 +1013,7 @@ function LiveMonitorPanel() {
       for (const r of monResults) {
         if (r.status === 'fulfilled') monitorData.push(r.value)
       }
+      monitorData.sort((a, b) => a.name.localeCompare(b.name))
 
       // 3) Compute aggregate summary
       let totalPnl = 0, totalRealized = 0, totalUnrealized = 0
@@ -975,14 +1036,14 @@ function LiveMonitorPanel() {
 
       // 4) Render summary KPI grid (in-place updates)
       renderSummaryGrid([
-        ['Running', monitorData.length, ''],
-        ['Active Legs', totalActive, ''],
-        ['Closed Legs', totalClosed, ''],
+        ['Running', monitorData.length, 'int'],
+        ['Active Legs', totalActive, 'int'],
+        ['Closed Legs', totalClosed, 'int'],
         ["Day's PnL", totalPnl, 'pnl'],
         ['Unrealized', totalUnrealized, 'pnl'],
         ['Realized', totalRealized, 'pnl'],
-        ['Net Delta', totalDelta, ''],
-        ['Theta', totalTheta, 'pnl'],
+        ['Net Delta', totalDelta, 'float4'],
+        ['Theta', totalTheta, 'float2'],
       ])
 
       // 5) Render strategy group cards (Shoonya-style: build once, update in-place)
@@ -1010,6 +1071,7 @@ function LiveMonitorPanel() {
       // Network error — don't wipe the UI
       console.warn('Monitor poll error:', err)
     } finally {
+      pollInFlightRef.current = false
       setLoading(false)
       initializedRef.current = true
     }
@@ -1035,7 +1097,7 @@ function LiveMonitorPanel() {
         <div className="flex-1" />
         {autoRefresh && (
           <span className="text-[11px] text-text-muted flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-brand animate-ping inline-block" /> Polling 1.5s
+            <span className="w-1.5 h-1.5 rounded-full bg-brand animate-ping inline-block" /> Polling 1.0s
           </span>
         )}
         <button

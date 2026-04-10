@@ -668,7 +668,7 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
         _backoff = 1
         tick_count = 0
         _last_chain_refresh = 0.0
-        _CHAIN_REFRESH_INTERVAL = 30.0  # Refresh option chain data every 30 seconds
+        _CHAIN_REFRESH_INTERVAL = 5.0  # Refresh option chain data every 5 seconds
         while not stop_evt.is_set():
             try:
                 # Periodic option chain data refresh from broker
@@ -685,7 +685,7 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
                 tick_count += 1
                 _backoff = 1  # reset on clean tick
 
-                # Log heartbeat every 60 ticks (~2 min at 2s interval)
+                # Log heartbeat every 60 ticks (~1 min at 1s interval)
                 if tick_count % 60 == 0:
                     state = executor.state
                     logger.info(
@@ -709,8 +709,8 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
                     pass
                 _backoff = min(_backoff * 2, 60)
 
-            # Wait for next tick (2s default) or until stop is signalled
-            stop_evt.wait(timeout=max(2, _backoff))
+            # Wait for next tick (1s default) or until stop is signalled
+            stop_evt.wait(timeout=max(1, _backoff))
 
         # Clean shutdown — save final state
         if executor:
@@ -957,10 +957,20 @@ async def all_status(payload: dict = Depends(current_user)):
 
 def _executor_legs_to_positions(executor, safe_name: str) -> List[Dict[str, Any]]:
     """Convert executor state legs to OMS-compatible position dicts."""
+    import copy
     from trading.strategy_runner.models import Side as StratSide, InstrumentType, OptionType
     state = executor.state
+    legs_snapshot = copy.deepcopy(state.legs)
     positions: List[Dict[str, Any]] = []
-    for tag, leg in state.legs.items():
+    for tag, leg in sorted(
+        legs_snapshot.items(),
+        key=lambda item: (
+            0 if item[1].is_active else 1,
+            float(item[1].strike or 0),
+            str(item[1].side.value if item[1].side else ''),
+            str(item[0]),
+        ),
+    ):
         opt_type_str = leg.option_type.value if leg.option_type else ""
         strike_str = f"{int(leg.strike)}" if leg.strike else ""
         tsym = leg.trading_symbol or f"{leg.symbol}{leg.expiry}{strike_str}{opt_type_str}"

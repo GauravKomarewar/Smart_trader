@@ -46,6 +46,7 @@ async function request<T>(
 
 export const api = {
   get:    <T>(path: string)                       => request<T>(path),
+  getNoStore: <T>(path: string)                  => request<T>(path, { cache: 'no-store' }),
   post:   <T>(path: string, body: unknown)        => request<T>(path, { method: 'POST',  body: JSON.stringify(body) }),
   put:    <T>(path: string, body: unknown)        => request<T>(path, { method: 'PUT',   body: JSON.stringify(body) }),
   patch:  <T>(path: string, body: unknown)        => request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -230,13 +231,13 @@ export const api = {
   stopStrategy: (name: string) =>
     api.post<{ ok: boolean; name: string; status: string }>(`/strategy/stop/${encodeURIComponent(name)}`, {}),
   strategyStatus: () =>
-    api.get<any[]>('/strategy/status'),
+    api.getNoStore<any[]>('/strategy/status'),
 
   // ── Strategy Live Monitor ────────────────────────────────────────────────
   strategyMonitor: (name: string) =>
-    api.get<any>(`/strategy/monitor/${encodeURIComponent(name)}`),
+    api.getNoStore<any>(`/strategy/monitor/${encodeURIComponent(name)}`),
   strategyPositions: () =>
-    api.get<any[]>('/strategy/monitor'),
+    api.getNoStore<any[]>('/strategy/monitor'),
 
   // ── Broker & Symbol selection ────────────────────────────────────────────
   strategyBrokers: () =>
