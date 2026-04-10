@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -115,6 +116,8 @@ class FyersDataClient:
         self._lock   = threading.Lock()
         self._app_id = ""
         self._loaded = False
+        self._depth_cache: Dict[str, Dict[str, Any]] = {}
+        self._depth_backoff_until: Dict[str, float] = {}
 
     # ── init / reload ──────────────────────────────────────────────────────────
 
@@ -427,10 +430,21 @@ class FyersDataClient:
                 else:
                     fyers_sym = f"{exchange}:{symbol.upper().replace(' ', '')}-EQ"
         logger.info("Fyers depth: symbol=%s exchange=%s → fyers_sym=%s", symbol, exchange, fyers_sym)
+        now = time.monotonic()
+        if now < self._depth_backoff_until.get(fyers_sym, 0):
+            cached = self._depth_cache.get(fyers_sym)
+            if cached:
+                return cached
         try:
             resp = f.depth({"symbol": fyers_sym, "ohlcv_flag": 1})
             if resp.get("code") != 200:
                 logger.warning("Fyers depth error for %s: code=%s msg=%s", fyers_sym, resp.get("code"), resp.get("message", resp.get("s", "")))
+                if int(resp.get("code", 0) or 0) == 429:
+                    # Cool down frequent depth retries for this symbol and serve last good snapshot if present.
+                    self._depth_backoff_until[fyers_sym] = now + 5.0
+                    cached = self._depth_cache.get(fyers_sym)
+                    if cached:
+                        return cached
                 return None
             d = resp.get("d", {}).get(fyers_sym, resp.get("d", {}))
             # Normalize the response
@@ -440,7 +454,7 @@ class FyersDataClient:
                 bids.append({"price": b.get("price", 0), "qty": b.get("volume", b.get("quantity", 0)), "orders": b.get("number", 0)})
             for a in d.get("ask", d.get("asks", [])):
                 asks.append({"price": a.get("price", 0), "qty": a.get("volume", a.get("quantity", 0)), "orders": a.get("number", 0)})
-            return {
+            depth_payload = {
                 "symbol": symbol.upper(),
                 "exchange": exchange,
                 "bids": bids,
@@ -457,8 +471,14 @@ class FyersDataClient:
                 "upper_circuit": d.get("upper_ckt", d.get("upper_circuit", 0)),
                 "lower_circuit": d.get("lower_ckt", d.get("lower_circuit", 0)),
             }
+            self._depth_cache[fyers_sym] = depth_payload
+            self._depth_backoff_until[fyers_sym] = 0.0
+            return depth_payload
         except Exception as e:
             logger.warning("Fyers depth exception for %s: %s", fyers_sym, e)
+            cached = self._depth_cache.get(fyers_sym)
+            if cached:
+                return cached
             return None
 
     def get_option_chain(self, underlying: str, expiry_ts: str = "", exchange: str = "NFO") -> Optional[Dict]:
