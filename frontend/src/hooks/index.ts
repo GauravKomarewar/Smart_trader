@@ -8,6 +8,7 @@ import { ws, marketWs, type MarketTick } from '../lib/ws'
 import {
   useAuthStore, useDashboardStore, useMarketStore,
   useOptionChainStore, useToastStore, useBrokerAccountsStore,
+  usePositionsDetailStore, useStrategyStatusStore, useMarketDepthStore,
 } from '../stores'
 import type { BrokerAccountWS } from '../stores'
 
@@ -56,6 +57,9 @@ export function useLiveData() {
   const { isAuthenticated } = useAuthStore()
   const { setData } = useDashboardStore()
   const { setAccounts, setBrokerData } = useBrokerAccountsStore()
+  const { setPositions: setPositionsDetail } = usePositionsDetailStore()
+  const { setStatuses: setStrategyStatuses } = useStrategyStatusStore()
+  const { setData: setDepthData } = useMarketDepthStore()
   const connectedRef = useRef(false)
 
   useEffect(() => {
@@ -137,12 +141,40 @@ export function useLiveData() {
       }
     }
 
+    // New WS event handlers for real-time data
+    const onPositionsDetail = (data: any) => {
+      if (Array.isArray(data)) setPositionsDetail(data)
+    }
+    const onStrategyStatus = (data: any) => {
+      if (Array.isArray(data)) setStrategyStatuses(data)
+    }
+    const onMarketDepth = (data: any) => {
+      if (data) setDepthData(data)
+    }
+    const onOptionChain = (data: any) => {
+      if (data) {
+        const { setData: setOCData } = useOptionChainStore.getState()
+        setOCData(data)
+      }
+    }
+    const onBrokerStatus = (data: any) => {
+      if (data) {
+        const { setIsBrokerLive } = useAuthStore.getState()
+        setIsBrokerLive(data.isLive === true)
+      }
+    }
+
     ws.on('dashboard', onDashboard)
     ws.on('broker_accounts', onBrokerAccounts)
     ws.on('broker_data', onBrokerData)
     ws.on('risk_alerts', onRiskAlerts)
     ws.on('order_update', onOrderUpdate)
     ws.on('position_update', onPositionUpdate)
+    ws.on('positions_detail', onPositionsDetail)
+    ws.on('strategy_status', onStrategyStatus)
+    ws.on('market_depth', onMarketDepth)
+    ws.on('option_chain', onOptionChain)
+    ws.on('broker_status', onBrokerStatus)
     ws.connect(token)
     connectedRef.current = true
 
@@ -153,6 +185,11 @@ export function useLiveData() {
       ws.off('risk_alerts', onRiskAlerts)
       ws.off('order_update', onOrderUpdate)
       ws.off('position_update', onPositionUpdate)
+      ws.off('positions_detail', onPositionsDetail)
+      ws.off('strategy_status', onStrategyStatus)
+      ws.off('market_depth', onMarketDepth)
+      ws.off('option_chain', onOptionChain)
+      ws.off('broker_status', onBrokerStatus)
       ws.disconnect()
       connectedRef.current = false
     }
@@ -228,7 +265,7 @@ export function useAuthCheck() {
         setIsBrokerLive(status.isLive === true)
       } catch { /* silent */ }
     }
-    const t = setInterval(pollBroker, 30_000)
+    const t = setInterval(pollBroker, 60_000)  // WS pushes every ~5s, REST fallback at 60s
     return () => clearInterval(t)
   }, [])
 }
@@ -297,8 +334,8 @@ export function useMarketIndices() {
       setIndices([])
     }
     load()
-    // Reduced from 5s to 15s since WS ticks provide real-time updates
-    const t = setInterval(load, 15000)
+    // Reduced to 30s — WS ticks provide real-time index updates
+    const t = setInterval(load, 30000)
 
     // Subscribe index symbols to marketWs for instant LTP updates
     marketWs.connect()
@@ -389,10 +426,21 @@ export function useOptionChain() {
 
   useEffect(() => {
     let cancelled = false
+    const exchange = _UL_EXCHANGE[selectedUnderlying] || 'NSE'
+
+    // Subscribe via WS for real-time push
+    if (ws.isOpen) {
+      ws.subscribeOptionChain(selectedUnderlying, selectedExpiry || '', exchange)
+    }
+
     const load = async () => {
-      // Only show loading overlay on initial load (no data yet), not on polls
+      // Skip REST if WS pushed option chain recently (< 8s)
+      const lastWs = useOptionChainStore.getState()
+      if (lastWs.data && lastWs.data.underlying === selectedUnderlying) {
+        // WS is feeding data — only do REST as fallback at longer interval
+        return
+      }
       if (!existingData) setLoading(true)
-      const exchange = _UL_EXCHANGE[selectedUnderlying] || 'NSE'
       try {
         const data = await api.optionChain(selectedUnderlying, selectedExpiry || undefined, exchange) as any
         if (cancelled) return
@@ -404,9 +452,16 @@ export function useOptionChain() {
       if (cancelled) return
       setData({ underlying: selectedUnderlying, underlyingLtp: 0, expiry: selectedExpiry || '', expiries: [], pcr: 0, maxPainStrike: 0, rows: [] } as any)
     }
+
+    // Initial REST load (WS needs subscribe handshake first)
     load()
-    const t = setInterval(load, 3000)
-    return () => { cancelled = true; clearInterval(t) }
+    // REST fallback at 10s (WS pushes every ~3s)
+    const t = setInterval(load, 10_000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+      ws.unsubscribeOptionChain()
+    }
   }, [selectedUnderlying, selectedExpiry])
 }
 

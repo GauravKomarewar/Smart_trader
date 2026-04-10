@@ -12,6 +12,9 @@ type WsEventType =
   | 'broker_subscribed' | 'broker_unsubscribed' | 'pong'
   | 'risk_alerts' | 'risk_snapshot'
   | 'force_refresh'
+  | 'positions_detail' | 'strategy_status' | 'broker_status'
+  | 'option_chain' | 'option_chain_subscribed' | 'option_chain_unsubscribed'
+  | 'market_depth' | 'market_depth_subscribed' | 'market_depth_unsubscribed'
 
 interface WsMessage {
   type: WsEventType
@@ -97,6 +100,26 @@ class SmartTraderWS {
   unsubscribeBroker() {
     this._subscribedBroker = null
     this._send({ action: 'unsubscribe_broker' })
+  }
+
+  /** Subscribe to option chain data for a symbol */
+  subscribeOptionChain(symbol: string, expiry?: string, exchange?: string) {
+    this._send({ action: 'subscribe_option_chain', symbol, expiry: expiry || '', exchange: exchange || 'NSE' })
+  }
+
+  /** Unsubscribe from option chain feed */
+  unsubscribeOptionChain() {
+    this._send({ action: 'unsubscribe_option_chain' })
+  }
+
+  /** Subscribe to market depth for a symbol */
+  subscribeMarketDepth(symbol: string) {
+    this._send({ action: 'subscribe_market_depth', symbol })
+  }
+
+  /** Unsubscribe from market depth feed */
+  unsubscribeMarketDepth() {
+    this._send({ action: 'unsubscribe_market_depth' })
   }
 
   on<T>(event: WsEventType, handler: Subscriber<T>) {

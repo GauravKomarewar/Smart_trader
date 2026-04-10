@@ -8,11 +8,11 @@ import {
   LineStyle,
   type IChartApi, type ISeriesApi, type UTCTimestamp,
 } from 'lightweight-charts'
-import { useWatchlistStore, useUIStore } from '../stores'
+import { useWatchlistStore, useUIStore, useMarketDepthStore } from '../stores'
 import { useInstrumentSearch, useKeyboard } from '../hooks'
 import { cn, fmtNum, changeCls } from '../lib/utils'
 import { api } from '../lib/api'
-import { marketWs, type MarketTick } from '../lib/ws'
+import { ws, marketWs, type MarketTick } from '../lib/ws'
 import {
   computeSMA, computeEMA, computeBB, computeRSI, computeMACD,
   computeZigZag, computeUniversalLevels, computeHASmooth, computeSRBoxes,
@@ -426,15 +426,35 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
 function MarketDepthPanel({ symbol, exchange }: { symbol: string; exchange: string }) {
   const [depth, setDepth] = useState<{ bids: any[]; asks: any[]; total_buy_qty: number; total_sell_qty: number } | null>(null)
 
+  // WS-fed market depth (primary)
+  const wsDepth = useMarketDepthStore(s => s.data)
+  const wsLastUpdate = useMarketDepthStore(s => s.lastUpdate)
+
+  // Subscribe to WS depth feed
+  useEffect(() => {
+    if (ws.isOpen) ws.subscribeMarketDepth(symbol)
+    return () => { ws.unsubscribeMarketDepth() }
+  }, [symbol])
+
+  // Sync from WS store
+  useEffect(() => {
+    if (wsDepth && wsLastUpdate > 0) {
+      setDepth(wsDepth as any)
+    }
+  }, [wsDepth, wsLastUpdate])
+
   useEffect(() => {
     let mounted = true
     const fetchDepth = () => {
+      // Skip REST if WS pushed recently (< 6s)
+      const lastWs = useMarketDepthStore.getState().lastUpdate
+      if (lastWs && Date.now() - lastWs < 6_000) return
       api.marketDepth(symbol, exchange)
         .then(d => { if (mounted) setDepth(d as any) })
         .catch(() => {})
     }
     fetchDepth()
-    const iv = window.setInterval(fetchDepth, 2000)
+    const iv = window.setInterval(fetchDepth, 10_000)  // REST fallback at 10s — WS is primary (~2s)
     return () => { mounted = false; clearInterval(iv) }
   }, [symbol, exchange])
 

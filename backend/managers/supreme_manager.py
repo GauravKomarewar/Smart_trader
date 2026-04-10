@@ -672,7 +672,7 @@ class SupremeManager:
         try:
             from trading.persistence.repository import OrderRepository
             db_repo = OrderRepository(user_id, "__all__")
-            db_records = db_repo.get_all(limit=200)
+            db_records = db_repo.get_today(limit=200)  # today's orders only
             broker_ids = {o.get("orderId") for o in orders if o.get("orderId")}
             for i, rec in enumerate(db_records):
                 if rec.broker_order_id and rec.broker_order_id in broker_ids:

@@ -5,6 +5,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
 import { fmtINR, pnlClass, cn } from '../lib/utils'
+import { usePositionsDetailStore } from '../stores'
 import {
   ShieldAlert, TrendingDown, Target, RefreshCw, X, Edit2, Check,
   ArrowUp, ArrowDown, Loader2, Info,
@@ -42,7 +43,22 @@ export default function PositionManagerPage() {
   const [saving, setSaving]       = useState(false)
   const [exiting, setExiting]     = useState<string | null>(null)
 
+  // WS-fed positions (primary source)
+  const wsPositions = usePositionsDetailStore(s => s.positions)
+  const wsLastUpdate = usePositionsDetailStore(s => s.lastUpdate)
+
+  // Sync from WS store when WS pushes new data
+  useEffect(() => {
+    if (wsPositions.length > 0 || wsLastUpdate > 0) {
+      setPositions(wsPositions as Position[])
+      setLoading(false)
+    }
+  }, [wsPositions, wsLastUpdate])
+
   const load = useCallback(async () => {
+    // Skip REST if WS pushed recently (< 8s)
+    const lastWs = usePositionsDetailStore.getState().lastUpdate
+    if (lastWs && Date.now() - lastWs < 8_000) return
     try {
       const data = await api.get<Position[]>('/positions')
       setPositions(data)
@@ -55,7 +71,7 @@ export default function PositionManagerPage() {
 
   useEffect(() => {
     load()
-    const interval = setInterval(load, 5000)
+    const interval = setInterval(load, 30_000)  // REST fallback at 30s — WS is primary (~2s)
     return () => clearInterval(interval)
   }, [load])
 

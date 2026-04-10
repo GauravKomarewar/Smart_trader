@@ -376,3 +376,42 @@ export const useBrokerAccountsStore = create<BrokerAccountsStore>((set) => ({
   setAccounts: (accounts) => set({ accounts, lastUpdate: Date.now() }),
   setBrokerData: (brokerData) => set({ brokerData }),
 }))
+
+// ── Live Positions Store (fed by WS positions_detail) ──
+interface PositionsDetailStore {
+  positions: any[]
+  lastUpdate: number
+  setPositions: (p: any[]) => void
+}
+
+export const usePositionsDetailStore = create<PositionsDetailStore>((set) => ({
+  positions: [],
+  lastUpdate: 0,
+  setPositions: (positions) => set({ positions, lastUpdate: Date.now() }),
+}))
+
+// ── Live Strategy Status Store (fed by WS strategy_status) ──
+interface StrategyStatusStore {
+  statuses: any[]
+  lastUpdate: number
+  setStatuses: (s: any[]) => void
+}
+
+export const useStrategyStatusStore = create<StrategyStatusStore>((set) => ({
+  statuses: [],
+  lastUpdate: 0,
+  setStatuses: (statuses) => set({ statuses, lastUpdate: Date.now() }),
+}))
+
+// ── Live Market Depth Store (fed by WS market_depth) ──
+interface MarketDepthStore {
+  data: any | null
+  lastUpdate: number
+  setData: (d: any) => void
+}
+
+export const useMarketDepthStore = create<MarketDepthStore>((set) => ({
+  data: null,
+  lastUpdate: 0,
+  setData: (data) => set({ data, lastUpdate: Date.now() }),
+}))

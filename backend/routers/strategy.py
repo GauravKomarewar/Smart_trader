@@ -898,9 +898,8 @@ async def stop_strategy(name: str, payload: dict = Depends(current_user)):
     return {"ok": True, "name": safe, "status": "stopping"}
 
 
-@router.get("/strategy/status")
-async def all_status(payload: dict = Depends(current_user)):
-    """Return status of all saved strategies."""
+def _get_all_strategy_status() -> list:
+    """Return status of all saved strategies (usable from WS feed too)."""
     result: List[Dict[str, Any]] = []
     for path in sorted(SAVED_CONFIGS_DIR.glob("*.json")):
         if path.name.endswith(".schema.json"):
@@ -924,7 +923,6 @@ async def all_status(payload: dict = Depends(current_user)):
                 "started_at": entry.get("started_at"),
                 "error": entry.get("error"),
                 "file": path.name,
-                # Add executor state if running
                 "entered_today": (
                     entry.get("executor").state.entered_today
                     if is_alive and entry.get("executor") else False
@@ -945,6 +943,12 @@ async def all_status(payload: dict = Depends(current_user)):
         except Exception as exc:
             logger.warning("Status read error for %s: %s", path.name, exc)
     return result
+
+
+@router.get("/strategy/status")
+async def all_status(payload: dict = Depends(current_user)):
+    """Return status of all saved strategies."""
+    return _get_all_strategy_status()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

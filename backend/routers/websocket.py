@@ -252,10 +252,17 @@ async def live_feed_websocket(websocket: WebSocket):
     logger.info("WS feed connected for user=%s", user_id[:8])
 
     subscribed_broker: str | None = None  # config_id of broker to get filtered data for
+    subscribed_option_chain: dict | None = None  # {symbol, expiry, exchange}
+    subscribed_market_depth: str | None = None   # symbol for depth feed
     stop_event = asyncio.Event()
 
     _last_dash_hash: str = ""
     _last_acct_hash: str = ""
+    _last_pos_hash: str = ""
+    _last_oc_hash: str = ""
+    _last_depth_hash: str = ""
+    _last_strat_hash: str = ""
+    _last_broker_status_hash: str = ""
 
     def _quick_hash(obj) -> str:
         """Fast hash of a JSON-serializable object for dedup."""
@@ -345,6 +352,98 @@ async def live_feed_websocket(websocket: WebSocket):
                     except Exception as e:
                         logger.debug("WS feed broker_data error: %s", e)
 
+                # ── Strategy positions (every 2 cycles) ───────────────────
+                if cycle % 2 == 0:
+                    try:
+                        pos_rows = await asyncio.get_event_loop().run_in_executor(
+                            None, supreme.get_positions, user_id, None
+                        )
+                        pos_data = [r.get("data", r) if isinstance(r, dict) else r for r in pos_rows]
+                        pos_hash = _quick_hash(pos_data)
+                        if pos_hash != _last_pos_hash:
+                            _last_pos_hash = pos_hash
+                            await websocket.send_text(json.dumps({
+                                "type": "positions_detail",
+                                "data": pos_data,
+                                "ts": ts,
+                            }))
+                    except Exception as e:
+                        logger.debug("WS feed positions error: %s", e)
+
+                # ── Strategy status (every 3 cycles) ──────────────────────
+                if cycle % 3 == 0:
+                    try:
+                        from routers.strategy import _get_all_strategy_status
+                        strat_data = _get_all_strategy_status()
+                        strat_hash = _quick_hash(strat_data)
+                        if strat_hash != _last_strat_hash:
+                            _last_strat_hash = strat_hash
+                            await websocket.send_text(json.dumps({
+                                "type": "strategy_status",
+                                "data": strat_data,
+                                "ts": ts,
+                            }))
+                    except Exception as e:
+                        logger.debug("WS feed strategy_status error: %s", e)
+
+                # ── Broker status (every 5 cycles) ────────────────────────
+                if cycle % 5 == 0:
+                    try:
+                        from broker.multi_broker import registry
+                        live_sessions = registry.list_live_sessions(user_id)
+                        bstatus = {
+                            "isLive": bool(live_sessions),
+                            "brokers": list({s.broker_id for s in live_sessions}) if live_sessions else [],
+                            "count": len(live_sessions),
+                        }
+                        bs_hash = _quick_hash(bstatus)
+                        if bs_hash != _last_broker_status_hash:
+                            _last_broker_status_hash = bs_hash
+                            await websocket.send_text(json.dumps({
+                                "type": "broker_status",
+                                "data": bstatus,
+                                "ts": ts,
+                            }))
+                    except Exception as e:
+                        logger.debug("WS feed broker_status error: %s", e)
+
+                # ── Option chain (every 3 cycles, if subscribed) ──────────
+                if subscribed_option_chain and cycle % 3 == 0:
+                    try:
+                        from routers.market import get_option_chain as _oc_endpoint
+                        oc_data = await _oc_endpoint(
+                            subscribed_option_chain["symbol"],
+                            subscribed_option_chain.get("exchange", "NSE"),
+                            15,
+                            subscribed_option_chain.get("expiry") or None,
+                        )
+                        oc_hash = _quick_hash(oc_data)
+                        if oc_hash != _last_oc_hash:
+                            _last_oc_hash = oc_hash
+                            await websocket.send_text(json.dumps({
+                                "type": "option_chain",
+                                "data": oc_data,
+                                "ts": ts,
+                            }))
+                    except Exception as e:
+                        logger.debug("WS feed option_chain error: %s", e)
+
+                # ── Market depth (every 2 cycles, if subscribed) ──────────
+                if subscribed_market_depth and cycle % 2 == 0:
+                    try:
+                        from routers.market import get_market_depth as _depth_endpoint
+                        depth_data = await _depth_endpoint(subscribed_market_depth)
+                        depth_hash = _quick_hash(depth_data)
+                        if depth_hash != _last_depth_hash:
+                            _last_depth_hash = depth_hash
+                            await websocket.send_text(json.dumps({
+                                "type": "market_depth",
+                                "data": depth_data,
+                                "ts": ts,
+                            }))
+                    except Exception as e:
+                        logger.debug("WS feed market_depth error: %s", e)
+
                 # Heartbeat
                 await websocket.send_text(json.dumps({"type": "heartbeat", "ts": ts}))
 
@@ -397,6 +496,40 @@ async def live_feed_websocket(websocket: WebSocket):
 
             elif action == "ping":
                 await websocket.send_text(json.dumps({"type": "pong", "ts": int(time.time())}))
+
+            elif action == "subscribe_option_chain":
+                sym = msg.get("symbol", "")
+                if sym:
+                    subscribed_option_chain = {
+                        "symbol": sym.upper(),
+                        "expiry": msg.get("expiry", ""),
+                        "exchange": msg.get("exchange", "NSE"),
+                    }
+                    _last_oc_hash = ""  # force immediate push
+                    logger.info("WS feed: subscribe_option_chain %s user=%s", sym, user_id[:8])
+                    await websocket.send_text(json.dumps({
+                        "type": "option_chain_subscribed",
+                        "symbol": sym.upper(),
+                    }))
+
+            elif action == "unsubscribe_option_chain":
+                subscribed_option_chain = None
+                await websocket.send_text(json.dumps({"type": "option_chain_unsubscribed"}))
+
+            elif action == "subscribe_market_depth":
+                sym = msg.get("symbol", "")
+                if sym:
+                    subscribed_market_depth = sym.upper()
+                    _last_depth_hash = ""  # force immediate push
+                    logger.info("WS feed: subscribe_market_depth %s user=%s", sym, user_id[:8])
+                    await websocket.send_text(json.dumps({
+                        "type": "market_depth_subscribed",
+                        "symbol": sym.upper(),
+                    }))
+
+            elif action == "unsubscribe_market_depth":
+                subscribed_market_depth = None
+                await websocket.send_text(json.dumps({"type": "market_depth_unsubscribed"}))
 
     except WebSocketDisconnect:
         logger.info("WS feed disconnected user=%s", user_id[:8])

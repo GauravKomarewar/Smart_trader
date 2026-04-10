@@ -350,6 +350,25 @@ class OrderRepository:
         finally:
             conn.close()
 
+    def get_today(self, limit: int = 200) -> List[OrderRecord]:
+        """Return only today's orders (created_at >= CURRENT_DATE in IST)."""
+        conn = get_trading_conn()
+        try:
+            cur = get_trading_cursor(conn)
+            cur.execute(
+                """
+                SELECT * FROM orders
+                WHERE user_id = %s
+                  AND created_at >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+                ORDER BY updated_at DESC
+                LIMIT %s
+                """,
+                (self.user_id, limit),
+            )
+            return [_row_to_record(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
     def get_open_orders_by_strategy(self, strategy_name: str) -> List[OrderRecord]:
         conn = get_trading_conn()
         try:
