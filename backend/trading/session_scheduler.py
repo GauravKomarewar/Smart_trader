@@ -149,15 +149,17 @@ def _shoonya_quick_auth(creds: dict, log) -> str | None:
             url = f"{host}/QuickAuth"
             try:
                 resp = requests.post(url, data="jData=" + _json.dumps(payload), timeout=15)
-                if resp.status_code == 200:
-                    result = _json.loads(resp.text)
-                    if result.get("stat") == "Ok":
-                        return result.get("susertoken", "")
-                    emsg = result.get("emsg", "")
-                    if any(k in emsg.lower() for k in ["invalid", "credential", "blocked"]):
-                        log.warning("QuickAuth rejected: %s", emsg)
-                        return None
-            except Exception:
+                result = _json.loads(resp.text)
+                if result.get("stat") == "Ok":
+                    return result.get("susertoken", "")
+                emsg = result.get("emsg", "")
+                log.warning("QuickAuth %s: status=%d stat=%s emsg=%s",
+                            host.split("//")[1].split("/")[0], resp.status_code,
+                            result.get("stat"), emsg)
+                if any(k in emsg.lower() for k in ["invalid", "credential", "blocked"]):
+                    return None
+            except Exception as exc:
+                log.debug("QuickAuth %s error: %s", host, exc)
                 continue
         if attempt < 2:
             time.sleep(5)

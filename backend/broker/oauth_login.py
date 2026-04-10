@@ -80,7 +80,13 @@ _OAUTH_LOGIN_URL_TPL = (
     "?api_key={vendor_code}&route_to={user_id}+s+apikey"
 )
 _GECKODRIVER_PATH = "/usr/local/bin/geckodriver"
-_FIREFOX_BINARY = "/usr/lib/firefox/firefox"
+
+# Firefox binary — prefer standard path, fall back to snap
+_FIREFOX_BINARY = (
+    "/usr/lib/firefox/firefox"
+    if os.path.isfile("/usr/lib/firefox/firefox")
+    else "/snap/firefox/current/usr/lib/firefox/firefox"
+)
 
 
 # ── Credential helpers ───────────────────────────────────────────────────────
