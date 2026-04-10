@@ -837,38 +837,9 @@ function DiagnosticsSection({ toast, accounts, selectedConfigId }: {
   accounts: BrokerAccountWS[]
   selectedConfigId: string | null
 }) {
-  const [health, setHealth] = useState<{ label: string; status: 'ok' | 'warn' | 'error'; detail: string }[]>([])
-  const [healthLoading, setHealthLoading] = useState(false)
   const [diagCall, setDiagCall] = useState<DiagCall>('funds')
   const [diagResult, setDiagResult] = useState<any>(null)
   const [diagRunning, setDiagRunning] = useState(false)
-
-  useEffect(() => { runHealthChecks() }, [])
-
-  const runHealthChecks = async () => {
-    setHealthLoading(true)
-    const checks: typeof health = []
-    const t0 = Date.now()
-    try {
-      const res = await fetch('/api/health')
-      const ms = Date.now() - t0
-      if (res.ok) {
-        const body = await res.json()
-        checks.push({ label: 'Backend API', status: 'ok', detail: `Responding in ${ms}ms · mode=${body.mode}` })
-        checks.push({
-          label: 'Broker Sessions',
-          status: (body.active_accounts ?? 0) > 0 ? 'ok' : 'warn',
-          detail: `${body.active_accounts ?? 0} account(s) connected`,
-        })
-      } else {
-        checks.push({ label: 'Backend API', status: 'error', detail: `HTTP ${res.status}` })
-      }
-    } catch (e: any) {
-      checks.push({ label: 'Backend API', status: 'error', detail: String(e) })
-    }
-    setHealth(checks)
-    setHealthLoading(false)
-  }
 
   const runDiagnose = async () => {
     if (!selectedConfigId) { toast('Select a broker account first', 'error'); return }
@@ -895,34 +866,6 @@ function DiagnosticsSection({ toast, accounts, selectedConfigId }: {
 
   return (
     <div className="p-4 space-y-4">
-      {/* System Health */}
-      <div className="bg-bg-elevated border border-border rounded-lg p-4">
-        <div className="flex items-center justify-between mb-3">
-          <span className="text-[12px] font-semibold text-text-bright">System Health</span>
-          <button onClick={runHealthChecks} disabled={healthLoading}
-            className="flex items-center gap-1 text-[11px] text-text-muted hover:text-text-sec">
-            <RefreshCw className={cn('w-3 h-3', healthLoading && 'animate-spin')} /> Refresh
-          </button>
-        </div>
-        <div className="space-y-2.5">
-          {health.length === 0 && healthLoading && (
-            <div className="text-[11px] text-text-muted flex items-center gap-2">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Checking…
-            </div>
-          )}
-          {health.map(c => (
-            <div key={c.label} className="flex items-center gap-3">
-              {STATUS_ICON[c.status]}
-              <div className="flex-1 min-w-0">
-                <div className="text-[12px] font-medium text-text-sec">{c.label}</div>
-                <div className="text-[10px] text-text-muted truncate">{c.detail}</div>
-              </div>
-              <span className={cn('badge', STATUS_BADGE[c.status])}>{c.status}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
       {/* Broker API Inspector */}
       <div className="bg-bg-elevated border border-border rounded-lg p-4">
         <div className="flex items-center gap-2 mb-4">

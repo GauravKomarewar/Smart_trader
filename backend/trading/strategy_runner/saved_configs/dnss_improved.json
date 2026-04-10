@@ -12,7 +12,9 @@
     "order_type": "MARKET",
     "lots": 1,
     "paper_mode": true,
-    "test_mode": true
+    "test_mode": true,
+    "underlying": "NIFTY",
+    "exchange": "NFO"
   },
   "timing": {
     "entry_window_start": "09:18",

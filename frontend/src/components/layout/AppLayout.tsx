@@ -24,11 +24,8 @@ const NAV: NavItem[] = [
   { to: '/app/option-chain', icon: Layers,          label: 'Option Chain'  },
   { to: '/app/watchlist',    icon: BookOpen,        label: 'Watchlist'     },
   { to: '/app/strategies',      icon: GitBranch,  label: 'Strategies'    },
-  { to: '/app/positions',       icon: ShieldCheck, label: 'Positions'     },
-  { to: '/app/greeks',          icon: Activity,    label: 'Greeks'        },
   { to: '/app/analytics',        icon: BarChart2,   label: 'Analytics'      },
   { to: '/app/broker-accounts',  icon: Activity,    label: 'Brokers'        },
-  { to: '/app/broker-diagnostics', icon: Activity,  label: 'Diagnostics'    },
   { to: '/app/settings',         icon: Settings,    label: 'Settings'       },
 ]
 

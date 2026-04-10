@@ -48,9 +48,9 @@ export default function OptionChainPage() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="p-4 space-y-3">
-        {/* Controls row */}
+        {/* Controls row — all in single line */}
         <div className="flex items-center gap-3 flex-wrap">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <Layers className="w-4 h-4 text-brand" />
             <span className="text-[13px] font-semibold text-text-bright">Option Chain</span>
           </div>
@@ -59,7 +59,7 @@ export default function OptionChainPage() {
           <select
             value={selectedUnderlying}
             onChange={e => setUnderlying(e.target.value)}
-            className="select-base w-36 text-[12px] py-1.5"
+            className="select-base w-32 text-[12px] py-1"
           >
             {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
           </select>
@@ -69,10 +69,9 @@ export default function OptionChainPage() {
             <select
               value={selectedExpiry || data.expiry}
               onChange={e => setExpiry(e.target.value)}
-              className="select-base w-44 text-[12px] py-1.5"
+              className="select-base w-40 text-[12px] py-1"
             >
               {data.expiries.map(e => {
-                // Format ISO date "2026-04-07" → "07 Apr 2026"
                 try {
                   const d = new Date(e + 'T00:00:00')
                   const label = d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
@@ -84,24 +83,24 @@ export default function OptionChainPage() {
             </select>
           )}
 
-          {/* Stats */}
+          {/* Stats — inline in same row */}
           {data && (
             <>
-              <div className="text-[11px] text-text-muted">
-                Spot: <span className="font-mono text-text-bright font-bold">{fmtNum(data.underlyingLtp)}</span>
-              </div>
               {(data as any).source === 'scriptmaster' && (
-                <span className="text-[10px] px-2 py-0.5 rounded bg-warning/15 text-warning font-medium">Offline — ScriptMaster data</span>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-warning/15 text-warning font-medium">Offline</span>
               )}
-              <div className="text-[11px] text-text-muted">
+              <span className="text-[11px] text-text-muted">
+                Spot: <span className="font-mono text-text-bright font-bold">{fmtNum(data.underlyingLtp)}</span>
+              </span>
+              <span className="text-[11px] text-text-muted">
                 PCR: <span className={cn('font-mono font-semibold',
                   data.pcr > 1.2 ? 'text-profit' : data.pcr < 0.7 ? 'text-loss' : 'text-warning')}>
                   {data.pcr.toFixed(2)}
                 </span>
-              </div>
-              <div className="text-[11px] text-text-muted">
+              </span>
+              <span className="text-[11px] text-text-muted">
                 Max Pain: <span className="font-mono text-warning">{data.maxPainStrike}</span>
-              </div>
+              </span>
             </>
           )}
 

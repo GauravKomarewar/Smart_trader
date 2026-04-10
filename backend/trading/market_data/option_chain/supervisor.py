@@ -60,7 +60,7 @@ class OptionChainSupervisor:
         self,
         bot,
         store: Optional[OptionChainStore] = None,
-        poll_interval: float = 30.0,
+        poll_interval: float = 5.0,
     ):
         self.bot           = bot
         self.store         = store or OptionChainStore()

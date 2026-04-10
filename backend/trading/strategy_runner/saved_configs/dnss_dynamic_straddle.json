@@ -13,8 +13,8 @@
     "lots": 1,
     "paper_mode": true,
     "test_mode": "SUCCESS",
-    "underlying": "CRUDEOIL",
-    "exchange": "MCX"
+    "underlying": "BANKNIFTY",
+    "exchange": "NFO"
   },
   "timing": {
     "entry_window_start": "09:18",

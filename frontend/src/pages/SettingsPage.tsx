@@ -15,20 +15,20 @@ import {
 } from 'lucide-react'
 
 const TABS = [
-  { id: 'profile',    label: 'Profile',         icon: User },
   { id: 'brokers',    label: 'Broker Accounts',  icon: Link2 },
+  { id: 'webhook',    label: 'Webhooks',         icon: Webhook },
   { id: 'market',     label: 'Market Data',      icon: Database },
   { id: 'optiondata', label: 'Option Chain Data', icon: BarChart2 },
   { id: 'theme',      label: 'Theme & Display',  icon: Palette },
   { id: 'copy',       label: 'Copy Trading',     icon: Copy },
-  { id: 'webhook',    label: 'Webhooks',         icon: Webhook },
+  { id: 'profile',    label: 'Profile',         icon: User },
 ] as const
 type TabId = (typeof TABS)[number]['id']
 
 export default function SettingsPage() {
   const { tab } = useParams<{ tab?: string }>()
   const navigate = useNavigate()
-  const active = (tab ?? 'profile') as TabId
+  const active = (tab ?? 'brokers') as TabId
 
   return (
     <div className="h-full flex flex-col overflow-hidden">

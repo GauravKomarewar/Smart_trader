@@ -45,16 +45,10 @@ const EMPTY_DASHBOARD: DashboardData = {
   },
 }
 
-function hasMeaningfulDashboard(data: any): boolean {
-  if (!data) return false
-  const summary = data.accountSummary ?? {}
-  return Boolean(
-    (data.positions && data.positions.length)
-    || (data.orders && data.orders.length)
-    || (data.holdings && data.holdings.length)
-    || (data.trades && data.trades.length)
-    || Object.values(summary).some(v => Number(v) !== 0)
-  )
+function isValidDashboardPayload(data: any): boolean {
+  if (!data || typeof data !== 'object') return false
+  // Accept any structured response — backend is authoritative, even with empty arrays
+  return 'positions' in data || 'orders' in data || 'holdings' in data || 'accountSummary' in data
 }
 
 // ── WebSocket live data — connects on auth, pushes to stores ──
@@ -86,11 +80,7 @@ export function useLiveData() {
 
     // Handlers
     const onDashboard = (data: any) => {
-      if (!data) return
-      const current = useDashboardStore.getState().data
-      if (current && hasMeaningfulDashboard(current) && !hasMeaningfulDashboard(data)) {
-        return
-      }
+      if (!isValidDashboardPayload(data)) return
       // Always accept — backend guarantees consistent data from SupremeManager  
       setData(data as DashboardData)
     }
@@ -264,10 +254,7 @@ export function useDashboardData() {
     if (lastWs && Date.now() - lastWs < 10_000) return
     try {
       const data = await api.liveDashboard() as DashboardData
-      const current = useDashboardStore.getState().data
-      if (current && hasMeaningfulDashboard(current) && !hasMeaningfulDashboard(data)) {
-        return
-      }
+      if (!isValidDashboardPayload(data)) return
       if ((data as any).source === 'demo' && !(data as any).positions?.length) {
         setData({ ...data, positions: [], orders: [], holdings: [], trades: [] } as DashboardData)
       } else {
@@ -418,7 +405,7 @@ export function useOptionChain() {
       setData({ underlying: selectedUnderlying, underlyingLtp: 0, expiry: selectedExpiry || '', expiries: [], pcr: 0, maxPainStrike: 0, rows: [] } as any)
     }
     load()
-    const t = setInterval(load, 10000)
+    const t = setInterval(load, 3000)
     return () => { cancelled = true; clearInterval(t) }
   }, [selectedUnderlying, selectedExpiry])
 }

@@ -254,8 +254,6 @@ async def live_feed_websocket(websocket: WebSocket):
     subscribed_broker: str | None = None  # config_id of broker to get filtered data for
     stop_event = asyncio.Event()
 
-    _last_good_dashboard: dict | None = None
-    _last_good_accounts: list | None = None
     _last_dash_hash: str = ""
     _last_acct_hash: str = ""
 
@@ -267,7 +265,7 @@ async def live_feed_websocket(websocket: WebSocket):
     async def _push_loop():
         """Background task: read all views from PostgreSQL via SupremeManager.
         Wakes instantly when event_bus signals new data (order/position change)."""
-        nonlocal _last_good_dashboard, _last_good_accounts, _last_dash_hash, _last_acct_hash
+        nonlocal _last_dash_hash, _last_acct_hash
         from managers.supreme_manager import supreme
         from core.event_bus import event_bus
         cycle = 0
@@ -281,21 +279,7 @@ async def live_feed_websocket(websocket: WebSocket):
                     dashboard = await asyncio.get_event_loop().run_in_executor(
                         None, supreme.get_dashboard, user_id
                     )
-                    # Determine if this is a meaningful data push:
-                    # Accept if there are ANY positions, orders, non-zero funds,
-                    # or if it has explicit broker data (even with zero values).
-                    acct = dashboard.get("accountSummary", {})
-                    has_data = bool(
-                        dashboard.get("positions")
-                        or dashboard.get("orders")
-                        or any(v != 0 for v in acct.values())
-                        or dashboard.get("holdings")
-                        or dashboard.get("trades")
-                    )
-                    if has_data:
-                        _last_good_dashboard = dashboard
-                    elif _last_good_dashboard:
-                        dashboard = _last_good_dashboard
+                    # Always trust backend data — SupremeManager is authoritative
                     # Only push if data actually changed (anti-flicker)
                     dash_hash = _quick_hash(dashboard)
                     if dash_hash != _last_dash_hash:
@@ -334,15 +318,6 @@ async def live_feed_websocket(websocket: WebSocket):
                         accounts = await asyncio.get_event_loop().run_in_executor(
                             None, supreme.get_broker_accounts, user_id
                         )
-                        has_account_data = any(
-                            (a.get("cash") or a.get("available_margin") or
-                             a.get("total_balance") or a.get("used_margin"))
-                            for a in accounts
-                        )
-                        if has_account_data:
-                            _last_good_accounts = accounts
-                        elif _last_good_accounts:
-                            accounts = _last_good_accounts
                         # Only push if accounts data actually changed (anti-flicker)
                         acct_hash = _quick_hash(accounts)
                         if acct_hash != _last_acct_hash:
