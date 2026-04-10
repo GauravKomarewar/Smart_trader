@@ -91,3 +91,13 @@ When `SHOONYA_*` credentials are not configured:
 - Orders are acknowledged but not sent to broker
 - WebSocket pushes simulated ticks every 1 second
 - Auth status shows `mode: "demo"`
+
+## Symbol Policy (Mandatory)
+
+Smart Trader UI must always use canonical trading symbols (normalized, broker-agnostic).
+
+- UI/watchlist/order forms must store and pass normalized symbols.
+- Backend must resolve symbols through Symbols DB first, then convert to broker format.
+- Direct hardcoded symbol formatting should only be fallback, never first choice.
+
+Reference policy and audit checklist: `backend/SYMBOL_NORMALIZATION_POLICY.md`

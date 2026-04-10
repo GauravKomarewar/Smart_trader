@@ -235,18 +235,16 @@ export default function ChartModal() {
         // 3) HA Smooth overlay + Bull/Bear power
         if (on('HA Smooth')) {
           const ha = computeHASmooth(candles, 2)
-          // Smoothed HA close as line
-          chart.addSeries(LineSeries, { color: IND_COLORS['HASmooth'], lineWidth: 2, lastValueVisible: false, priceLineVisible: false })
-            .setData(ha.candles.map(c => ({ time: c.time as UTCTimestamp, value: c.close })))
-          // Bull / Bear power in volume area
-          if (subChart || !on('RSI(14)') && !on('MACD')) {
-            const target = subChart ?? chart
-            const pScale = subChart ? undefined : 'power'
-            const bullS = target.addSeries(HistogramSeries, { color: '#22c55e', lastValueVisible: false, priceLineVisible: false, ...(pScale ? { priceScaleId: pScale } : {}) })
-            bullS.setData(ha.bullPower.map(p => ({ time: p.time as UTCTimestamp, value: p.value, color: p.color })))
-            const bearS = target.addSeries(HistogramSeries, { color: '#f43f5e', lastValueVisible: false, priceLineVisible: false, ...(pScale ? { priceScaleId: pScale } : {}) })
-            bearS.setData(ha.bearPower.map(p => ({ time: p.time as UTCTimestamp, value: p.value, color: p.color })))
-            if (pScale) target.priceScale(pScale).applyOptions({ scaleMargins: { top: 0.9, bottom: 0 } })
+          // Strength/reference overlay from HA smooth computation
+          const validStrength = ha.strength.filter(p => isFinite(p.value))
+          const validRef = ha.reference.filter(p => isFinite(p.value))
+          if (validStrength.length > 0) {
+            chart.addSeries(LineSeries, { color: IND_COLORS['HASmooth'], lineWidth: 2, lastValueVisible: true, priceLineVisible: false })
+              .setData(validStrength.map(p => ({ time: p.time as UTCTimestamp, value: p.value, color: p.color })))
+          }
+          if (validRef.length > 0) {
+            chart.addSeries(LineSeries, { color: '#9ca3af', lineWidth: 1, lineStyle: LineStyle.Dashed, lastValueVisible: false, priceLineVisible: false })
+              .setData(validRef.map(p => ({ time: p.time as UTCTimestamp, value: p.value })))
           }
         }
 

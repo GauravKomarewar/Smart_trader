@@ -319,6 +319,64 @@ def lookup_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Optiona
         return None
 
 
+def resolve_symbol_for_broker(
+    symbol: str,
+    exchange: str = "NSE",
+    broker: str = "fyers",
+) -> tuple[str, str, str]:
+    """
+    Resolve a user-facing symbol to canonical + broker-specific forms.
+
+    Resolution order (strict):
+      1) symbols DB exact lookup (with/without exchange prefix)
+      2) symbols DB lookup on compact symbol (spaces removed)
+      3) deterministic fallback conversion
+
+    Returns:
+      (canonical_trading_symbol, resolved_exchange, broker_symbol)
+    """
+    raw = str(symbol or "").strip()
+    if not raw:
+        ex = (exchange or "NSE").upper()
+        return "", ex, ""
+
+    ex_hint = (exchange or "").upper().strip()
+    clean = raw
+    if ":" in raw:
+        pfx, rest = raw.split(":", 1)
+        if not ex_hint:
+            ex_hint = pfx.upper().strip()
+        clean = rest.strip()
+
+    clean_compact = clean.upper().replace(" ", "")
+
+    inst = (
+        lookup_by_trading_symbol(raw)
+        or lookup_by_trading_symbol(clean)
+        or lookup_by_trading_symbol(clean_compact)
+    )
+    if not inst and ex_hint:
+        inst = (
+            lookup_by_trading_symbol(raw, ex_hint)
+            or lookup_by_trading_symbol(clean, ex_hint)
+            or lookup_by_trading_symbol(clean_compact, ex_hint)
+            or lookup_by_trading_symbol(f"{ex_hint}:{clean_compact}", ex_hint)
+        )
+
+    if inst:
+        resolved_exchange = (inst.exchange or ex_hint or "NSE").upper()
+        canonical = inst.trading_symbol
+        if broker == "fyers":
+            broker_symbol = inst.fyers_symbol or to_broker_symbol(canonical, resolved_exchange, broker)
+        else:
+            broker_symbol = to_broker_symbol(canonical, resolved_exchange, broker)
+        return canonical, resolved_exchange, broker_symbol
+
+    resolved_exchange = (ex_hint or "NSE").upper()
+    canonical = clean_compact
+    return canonical, resolved_exchange, to_broker_symbol(canonical, resolved_exchange, broker)
+
+
 def lookup_instrument(
     symbol: str,
     exchange: str = "NFO",

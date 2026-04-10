@@ -34,6 +34,13 @@ function quoteKey(symbol: string, exchange: string): string {
   return `${exchange}:${normSym(symbol)}`
 }
 
+function wsSubSymbol(symbol: string, exchange?: string): string {
+  if (!symbol) return ''
+  if (symbol.includes(':')) return symbol
+  const ex = (exchange || detectExchange(symbol) || 'NSE').toUpperCase()
+  return `${ex}:${symbol}`
+}
+
 /** Normalize a symbol for comparison: strip exchange prefix, suffixes, and spaces. */
 function normSym(s: string): string {
   const stripped = s.toUpperCase().split(':').pop() ?? s.toUpperCase()
@@ -228,7 +235,11 @@ function WatchlistPanel({ selectedId, onSelect }: {
   useEffect(() => {
     const items = activeWL?.items ?? []
     if (items.length) {
-      marketWs.subscribe(items.map(i => i.tradingsymbol || i.symbol))
+      marketWs.subscribe(
+        items
+          .map(i => wsSubSymbol(i.tradingsymbol || i.symbol, i.exchange))
+          .filter(Boolean)
+      )
     }
   }, [activeWL?.items])
 
@@ -367,7 +378,7 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
 
   useEffect(() => {
     fetchRestQuote(tickSym, item.exchange).then(() => setQuote(getLiveQuote(tickSym, item.exchange)))
-    marketWs.subscribe([tickSym])
+    marketWs.subscribe([wsSubSymbol(tickSym, item.exchange)])
     return marketWs.onTick((tick) => {
       if (normSym(tick.symbol) === normSym(tickSym)) {
         const q = { ltp: tick.ltp, changePct: tick.changePct ?? 0, change: tick.change ?? 0, volume: tick.volume ?? 0 }
@@ -432,8 +443,17 @@ function MarketDepthPanel({ symbol, exchange }: { symbol: string; exchange: stri
 
   // Subscribe to WS depth feed
   useEffect(() => {
-    if (ws.isOpen) ws.subscribeMarketDepth(symbol)
-    return () => { ws.unsubscribeMarketDepth() }
+    let alive = true
+    const trySubscribe = () => {
+      if (!alive) return
+      if (ws.isOpen) {
+        ws.subscribeMarketDepth(symbol)
+        return
+      }
+      window.setTimeout(trySubscribe, 300)
+    }
+    trySubscribe()
+    return () => { alive = false; ws.unsubscribeMarketDepth() }
   }, [symbol])
 
   // Sync from WS store
@@ -446,15 +466,15 @@ function MarketDepthPanel({ symbol, exchange }: { symbol: string; exchange: stri
   useEffect(() => {
     let mounted = true
     const fetchDepth = () => {
-      // Skip REST if WS pushed recently (< 6s)
+      // Skip REST if WS pushed recently (< 1s)
       const lastWs = useMarketDepthStore.getState().lastUpdate
-      if (lastWs && Date.now() - lastWs < 6_000) return
+      if (lastWs && Date.now() - lastWs < 1_000) return
       api.marketDepth(symbol, exchange)
         .then(d => { if (mounted) setDepth(d as any) })
         .catch(() => {})
     }
     fetchDepth()
-    const iv = window.setInterval(fetchDepth, 10_000)  // REST fallback at 10s — WS is primary (~2s)
+    const iv = window.setInterval(fetchDepth, 1_000)  // 1s REST fallback when WS misses
     return () => { mounted = false; clearInterval(iv) }
   }, [symbol, exchange])
 
@@ -588,7 +608,7 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
   // Live tick subscription for quote header
   useEffect(() => {
     fetchRestQuote(symbol, exchange).then(() => setQuote(getLiveQuote(symbol, exchange)))
-    marketWs.subscribe([symbol])
+    marketWs.subscribe([wsSubSymbol(symbol, exchange)])
     return marketWs.onTick((tick: MarketTick) => {
       if (normSym(tick.symbol) === normSym(symbol)) {
         setQuote({ ltp: tick.ltp, changePct: tick.changePct ?? 0, change: tick.change ?? 0, volume: tick.volume ?? 0 })
@@ -765,7 +785,7 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
           if (on('PSAR')) {
             const psar = computePSAR(indData)
             if (psar.length) {
-              chart.addSeries(LineSeries, { color: IND_COLORS['PSAR'], lineWidth: 0, pointMarkersVisible: true, lastValueVisible: false, priceLineVisible: false })
+              chart.addSeries(LineSeries, { color: IND_COLORS['PSAR'], lineWidth: 1, pointMarkersVisible: true, lastValueVisible: false, priceLineVisible: false })
                 .setData(psar.map(p => ({ time: p.time as UTCTimestamp, value: p.value })))
             }
           }
@@ -912,7 +932,7 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
         const pts = p1.time < p2.time
           ? [{ time: p1.time as UTCTimestamp, value: p1.price }, { time: p2.time as UTCTimestamp, value: p2.price }]
           : [{ time: p2.time as UTCTimestamp, value: p2.price }, { time: p1.time as UTCTimestamp, value: p1.price }]
-        chart.addSeries(LineSeries, { color: '#2962ff', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false }).setData(pts)
+        chart.addSeries(LineSeries, { color: '#2962ff', lineWidth: 2, priceLineVisible: false, lastValueVisible: false }).setData(pts)
         drawClicksRef.current = []; setDrawTool('none'); setDrawHint(''); return
       }
     }

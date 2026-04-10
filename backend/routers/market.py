@@ -11,7 +11,7 @@ from broker.shoonya_client import get_session, _make_demo_quote
 from broker.symbol_normalizer import (
     search_instruments, get_expiries, get_lot_size,
     enrich_option_chain_row, to_broker_symbol, from_broker_symbol,
-    lookup_by_trading_symbol, expiry_to_iso,
+    lookup_by_trading_symbol, expiry_to_iso, resolve_symbol_for_broker,
     build_option_chain_from_scriptmaster,
 )
 
@@ -34,6 +34,32 @@ def _detect_exchange(sym: str, fallback: str = "NSE") -> str:
     if re.search(r'\d+FUT$', upper):
         return "NFO"
     return fallback
+
+
+def _as_broker_symbol(sym: str, exchange: str) -> str:
+    """Build a best-effort broker symbol when scriptmaster lookup is unavailable."""
+    s = sym.upper().replace(" ", "")
+    ex = (exchange or "NSE").upper()
+    # Dated derivatives like GOLDPETAL30APR26 / NIFTY24APR25.
+    # If CE/PE missing and FUT missing, treat as futures contract.
+    if re.search(r"\d{1,2}[A-Z]{3}\d{2}$", s) and not re.search(r"(CE|PE)$", s) and not s.endswith("FUT"):
+        if ex in ("NFO", "BFO", "MCX"):
+            return f"{ex}:{s}FUT"
+    if ex in ("NFO", "BFO", "MCX"):
+        return f"{ex}:{s}"
+    if ex in ("NSE", "BSE"):
+        return f"{ex}:{s}-EQ"
+    return f"{ex}:{s}"
+
+
+def _resolve_fyers_symbol(sym: str, exchange: str) -> tuple[str, str, Optional[object]]:
+    """Resolve user symbol to canonical Fyers symbol via symbols DB first."""
+    resolved_exchange = _detect_exchange(sym, exchange)
+    canonical, ex, fyers_sym = resolve_symbol_for_broker(sym, resolved_exchange, "fyers")
+    inst = lookup_by_trading_symbol(canonical, ex) or lookup_by_trading_symbol(f"{ex}:{canonical}", ex)
+    if not fyers_sym or ":" not in fyers_sym:
+        fyers_sym = _as_broker_symbol(sym, ex)
+    return fyers_sym, ex, inst
 
 INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
 NIFTY50_SYMBOLS = [
@@ -116,32 +142,12 @@ async def get_quote(
     fyers = get_fyers_client()
     sym_upper = symbol.upper().strip()
 
-    # Auto-detect exchange for option/future symbols
-    effective_exchange = _detect_exchange(sym_upper, exchange)
-
     if fyers.is_live:
         # 1) Check index alias table (handles "NIFTY 50", "NIFTY BANK" etc.)
         fyers_sym = _INDEX_ALIAS.get(sym_upper)
         inst = None
         if not fyers_sym:
-            # 2) Try ScriptMaster lookup for proper Fyers symbol
-            inst = lookup_by_trading_symbol(sym_upper)
-            if not inst:
-                inst = lookup_by_trading_symbol(f"{effective_exchange}:{sym_upper}")
-            if not inst:
-                # 3) Try with spaces removed (e.g. "NIFTY 50" → "NIFTY50")
-                no_space = sym_upper.replace(" ", "")
-                inst = lookup_by_trading_symbol(no_space)
-                if not inst:
-                    inst = lookup_by_trading_symbol(f"{effective_exchange}:{no_space}")
-            if inst and inst.fyers_symbol:
-                fyers_sym = inst.fyers_symbol
-            elif effective_exchange in ("NFO", "BFO", "MCX"):
-                fyers_sym = f"{effective_exchange}:{sym_upper.replace(' ', '')}"
-            elif effective_exchange in ("NSE", "BSE"):
-                fyers_sym = f"{effective_exchange}:{sym_upper.replace(' ', '')}-EQ"
-            else:
-                fyers_sym = f"{effective_exchange}:{sym_upper.replace(' ', '')}"
+            fyers_sym, _, inst = _resolve_fyers_symbol(sym_upper, exchange)
         q = fyers.get_quote(fyers_sym)
         if q:
             # Enrich with canonical symbol info
@@ -153,7 +159,7 @@ async def get_quote(
 
     session = get_session()
     if not session.is_demo:
-        q = session.get_ltp(exchange, sym_upper)
+        q = session.get_ltp(_detect_exchange(sym_upper, exchange), sym_upper)
         if q:
             return q
 
@@ -745,17 +751,7 @@ async def get_ohlcv(
                 # Resolve to Fyers symbol
                 fyers_sym = _INDEX_ALIAS.get(sym)
                 if not fyers_sym:
-                    inst = lookup_by_trading_symbol(sym)
-                    if not inst:
-                        inst = lookup_by_trading_symbol(f"{exchange}:{sym}")
-                    if inst and inst.fyers_symbol:
-                        fyers_sym = inst.fyers_symbol
-                    elif exchange in ("NFO", "BFO", "MCX"):
-                        fyers_sym = f"{exchange}:{sym}"
-                    elif exchange in ("NSE", "BSE"):
-                        fyers_sym = f"{exchange}:{sym}-EQ"
-                    else:
-                        fyers_sym = f"{exchange}:{sym}"
+                    fyers_sym, _, _ = _resolve_fyers_symbol(sym, exchange)
                 # Map days_back based on timeframe
                 days = 5 if tf_min <= 5 else (30 if tf_min <= 60 else 365)
                 candles = fyers.get_history(fyers_sym, timeframe, days)
@@ -808,11 +804,7 @@ async def get_latest_tick(
     # Fallback: REST quote from broker
     fyers = get_fyers_client()
     if fyers.is_live:
-        eff_exch = _detect_exchange(sym, exchange)
-        if eff_exch in ("NFO", "BFO", "MCX"):
-            fyers_sym = f"{eff_exch}:{sym}"
-        else:
-            fyers_sym = f"{eff_exch}:{sym}-EQ"
+        fyers_sym, _, _ = _resolve_fyers_symbol(sym, exchange)
         q = fyers.get_quote(fyers_sym)
         if q:
             return {"symbol": sym, "tick": q, "source": "fyers_rest"}

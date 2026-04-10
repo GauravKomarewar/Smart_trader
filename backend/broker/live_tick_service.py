@@ -275,7 +275,7 @@ class LiveTickService:
         self._fyers_ws  = None
         self._fyers_running = False
         self._fyers_ws_fail_time: float = 0   # monotonic time of last WS auth failure
-        self._FYERS_WS_RETRY_SECS = 30        # retry WS init after this many seconds
+        self._FYERS_WS_RETRY_SECS = 5         # retry WS init quickly for low-latency recovery
 
         # Shoonya WS
         self._shoonya_ws_running = False
@@ -423,25 +423,38 @@ class LiveTickService:
                 logger.info("Fyers not live — skipping WS init")
                 return
 
-            # Load access token
+            # Prefer in-memory token/client_id from the live Fyers client.
+            # This avoids stale token-file auth failures and keeps WS aligned with
+            # session_scheduler token refreshes.
+            access_token = ""
+            app_id = ""
+            try:
+                client = fc._get()  # same process object; contains freshest injected token
+                if client is not None:
+                    access_token = str(getattr(client, "token", "") or "")
+                    app_id = str(getattr(client, "client_id", "") or "")
+            except Exception:
+                pass
+
+            # Fallback: token file
             token_paths = [
                 Path(config.FYERS_TOKEN_FILE),
                 Path("/home/ubuntu/option_trading_system_fyers/fyers_token.json"),
             ]
-            access_token = ""
-            app_id = config.FYERS_APP_ID
-            for tp in token_paths:
-                if tp.exists():
-                    data = json.loads(tp.read_text())
-                    access_token = data.get("access_token", "")
-                    if not app_id:
-                        creds = tp.parent / "config" / "credentials.env"
-                        if creds.exists():
-                            for line in creds.read_text().splitlines():
-                                if line.startswith("APP_ID="):
-                                    app_id = line.split("=", 1)[1].strip()
-                    if access_token:
-                        break
+            if not access_token or not app_id:
+                app_id = app_id or config.FYERS_APP_ID
+                for tp in token_paths:
+                    if tp.exists():
+                        data = json.loads(tp.read_text())
+                        access_token = data.get("access_token", "")
+                        if not app_id:
+                            creds = tp.parent / "config" / "credentials.env"
+                            if creds.exists():
+                                for line in creds.read_text().splitlines():
+                                    if line.startswith("APP_ID="):
+                                        app_id = line.split("=", 1)[1].strip()
+                        if access_token and app_id:
+                            break
 
             if not access_token or not app_id:
                 logger.warning("Fyers: cannot init WS — no access token")
@@ -457,6 +470,17 @@ class LiveTickService:
                     logger.warning("Fyers WS auth failure detected — resetting for re-init")
                     self._fyers_ws = None
                     self._fyers_ws_fail_time = time.monotonic()
+                    # Fast self-heal: re-init and re-subscribe current symbols in background
+                    def _retry_resubscribe():
+                        try:
+                            time.sleep(1.0)
+                            with self._lock:
+                                syms = list(self._subscribed)
+                            if syms:
+                                self._fyers_subscribe_thread(syms)
+                        except Exception as _e:
+                            logger.debug("Fyers WS retry-resubscribe error: %s", _e)
+                    threading.Thread(target=_retry_resubscribe, daemon=True).start()
 
             self._fyers_ws = FyersDataSocket(
                 access_token=f"{app_id}:{access_token}",
@@ -528,9 +552,13 @@ class LiveTickService:
         """Convert a generic symbol to Fyers format.
         Handles indices, equities, options (CE/PE), and futures (FUT).
         """
+        exchange_hint = ""
+        raw_symbol = symbol
         if ":" in symbol:
-            return symbol  # Already in Fyers format
-        upper = symbol.upper().replace(" ", "")
+            parts = symbol.split(":", 1)
+            exchange_hint = parts[0].upper().strip()
+            raw_symbol = parts[1]
+        upper = raw_symbol.upper().replace(" ", "")
         # Indices
         _idx = {
             "NIFTY": "NSE:NIFTY50-INDEX",
@@ -542,12 +570,25 @@ class LiveTickService:
             "SENSEX": "BSE:SENSEX-INDEX",
         }
         # Also check original with spaces for "NIFTY 50", "NIFTY BANK"
-        upper_orig = symbol.upper().strip()
+        upper_orig = raw_symbol.upper().strip()
         if upper in _idx:
             return _idx[upper]
         if upper_orig in {"NIFTY 50"}: return "NSE:NIFTY50-INDEX"
         if upper_orig in {"NIFTY BANK", "BANK NIFTY"}: return "NSE:NIFTYBANK-INDEX"
         if upper_orig in {"FIN NIFTY"}: return "NSE:FINNIFTY-INDEX"
+
+        # symbols DB-first resolution: canonical symbol -> broker format
+        try:
+            from broker.symbol_normalizer import resolve_symbol_for_broker
+            _, _, resolved = resolve_symbol_for_broker(
+                symbol,
+                exchange_hint or "NSE",
+                "fyers",
+            )
+            if resolved and ":" in resolved:
+                return resolved
+        except Exception:
+            pass
 
         # MCX commodities (plain name without CE/PE/FUT) — subscribe as MCX
         for kw in _MCX_KEYWORDS:
@@ -568,14 +609,18 @@ class LiveTickService:
                 if upper.startswith(kw):
                     return f"MCX:{upper}"
             return f"NFO:{upper}"
-        # Try ScriptMaster lookup for accurate exchange detection
-        try:
-            from broker.symbol_normalizer import lookup_by_trading_symbol
-            inst = lookup_by_trading_symbol(upper)
-            if inst and inst.fyers_symbol:
-                return inst.fyers_symbol
-        except Exception:
-            pass
+        # Dated derivatives without explicit FUT suffix (e.g. GOLDPETAL30APR26)
+        if re.search(r'\d{1,2}[A-Z]{3}\d{2}$', upper) and not re.search(r'(CE|PE)$', upper):
+            for kw in _MCX_KEYWORDS:
+                if upper.startswith(kw):
+                    return f"MCX:{upper}FUT"
+            return f"NFO:{upper}FUT"
+        if exchange_hint:
+            if exchange_hint in ("NFO", "BFO", "MCX"):
+                return f"{exchange_hint}:{upper}"
+            if exchange_hint in ("NSE", "BSE"):
+                return f"{exchange_hint}:{upper}-EQ"
+            return f"{exchange_hint}:{upper}"
         # Default: assume NSE equity
         return f"NSE:{upper}-EQ"
 

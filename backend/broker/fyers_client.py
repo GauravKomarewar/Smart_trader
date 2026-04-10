@@ -359,6 +359,14 @@ class FyersDataClient:
 
     def get_quote(self, fyers_symbol: str) -> Optional[Dict]:
         """Get a single quote by Fyers symbol (e.g. 'NSE:RELIANCE-EQ')."""
+        if ":" not in str(fyers_symbol):
+            try:
+                from broker.symbol_normalizer import resolve_symbol_for_broker
+                _, _, resolved = resolve_symbol_for_broker(str(fyers_symbol), "NSE", "fyers")
+                if resolved:
+                    fyers_symbol = resolved
+            except Exception:
+                pass
         items = self._quotes([fyers_symbol])
         if not items:
             return None
@@ -386,17 +394,25 @@ class FyersDataClient:
         # Build Fyers symbol
         fyers_sym = OC_SYMBOL_MAP.get(symbol.upper(), None)
         if not fyers_sym:
-            inst = None
             try:
-                from broker.symbol_normalizer import lookup_by_trading_symbol
-                inst = lookup_by_trading_symbol(symbol.upper())
-                if inst and inst.fyers_symbol:
-                    fyers_sym = inst.fyers_symbol
+                from broker.symbol_normalizer import resolve_symbol_for_broker
+                _, exchange, resolved = resolve_symbol_for_broker(symbol, exchange, "fyers")
+                if resolved and ":" in resolved:
+                    fyers_sym = resolved
             except Exception:
                 pass
             if not fyers_sym:
                 if exchange in ("NFO", "MCX", "BFO"):
-                    fyers_sym = f"{exchange}:{symbol.upper().replace(' ', '')}"
+                    up = symbol.upper().replace(' ', '')
+                    # Dated derivatives like GOLDPETAL30APR26 usually require FUT suffix.
+                    if (
+                        __import__("re").search(r"\d{1,2}[A-Z]{3}\d{2}$", up)
+                        and not __import__("re").search(r"(CE|PE)$", up)
+                        and not up.endswith("FUT")
+                    ):
+                        fyers_sym = f"{exchange}:{up}FUT"
+                    else:
+                        fyers_sym = f"{exchange}:{up}"
                 elif exchange == "NSE":
                     # Indices need -INDEX suffix; equities need -EQ suffix
                     up = symbol.upper().replace(' ', '')
