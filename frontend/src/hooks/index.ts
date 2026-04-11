@@ -54,12 +54,7 @@ function isValidDashboardPayload(data: any): boolean {
 
 // ── WebSocket live data — connects on auth, pushes to stores ──
 export function useLiveData() {
-  const { isAuthenticated } = useAuthStore()
-  const { setData } = useDashboardStore()
-  const { setAccounts, setBrokerData } = useBrokerAccountsStore()
-  const { setPositions: setPositionsDetail } = usePositionsDetailStore()
-  const { setStatuses: setStrategyStatuses } = useStrategyStatusStore()
-  const { setData: setDepthData } = useMarketDepthStore()
+  const isAuthenticated = useAuthStore(s => s.isAuthenticated)
   const connectedRef = useRef(false)
 
   useEffect(() => {
@@ -74,34 +69,46 @@ export function useLiveData() {
     if (!token) return
     if (connectedRef.current) return
 
-    // Initial REST fetch so broker account cards show immediately (WS has up to 4s delay)
+    // Initial REST fetch so broker account cards show immediately (WS has up to 2s delay)
     api.get<any>('/orders/broker-accounts')
       .then((d: any) => {
         const accs = Array.isArray(d) ? d : (d?.accounts ?? [])
-        if (accs.length > 0) setAccounts(accs)
+        if (accs.length > 0) useBrokerAccountsStore.getState().setAccounts(accs)
       })
       .catch(() => {})
 
-    // Handlers
+    // Also fetch dashboard immediately so data shows without waiting for WS
+    api.liveDashboard()
+      .then((data: any) => {
+        if (isValidDashboardPayload(data)) {
+          // Only set if store is still empty (WS hasn't pushed yet)
+          if (!useDashboardStore.getState().data) {
+            useDashboardStore.getState().setData(data as DashboardData)
+          }
+        }
+      })
+      .catch(() => {})
+
+    // Handlers — use getState() to avoid subscribing App component to every store
     const onDashboard = (data: any) => {
       if (!isValidDashboardPayload(data)) return
-      // Always accept — backend guarantees consistent data from SupremeManager  
-      setData(data as DashboardData)
+      useDashboardStore.getState().setData(data as DashboardData)
     }
     const onBrokerAccounts = (data: any) => {
       if (!Array.isArray(data)) return
       // Anti-flicker: skip all-zero pushes when we already have meaningful data
-      const cur = useBrokerAccountsStore.getState().accounts
+      const st = useBrokerAccountsStore.getState()
+      const cur = st.accounts
       const hasMeaningful = (accs: any[]) => accs.some(
         (a: any) => a.cash || a.available_margin || a.total_balance || a.used_margin
       )
       if (cur && cur.length > 0 && hasMeaningful(cur)) {
         if (!hasMeaningful(data as any[])) return
       }
-      setAccounts(data as BrokerAccountWS[])
+      st.setAccounts(data as BrokerAccountWS[])
     }
     const onBrokerData = (data: any) => {
-      if (data) setBrokerData(data)
+      if (data) useBrokerAccountsStore.getState().setBrokerData(data)
     }
 
     // Risk alerts — show toasts for real-time risk notifications
@@ -143,13 +150,13 @@ export function useLiveData() {
 
     // New WS event handlers for real-time data
     const onPositionsDetail = (data: any) => {
-      if (Array.isArray(data)) setPositionsDetail(data)
+      if (Array.isArray(data)) usePositionsDetailStore.getState().setPositions(data)
     }
     const onStrategyStatus = (data: any) => {
-      if (Array.isArray(data)) setStrategyStatuses(data)
+      if (Array.isArray(data)) useStrategyStatusStore.getState().setStatuses(data)
     }
     const onMarketDepth = (data: any) => {
-      if (data) setDepthData(data)
+      if (data) useMarketDepthStore.getState().setData(data)
     }
     const onOptionChain = (data: any) => {
       if (data) {
@@ -176,6 +183,8 @@ export function useLiveData() {
     ws.on('option_chain', onOptionChain)
     ws.on('broker_status', onBrokerStatus)
     ws.connect(token)
+    // Connect market WS globally for real-time ticks across all pages
+    marketWs.connect()
     connectedRef.current = true
 
     return () => {
@@ -265,7 +274,7 @@ export function useAuthCheck() {
         setIsBrokerLive(status.isLive === true)
       } catch { /* silent */ }
     }
-    const t = setInterval(pollBroker, 60_000)  // WS pushes every ~5s, REST fallback at 60s
+    const t = setInterval(pollBroker, 1_000)  // 1s fallback for instant broker-live state updates
     return () => clearInterval(t)
   }, [])
 }
@@ -286,9 +295,9 @@ export function useDashboardData() {
       setData(EMPTY_DASHBOARD)
       return
     }
-    // Skip REST poll if WS pushed recently (< 10s) — avoid overwrite race
+    // Skip REST poll if WS pushed recently (< 1s) — avoid overwrite race
     const lastWs = useDashboardStore.getState().lastUpdate
-    if (lastWs && Date.now() - lastWs < 10_000) return
+    if (lastWs && Date.now() - lastWs < 1_000) return
     try {
       const data = await api.liveDashboard() as DashboardData
       if (!isValidDashboardPayload(data)) return
@@ -305,7 +314,7 @@ export function useDashboardData() {
   useEffect(() => {
     setLoading(true)
     fetch()
-    intervalRef.current = setInterval(fetch, 30_000)  // fallback — WS is primary
+    intervalRef.current = setInterval(fetch, 1_000)  // 1s REST fallback when WS misses
     return () => clearInterval(intervalRef.current)
   }, [fetch])
 }
@@ -334,8 +343,8 @@ export function useMarketIndices() {
       setIndices([])
     }
     load()
-    // Reduced to 30s — WS ticks provide real-time index updates
-    const t = setInterval(load, 30000)
+    // 1s REST fallback — WS ticks are primary, REST is safety net
+    const t = setInterval(load, 1000)
 
     // Subscribe index symbols to marketWs for instant LTP updates
     marketWs.connect()
@@ -386,7 +395,7 @@ export function useScreenerData() {
       setScreener([])
     }
     load()
-    const t = setInterval(load, 30000)
+    const t = setInterval(load, 1000)  // 1s screener fallback for scalping
     return () => clearInterval(t)
   }, [isAuthenticated])
 }
@@ -405,7 +414,7 @@ export function useGlobalMarkets() {
       } catch { /* silent */ }
     }
     load()
-    const t = setInterval(load, 15000)
+    const t = setInterval(load, 1000)
     return () => clearInterval(t)
   }, [isAuthenticated])
 }
@@ -434,11 +443,11 @@ export function useOptionChain() {
     }
 
     const load = async () => {
-      // Skip REST if WS pushed option chain recently (< 8s)
-      const lastWs = useOptionChainStore.getState()
-      if (lastWs.data && lastWs.data.underlying === selectedUnderlying) {
-        // WS is feeding data — only do REST as fallback at longer interval
-        return
+      // Skip REST only if WS pushed same underlying within last 1s
+      const storeState = useOptionChainStore.getState()
+      if (storeState.data && storeState.data.underlying === selectedUnderlying) {
+        const age = Date.now() - storeState.lastUpdate
+        if (age < 1_000) return  // WS is actively feeding — skip REST
       }
       if (!existingData) setLoading(true)
       try {
@@ -455,8 +464,8 @@ export function useOptionChain() {
 
     // Initial REST load (WS needs subscribe handshake first)
     load()
-    // REST fallback at 10s (WS pushes every ~3s)
-    const t = setInterval(load, 10_000)
+    // 1s REST fallback — WS pushes every ~1s
+    const t = setInterval(load, 1_000)
     return () => {
       cancelled = true
       clearInterval(t)

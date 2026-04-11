@@ -271,7 +271,8 @@ async def live_feed_websocket(websocket: WebSocket):
 
     async def _push_loop():
         """Background task: read all views from PostgreSQL via SupremeManager.
-        Wakes instantly when event_bus signals new data (order/position change)."""
+        Wakes instantly when event_bus signals new data (order/position change).
+        1-second cycle for scalping-grade responsiveness."""
         nonlocal _last_dash_hash, _last_acct_hash
         from managers.supreme_manager import supreme
         from core.event_bus import event_bus
@@ -319,8 +320,8 @@ async def live_feed_websocket(websocket: WebSocket):
                 except Exception as e:
                     logger.debug("WS feed risk_alerts error: %s", e)
 
-                # ── Broker accounts (every 2 cycles) — from DB ────────────
-                if cycle % 2 == 0:
+                # ── Broker accounts (every cycle, 1s) — from DB ────────────
+                if True:
                     try:
                         accounts = await asyncio.get_event_loop().run_in_executor(
                             None, supreme.get_broker_accounts, user_id
@@ -352,8 +353,8 @@ async def live_feed_websocket(websocket: WebSocket):
                     except Exception as e:
                         logger.debug("WS feed broker_data error: %s", e)
 
-                # ── Strategy positions (every 2 cycles) ───────────────────
-                if cycle % 2 == 0:
+                # ── Strategy positions (every cycle for scalping) ──────
+                if True:
                     try:
                         pos_rows = await asyncio.get_event_loop().run_in_executor(
                             None, supreme.get_positions, user_id, None
@@ -370,11 +371,13 @@ async def live_feed_websocket(websocket: WebSocket):
                     except Exception as e:
                         logger.debug("WS feed positions error: %s", e)
 
-                # ── Strategy status (every 3 cycles) ──────────────────────
-                if cycle % 3 == 0:
+                # ── Strategy status (every cycle, 1s) ──────────────────
+                if True:
                     try:
                         from routers.strategy import _get_all_strategy_status
-                        strat_data = _get_all_strategy_status()
+                        strat_data = await asyncio.get_event_loop().run_in_executor(
+                            None, _get_all_strategy_status
+                        )
                         strat_hash = _quick_hash(strat_data)
                         if strat_hash != _last_strat_hash:
                             _last_strat_hash = strat_hash
@@ -386,8 +389,8 @@ async def live_feed_websocket(websocket: WebSocket):
                     except Exception as e:
                         logger.debug("WS feed strategy_status error: %s", e)
 
-                # ── Broker status (every 5 cycles) ────────────────────────
-                if cycle % 5 == 0:
+                # ── Broker status (every cycle, 1s) ────────────────────
+                if True:
                     try:
                         from broker.multi_broker import registry
                         live_sessions = registry.list_live_sessions(user_id)
@@ -407,8 +410,8 @@ async def live_feed_websocket(websocket: WebSocket):
                     except Exception as e:
                         logger.debug("WS feed broker_status error: %s", e)
 
-                # ── Option chain (every 3 cycles, if subscribed) ──────────
-                if subscribed_option_chain and cycle % 3 == 0:
+                # ── Option chain (every cycle, if subscribed — scalping grade) ──
+                if subscribed_option_chain:
                     try:
                         from routers.market import get_option_chain as _oc_endpoint
                         oc_data = await _oc_endpoint(
@@ -428,8 +431,8 @@ async def live_feed_websocket(websocket: WebSocket):
                     except Exception as e:
                         logger.debug("WS feed option_chain error: %s", e)
 
-                # ── Market depth (every 2 cycles, if subscribed) ──────────
-                if subscribed_market_depth and cycle % 2 == 0:
+                # ── Market depth (every cycle, if subscribed — scalping grade) ──
+                if subscribed_market_depth:
                     try:
                         from routers.market import get_market_depth as _depth_endpoint
                         depth_data = await _depth_endpoint(subscribed_market_depth)
@@ -445,23 +448,42 @@ async def live_feed_websocket(websocket: WebSocket):
                         logger.debug("WS feed market_depth error: %s", e)
 
                 # Heartbeat
-                await websocket.send_text(json.dumps({"type": "heartbeat", "ts": ts}))
+                try:
+                    await websocket.send_text(json.dumps({"type": "heartbeat", "ts": ts}))
+                except Exception:
+                    # Client disconnected — exit push loop
+                    logger.info("WS feed push_loop: client gone, stopping user=%s", user_id[:8])
+                    stop_event.set()
+                    return
 
-            except Exception:
-                stop_event.set()
-                return
+            except Exception as e:
+                # Log unexpected errors in push loop — don't silently die
+                logger.warning("WS feed push_loop unexpected error user=%s: %s", user_id[:8], e)
+                # If the websocket is actually closed, stop the loop
+                try:
+                    await websocket.send_text(json.dumps({"type": "heartbeat", "ts": int(time.time())}))
+                except Exception:
+                    stop_event.set()
+                    return
+                # Otherwise continue — transient error
 
             # ── Instant events: drain & push any order/position events ────
-            instant_events = event_bus.drain(user_id)
-            for ev in instant_events:
-                try:
-                    await websocket.send_text(json.dumps(ev))
-                except Exception:
-                    break
+            try:
+                instant_events = event_bus.drain(user_id)
+                for ev in instant_events:
+                    try:
+                        await websocket.send_text(json.dumps(ev))
+                    except Exception:
+                        break
+            except Exception as e:
+                logger.debug("WS feed event_bus drain error: %s", e)
 
             # Event-driven sleep: wake instantly when event_bus fires,
-            # otherwise fall back to 1-second cycle
-            await event_bus.wait(user_id, timeout=1.0)
+            # otherwise fall back to 1-second cycle (scalping grade)
+            try:
+                await event_bus.wait(user_id, timeout=1.0)
+            except Exception:
+                await asyncio.sleep(1.0)
 
     push_task = asyncio.create_task(_push_loop())
 
@@ -530,6 +552,26 @@ async def live_feed_websocket(websocket: WebSocket):
             elif action == "unsubscribe_market_depth":
                 subscribed_market_depth = None
                 await websocket.send_text(json.dumps({"type": "market_depth_unsubscribed"}))
+
+            elif action == "force_refresh":
+                # Client requests immediate data push — reset all hashes to force push
+                _last_dash_hash = ""
+                _last_acct_hash = ""
+                _last_pos_hash = ""
+                _last_oc_hash = ""
+                _last_depth_hash = ""
+                _last_strat_hash = ""
+                _last_broker_status_hash = ""
+                # Wake event bus to trigger immediate push
+                try:
+                    from core.event_bus import event_bus
+                    event_bus.emit("force_refresh", {"user_id": user_id})
+                except Exception:
+                    pass
+                await websocket.send_text(json.dumps({
+                    "type": "force_refresh",
+                    "ts": int(time.time()),
+                }))
 
     except WebSocketDisconnect:
         logger.info("WS feed disconnected user=%s", user_id[:8])

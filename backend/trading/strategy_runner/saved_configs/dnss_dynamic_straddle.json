@@ -13,7 +13,7 @@
     "lots": 1,
     "paper_mode": true,
     "test_mode": "SUCCESS",
-    "underlying": "BANKNIFTY",
+    "underlying": "NIFTY",
     "exchange": "NFO"
   },
   "timing": {

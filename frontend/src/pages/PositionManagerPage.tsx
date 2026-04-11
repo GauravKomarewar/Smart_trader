@@ -56,9 +56,9 @@ export default function PositionManagerPage() {
   }, [wsPositions, wsLastUpdate])
 
   const load = useCallback(async () => {
-    // Skip REST if WS pushed recently (< 8s)
+    // Skip REST if WS pushed recently (< 1s) — WS is primary at ~1s cycle
     const lastWs = usePositionsDetailStore.getState().lastUpdate
-    if (lastWs && Date.now() - lastWs < 8_000) return
+    if (lastWs && Date.now() - lastWs < 1_000) return
     try {
       const data = await api.get<Position[]>('/positions')
       setPositions(data)
@@ -71,7 +71,7 @@ export default function PositionManagerPage() {
 
   useEffect(() => {
     load()
-    const interval = setInterval(load, 30_000)  // REST fallback at 30s — WS is primary (~2s)
+    const interval = setInterval(load, 1_000)  // 1s REST fallback when WS misses
     return () => clearInterval(interval)
   }, [load])
 

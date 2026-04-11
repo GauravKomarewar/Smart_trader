@@ -499,29 +499,59 @@ async def search_instruments_api(
     q_upper = q.upper().strip()
     results = []
 
-    # Primary: Unified ScriptMaster search (Fyers + Shoonya, all exchanges)
+    # Primary: unified symbols DB (canonical, normalized, broker-enriched)
     try:
-        from scripts.unified_scriptmaster import search_all
-        unified = search_all(q_upper, exchange=exchange,
-                              instrument_type=instrument_type, limit=30)
-        for rec in unified:
+        from db.symbols_db import search_symbols as db_search_symbols
+
+        db_rows = db_search_symbols(
+            q_upper,
+            exchange=exchange,
+            instrument_type=instrument_type,
+            limit=30,
+        )
+        for rec in db_rows:
             results.append({
                 "symbol":          rec.get("symbol", ""),
                 "trading_symbol":  rec.get("trading_symbol", ""),
                 "tradingsymbol":   rec.get("trading_symbol", ""),
                 "exchange":        rec.get("exchange", ""),
                 "type":            rec.get("instrument_type", "EQ"),
-                "token":           rec.get("token", ""),
+                "token":           rec.get("exchange_token", ""),
                 "name":            rec.get("description") or rec.get("symbol", ""),
                 "lot_size":        rec.get("lot_size", 1),
-                "expiry":          rec.get("expiry", ""),
+                "expiry":          str(rec.get("expiry") or ""),
                 "strike":          rec.get("strike", 0),
                 "option_type":     rec.get("option_type", ""),
                 "fyers_symbol":    rec.get("fyers_symbol", ""),
-                "shoonya_symbol":  rec.get("shoonya_symbol", ""),
+                "shoonya_symbol":  rec.get("shoonya_tsym", ""),
             })
     except Exception as exc:
-        logger.warning("Unified search error: %s", exc)
+        logger.warning("Symbols DB search error: %s", exc)
+
+    # Secondary fallback: Unified ScriptMaster search (raw broker dumps)
+    if not results:
+        try:
+            from scripts.unified_scriptmaster import search_all
+            unified = search_all(q_upper, exchange=exchange,
+                                  instrument_type=instrument_type, limit=30)
+            for rec in unified:
+                results.append({
+                    "symbol":          rec.get("symbol", ""),
+                    "trading_symbol":  rec.get("trading_symbol", ""),
+                    "tradingsymbol":   rec.get("trading_symbol", ""),
+                    "exchange":        rec.get("exchange", ""),
+                    "type":            rec.get("instrument_type", "EQ"),
+                    "token":           rec.get("token", ""),
+                    "name":            rec.get("description") or rec.get("symbol", ""),
+                    "lot_size":        rec.get("lot_size", 1),
+                    "expiry":          rec.get("expiry", ""),
+                    "strike":          rec.get("strike", 0),
+                    "option_type":     rec.get("option_type", ""),
+                    "fyers_symbol":    rec.get("fyers_symbol", ""),
+                    "shoonya_symbol":  rec.get("shoonya_symbol", ""),
+                })
+        except Exception as exc:
+            logger.warning("Unified search error: %s", exc)
 
     # Fallback: old ScriptMaster search
     if not results:

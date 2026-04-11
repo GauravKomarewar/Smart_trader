@@ -119,23 +119,12 @@ interface DashboardStore {
   updateOrder: (o: Order) => void
 }
 
-export const useDashboardStore = create<DashboardStore>((set, get) => ({
+export const useDashboardStore = create<DashboardStore>((set) => ({
   data: null,
   lastUpdate: 0,
   isLoading: true,
   orderFilter: 'pending' as const,
-  setData: (data) => {
-    // Anti-flicker: skip update if data is identical (deep comparison via JSON)
-    const current = get().data
-    if (current) {
-      try {
-        const curStr = JSON.stringify(current)
-        const newStr = JSON.stringify(data)
-        if (curStr === newStr) return  // No change — skip re-render
-      } catch { /* proceed with update on serialization error */ }
-    }
-    set({ data, lastUpdate: Date.now(), isLoading: false })
-  },
+  setData: (data) => set({ data, lastUpdate: Date.now(), isLoading: false }),
   setLoading: (v) => set({ isLoading: v }),
   setOrderFilter: (v) => set({ orderFilter: v }),
   updatePosition: (p) => set(s => {
@@ -216,6 +205,7 @@ interface OptionChainStore {
   data: OptionChainData | null
   selectedUnderlying: string
   selectedExpiry: string
+  lastUpdate: number
   isLoading: boolean
   basket: import('../types').BasketLeg[]
   setData: (d: OptionChainData) => void
@@ -231,9 +221,10 @@ export const useOptionChainStore = create<OptionChainStore>((set) => ({
   data: null,
   selectedUnderlying: 'NIFTY',
   selectedExpiry: '',
+  lastUpdate: 0,
   isLoading: false,
   basket: [],
-  setData: (data) => set({ data, isLoading: false }),
+  setData: (data) => set({ data, isLoading: false, lastUpdate: Date.now() }),
   setUnderlying: (s) => set({ selectedUnderlying: s, data: null }),
   setExpiry: (e) => set({ selectedExpiry: e }),
   setLoading: (v) => set({ isLoading: v }),

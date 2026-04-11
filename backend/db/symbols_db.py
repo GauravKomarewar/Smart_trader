@@ -14,7 +14,7 @@ Key design:
 Usage:
     from db.symbols_db import (
         init_symbols_schema, populate_symbols_db,
-        lookup_by_token, lookup_by_trading_symbol,
+        lookup_by_token, lookup_by_row_key, lookup_by_trading_symbol,
         lookup_by_fyers_symbol, search_symbols,
     )
 """
@@ -34,8 +34,104 @@ logger = logging.getLogger("smart_trader.symbols_db")
 
 _IST = IST
 
+_EQ_LIKE_TYPES = {"EQ", "BE", "BL", "SM", "ST", "TB"}
+_IDX_LIKE_TYPES = {"IDX", "INDEX"}
+
 # Track last successful population time (in IST)
 _last_populated_at: Optional[datetime] = None
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _instrument_family(value: Any) -> str:
+    inst = _clean_text(value)
+    if not inst:
+        return ""
+    if inst in _EQ_LIKE_TYPES:
+        return "EQ"
+    if inst in _IDX_LIKE_TYPES:
+        return "IDX"
+    if inst.startswith("OPT"):
+        return "OPT"
+    if inst.startswith("FUT"):
+        return "FUT"
+    return inst
+
+
+def _normalize_trading_symbol_value(trading_symbol: Any, instrument_type: Any = "") -> str:
+    tsym = _clean_text(trading_symbol)
+    if not tsym:
+        return ""
+    if ":" in tsym:
+        tsym = tsym.split(":", 1)[1].strip()
+    family = _instrument_family(instrument_type)
+    if tsym.endswith("-EQ"):
+        return tsym[:-3]
+    if tsym.endswith("-INDEX"):
+        return tsym[:-6]
+    if family in {"EQ", "IDX"}:
+        return tsym
+    return tsym
+
+
+def _lookup_symbol_variants(trading_symbol: str) -> List[str]:
+    raw = _clean_text(trading_symbol)
+    if not raw:
+        return []
+    if ":" in raw:
+        raw = raw.split(":", 1)[1].strip()
+    normalized = _normalize_trading_symbol_value(raw)
+    variants: List[str] = []
+    for candidate in (raw, normalized, f"{normalized}-EQ", f"{normalized}-INDEX"):
+        cleaned = _clean_text(candidate)
+        if cleaned and cleaned not in variants:
+            variants.append(cleaned)
+    return variants
+
+
+def _broker_coverage_score(row: Dict[str, Any]) -> int:
+    score = 0
+    for field, weight in (
+        ("fyers_symbol", 3),
+        ("fyers_token", 1),
+        ("shoonya_token", 2),
+        ("shoonya_tsym", 1),
+        ("angelone_token", 2),
+        ("angelone_tsym", 1),
+        ("dhan_security_id", 2),
+        ("kite_exchange_token", 2),
+        ("kite_instrument_token", 1),
+        ("upstox_ikey", 2),
+        ("groww_token", 1),
+        ("description", 1),
+        ("isin", 1),
+    ):
+        if str(row.get(field) or "").strip():
+            score += weight
+    return score
+
+
+def _broker_coverage_sql(alias: str = "") -> str:
+    prefix = f"{alias}." if alias else ""
+    return f"""
+        (
+            CASE WHEN NULLIF({prefix}fyers_symbol, '') IS NOT NULL THEN 3 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}fyers_token, '') IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}shoonya_token, '') IS NOT NULL THEN 2 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}shoonya_tsym, '') IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}angelone_token, '') IS NOT NULL THEN 2 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}angelone_tsym, '') IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}dhan_security_id, '') IS NOT NULL THEN 2 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}kite_exchange_token, '') IS NOT NULL THEN 2 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}kite_instrument_token, '') IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}upstox_ikey, '') IS NOT NULL THEN 2 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}groww_token, '') IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}description, '') IS NOT NULL THEN 1 ELSE 0 END +
+            CASE WHEN NULLIF({prefix}isin, '') IS NOT NULL THEN 1 ELSE 0 END
+        )
+    """
 
 # ── Schema ─────────────────────────────────────────────────────────────────────
 
@@ -58,6 +154,11 @@ CREATE TABLE IF NOT EXISTS symbols (
     strike              REAL NOT NULL DEFAULT 0,
     option_type         TEXT NOT NULL DEFAULT '', -- CE, PE, or ''
     description         TEXT NOT NULL DEFAULT '',
+    normalized_underlying TEXT NOT NULL DEFAULT '',
+    normalized_trading_symbol TEXT NOT NULL DEFAULT '',
+    identity_key        TEXT NOT NULL DEFAULT '',
+    row_key             TEXT NOT NULL DEFAULT '',
+    broker_coverage     INTEGER NOT NULL DEFAULT 0,
 
     /* ── Broker-specific identifiers ──────────────────────── */
     fyers_symbol        TEXT NOT NULL DEFAULT '',  -- NSE:RELIANCE-EQ
@@ -100,6 +201,20 @@ def init_symbols_schema() -> None:
     try:
         cur = conn.cursor()
         cur.execute(_CREATE_SYMBOLS)
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS normalized_underlying TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS normalized_trading_symbol TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS identity_key TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS row_key TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS broker_coverage INTEGER NOT NULL DEFAULT 0")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_norm_trading ON symbols(exchange, normalized_trading_symbol)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_identity_key ON symbols(identity_key)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_row_key ON symbols(row_key)")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_sym_row_key_nonempty ON symbols(row_key) WHERE row_key <> ''")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_shoonya_tsym ON symbols(shoonya_tsym) WHERE shoonya_tsym <> ''")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_angelone_tsym ON symbols(angelone_tsym) WHERE angelone_tsym <> ''")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_groww_token ON symbols(groww_token) WHERE groww_token <> ''")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_upstox_ikey ON symbols(upstox_ikey) WHERE upstox_ikey <> ''")
+        _create_symbols_fast_lookup_view(cur)
         conn.commit()
         logger.info("Symbols DB schema initialized")
     except Exception:
@@ -174,6 +289,14 @@ def populate_symbols_db(force: bool = False, only_if_empty: bool = False) -> Dic
             # ── Kite ───────────────────────────────────────────────
             kite_count = _load_kite(cur)
             counts["kite"] = kite_count
+
+            # ── Upstox ─────────────────────────────────────────────
+            upstox_count = _load_upstox(cur)
+            counts["upstox"] = upstox_count
+
+            # ── Groww ──────────────────────────────────────────────
+            groww_count = _load_groww(cur)
+            counts["groww"] = groww_count
 
             # Now merge staging into main table
             _merge_staging(cur)
@@ -414,7 +537,19 @@ def _insert_angelone_batch(cur, batch):
         ON CONFLICT (exchange, exchange_token)
         DO UPDATE SET
             angelone_token = EXCLUDED.angelone_token,
-            angelone_tsym = EXCLUDED.angelone_tsym
+            angelone_tsym = EXCLUDED.angelone_tsym,
+            symbol = CASE
+                WHEN NULLIF(_sym_staging.symbol, '') IS NULL THEN EXCLUDED.symbol
+                WHEN NULLIF(EXCLUDED.symbol, '') IS NULL THEN _sym_staging.symbol
+                WHEN LENGTH(EXCLUDED.symbol) > LENGTH(_sym_staging.symbol) THEN EXCLUDED.symbol
+                ELSE _sym_staging.symbol
+            END,
+            trading_symbol = CASE
+                WHEN NULLIF(_sym_staging.trading_symbol, '') IS NULL THEN EXCLUDED.trading_symbol
+                WHEN NULLIF(EXCLUDED.trading_symbol, '') IS NULL THEN _sym_staging.trading_symbol
+                WHEN LENGTH(EXCLUDED.trading_symbol) > LENGTH(_sym_staging.trading_symbol) THEN EXCLUDED.trading_symbol
+                ELSE _sym_staging.trading_symbol
+            END
     """, batch, page_size=2000)
 
 
@@ -474,7 +609,19 @@ def _insert_dhan_batch(cur, batch):
         ) VALUES %s
         ON CONFLICT (exchange, exchange_token)
         DO UPDATE SET
-            dhan_security_id = EXCLUDED.dhan_security_id
+            dhan_security_id = EXCLUDED.dhan_security_id,
+            symbol = CASE
+                WHEN NULLIF(_sym_staging.symbol, '') IS NULL THEN EXCLUDED.symbol
+                WHEN NULLIF(EXCLUDED.symbol, '') IS NULL THEN _sym_staging.symbol
+                WHEN LENGTH(EXCLUDED.symbol) > LENGTH(_sym_staging.symbol) THEN EXCLUDED.symbol
+                ELSE _sym_staging.symbol
+            END,
+            trading_symbol = CASE
+                WHEN NULLIF(_sym_staging.trading_symbol, '') IS NULL THEN EXCLUDED.trading_symbol
+                WHEN NULLIF(EXCLUDED.trading_symbol, '') IS NULL THEN _sym_staging.trading_symbol
+                WHEN LENGTH(EXCLUDED.trading_symbol) > LENGTH(_sym_staging.trading_symbol) THEN EXCLUDED.trading_symbol
+                ELSE _sym_staging.trading_symbol
+            END
     """, batch, page_size=2000)
 
 
@@ -536,12 +683,360 @@ def _insert_kite_batch(cur, batch):
         ON CONFLICT (exchange, exchange_token)
         DO UPDATE SET
             kite_instrument_token = EXCLUDED.kite_instrument_token,
-            kite_exchange_token = EXCLUDED.kite_exchange_token
+            kite_exchange_token = EXCLUDED.kite_exchange_token,
+            symbol = CASE
+                WHEN NULLIF(_sym_staging.symbol, '') IS NULL THEN EXCLUDED.symbol
+                WHEN NULLIF(EXCLUDED.symbol, '') IS NULL THEN _sym_staging.symbol
+                WHEN LENGTH(EXCLUDED.symbol) > LENGTH(_sym_staging.symbol) THEN EXCLUDED.symbol
+                ELSE _sym_staging.symbol
+            END,
+            trading_symbol = CASE
+                WHEN NULLIF(_sym_staging.trading_symbol, '') IS NULL THEN EXCLUDED.trading_symbol
+                WHEN NULLIF(EXCLUDED.trading_symbol, '') IS NULL THEN _sym_staging.trading_symbol
+                WHEN LENGTH(EXCLUDED.trading_symbol) > LENGTH(_sym_staging.trading_symbol) THEN EXCLUDED.trading_symbol
+                ELSE _sym_staging.trading_symbol
+            END
     """, batch, page_size=2000)
+
+
+def _load_upstox(cur) -> int:
+    """Insert Upstox ScriptMaster records into staging table."""
+    try:
+        from scripts.upstox_scriptmaster import UPSTOX_SCRIPTMASTER
+    except ImportError:
+        return 0
+
+    count = 0
+    batch = []
+    for key, rec in UPSTOX_SCRIPTMASTER.items():
+        token = str(rec.get("Token", "")).strip()
+        exchange = rec.get("Exchange", "")
+        if not token or not exchange:
+            continue
+
+        expiry_val = None
+        raw_exp = rec.get("Expiry", "")
+        if raw_exp:
+            expiry_val = _parse_expiry(raw_exp)
+
+        batch.append((
+            exchange, token,
+            rec.get("Underlying", "") or rec.get("ShortName", ""),
+            rec.get("TradingSymbol", ""),
+            rec.get("Instrument", "EQ"),
+            int(rec.get("LotSize", 1) or 1),
+            float(rec.get("TickSize", 0.05) or 0.05),
+            rec.get("ISIN", "") or "",
+            expiry_val,
+            float(rec.get("StrikePrice") or 0),
+            rec.get("OptionType") or "",
+            str(rec.get("Name", "") or ""),
+            str(key),  # InstrumentKey
+        ))
+        count += 1
+
+        if len(batch) >= 5000:
+            _insert_upstox_batch(cur, batch)
+            batch.clear()
+
+    if batch:
+        _insert_upstox_batch(cur, batch)
+
+    return count
+
+
+def _insert_upstox_batch(cur, batch):
+    from psycopg2.extras import execute_values
+    execute_values(cur, """
+        INSERT INTO _sym_staging (
+            exchange, exchange_token, symbol, trading_symbol,
+            instrument_type, lot_size, tick_size, isin,
+            expiry, strike, option_type, description,
+            upstox_ikey
+        ) VALUES %s
+        ON CONFLICT (exchange, exchange_token)
+        DO UPDATE SET
+            upstox_ikey = EXCLUDED.upstox_ikey,
+            isin = COALESCE(NULLIF(EXCLUDED.isin, ''), _sym_staging.isin),
+            description = COALESCE(NULLIF(EXCLUDED.description, ''), _sym_staging.description),
+            symbol = CASE
+                WHEN NULLIF(_sym_staging.symbol, '') IS NULL THEN EXCLUDED.symbol
+                WHEN NULLIF(EXCLUDED.symbol, '') IS NULL THEN _sym_staging.symbol
+                WHEN LENGTH(EXCLUDED.symbol) > LENGTH(_sym_staging.symbol) THEN EXCLUDED.symbol
+                ELSE _sym_staging.symbol
+            END
+    """, batch, page_size=2000)
+
+
+def _load_groww(cur) -> int:
+    """Insert Groww ScriptMaster records into staging table."""
+    try:
+        from scripts.groww_scriptmaster import GROWW_SCRIPTMASTER
+    except ImportError:
+        return 0
+
+    count = 0
+    batch = []
+    for key, rec in GROWW_SCRIPTMASTER.items():
+        token = str(rec.get("ExchangeToken", rec.get("Token", ""))).strip()
+        exchange = rec.get("Exchange", "")
+        if not token or not exchange:
+            continue
+
+        expiry_val = None
+        raw_exp = rec.get("Expiry", "")
+        if raw_exp:
+            expiry_val = _parse_expiry(raw_exp)
+
+        groww_sym = str(rec.get("GrowwSymbol", "") or rec.get("TradingSymbol", "") or "")
+
+        batch.append((
+            exchange, token,
+            rec.get("Underlying", "") or rec.get("TradingSymbol", ""),
+            rec.get("TradingSymbol", ""),
+            rec.get("Instrument", "EQ"),
+            int(rec.get("LotSize", 1) or 1),
+            float(rec.get("TickSize", 0.05) or 0.05),
+            rec.get("ISIN", "") or "",
+            expiry_val,
+            float(rec.get("StrikePrice") or 0),
+            rec.get("OptionType") or "",
+            str(rec.get("Name", "") or ""),
+            groww_sym,
+        ))
+        count += 1
+
+        if len(batch) >= 5000:
+            _insert_groww_batch(cur, batch)
+            batch.clear()
+
+    if batch:
+        _insert_groww_batch(cur, batch)
+
+    return count
+
+
+def _insert_groww_batch(cur, batch):
+    from psycopg2.extras import execute_values
+    execute_values(cur, """
+        INSERT INTO _sym_staging (
+            exchange, exchange_token, symbol, trading_symbol,
+            instrument_type, lot_size, tick_size, isin,
+            expiry, strike, option_type, description,
+            groww_token
+        ) VALUES %s
+        ON CONFLICT (exchange, exchange_token)
+        DO UPDATE SET
+            groww_token = EXCLUDED.groww_token,
+            isin = COALESCE(NULLIF(EXCLUDED.isin, ''), _sym_staging.isin),
+            description = COALESCE(NULLIF(EXCLUDED.description, ''), _sym_staging.description),
+            symbol = CASE
+                WHEN NULLIF(_sym_staging.symbol, '') IS NULL THEN EXCLUDED.symbol
+                WHEN NULLIF(EXCLUDED.symbol, '') IS NULL THEN _sym_staging.symbol
+                WHEN LENGTH(EXCLUDED.symbol) > LENGTH(_sym_staging.symbol) THEN EXCLUDED.symbol
+                ELSE _sym_staging.symbol
+            END
+    """, batch, page_size=2000)
+
+
+def _finalize_normalized_columns(cur, table_name: str) -> None:
+    raw_symbol = "UPPER(BTRIM(COALESCE(symbol, '')))"
+    raw_tsym = (
+        "UPPER(BTRIM(CASE "
+        "WHEN POSITION(':' IN COALESCE(trading_symbol, '')) > 0 "
+        "THEN SPLIT_PART(trading_symbol, ':', 2) "
+        "ELSE COALESCE(trading_symbol, '') END))"
+    )
+    family = (
+        "CASE "
+        "WHEN UPPER(COALESCE(instrument_type, '')) IN ('EQ','BE','BL','SM','ST','TB') THEN 'EQ' "
+        "WHEN UPPER(COALESCE(instrument_type, '')) IN ('IDX','INDEX') THEN 'IDX' "
+        "WHEN UPPER(COALESCE(instrument_type, '')) LIKE 'OPT%' THEN 'OPT' "
+        "WHEN UPPER(COALESCE(instrument_type, '')) LIKE 'FUT%' THEN 'FUT' "
+        "ELSE UPPER(COALESCE(instrument_type, '')) END"
+    )
+    normalized_tsym = (
+        f"CASE "
+        f"WHEN {raw_tsym} = '' THEN '' "
+        f"WHEN {family} IN ('EQ', 'IDX') THEN REGEXP_REPLACE({raw_tsym}, '(-EQ|-INDEX)$', '') "
+        f"ELSE {raw_tsym} END"
+    )
+    normalized_underlying = f"CASE WHEN {raw_symbol} = '' THEN {normalized_tsym} ELSE {raw_symbol} END"
+    strike_text = "COALESCE(TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM strike::text)), '0')"
+    identity_key = (
+        f"CONCAT_WS('|', exchange, {normalized_underlying}, {normalized_tsym}, {family}, "
+        "COALESCE(TO_CHAR(expiry, 'YYYY-MM-DD'), ''), "
+        f"{strike_text}, UPPER(COALESCE(option_type, '')))"
+    )
+    row_key = "CONCAT(exchange, ':', exchange_token)"
+    coverage = _broker_coverage_sql()
+
+    # Normalize derivative typing before metadata derivation.
+    cur.execute(
+        f"""
+        UPDATE {table_name}
+        SET option_type = UPPER(RIGHT(BTRIM(trading_symbol), 2))
+        WHERE UPPER(COALESCE(instrument_type, '')) = 'OPT'
+          AND COALESCE(option_type, '') = ''
+          AND UPPER(BTRIM(trading_symbol)) ~ '(CE|PE)$'
+        """
+    )
+    cur.execute(
+        f"""
+        UPDATE {table_name}
+        SET instrument_type = 'OPT'
+        WHERE UPPER(COALESCE(instrument_type, '')) = 'FUT'
+          AND (
+            UPPER(COALESCE(option_type, '')) IN ('CE', 'PE')
+            OR UPPER(BTRIM(trading_symbol)) ~ '(CE|PE)$'
+          )
+        """
+    )
+    cur.execute(
+        f"""
+        UPDATE {table_name}
+        SET instrument_type = 'FUT'
+        WHERE UPPER(COALESCE(instrument_type, '')) = 'OPT'
+          AND COALESCE(option_type, '') = ''
+          AND COALESCE(strike, 0) = 0
+          AND UPPER(BTRIM(trading_symbol)) LIKE '%FUT'
+        """
+    )
+    # Second pass after reclassification: fill option_type for any newly retyped OPT rows.
+    cur.execute(
+        f"""
+        UPDATE {table_name}
+        SET option_type = UPPER(RIGHT(BTRIM(trading_symbol), 2))
+        WHERE UPPER(COALESCE(instrument_type, '')) = 'OPT'
+          AND COALESCE(option_type, '') = ''
+          AND UPPER(BTRIM(trading_symbol)) ~ '(CE|PE)$'
+        """
+    )
+    # Infer strike from symbols like EURINR-AUG2025-100.5-PE where strike stayed 0.
+    cur.execute(
+        f"""
+        UPDATE {table_name}
+        SET strike = REGEXP_REPLACE(
+                UPPER(BTRIM(trading_symbol)),
+                '^.*-([0-9]+(?:\\.[0-9]+)?)-(CE|PE)$',
+                '\\1'
+            )::DOUBLE PRECISION
+        WHERE UPPER(COALESCE(instrument_type, '')) = 'OPT'
+          AND COALESCE(strike, 0) = 0
+          AND UPPER(BTRIM(trading_symbol)) ~ '^.*-[0-9]+(?:\\.[0-9]+)?-(CE|PE)$'
+        """
+    )
+
+    cur.execute(
+        f"""
+        UPDATE {table_name}
+        SET normalized_underlying = {normalized_underlying},
+            normalized_trading_symbol = {normalized_tsym},
+            identity_key = {identity_key},
+            row_key = {row_key},
+            broker_coverage = {coverage}
+        """
+    )
+    # Backfill expiry from trading_symbol for rows where expiry is NULL but the
+    # instrument name embeds it (e.g. Upstox NSE_COM "ZINC 325 PE 23 APR 26").
+    # Pattern: "<UNDERLYING> <STRIKE> <CE|PE|FUT> <DD> <MON> <YY>"
+    cur.execute(
+        f"""
+        UPDATE {table_name}
+        SET expiry = TO_DATE(
+                REGEXP_REPLACE(
+                    trading_symbol,
+                    '^.+\\s+(\\d{{1,2}})\\s+([A-Za-z]{{3}})\\s+(\\d{{2}})\\s*$',
+                    '\\1 \\2 \\3'
+                ),
+                'DD Mon RR'
+            )
+        WHERE expiry IS NULL
+          AND instrument_type IN ('FUT', 'OPT')
+          AND trading_symbol ~ '^.+\\s+\\d{{1,2}}\\s+[A-Za-z]{{3}}\\s+\\d{{2}}\\s*$'
+        """
+    )
+
+
+def _enrich_broker_columns_by_identity(cur, table_name: str) -> None:
+    """
+    Fill missing broker identifiers from sibling rows with the same identity_key.
+
+    This keeps (exchange, exchange_token) as the physical row key while still
+    propagating known broker mappings for equivalent contracts.
+    """
+    cur.execute(
+        f"""
+        WITH agg AS (
+            SELECT
+                identity_key,
+                MAX(NULLIF(fyers_symbol, '')) AS fyers_symbol,
+                MAX(NULLIF(fyers_token, '')) AS fyers_token,
+                MAX(NULLIF(shoonya_token, '')) AS shoonya_token,
+                MAX(NULLIF(shoonya_tsym, '')) AS shoonya_tsym,
+                MAX(NULLIF(angelone_token, '')) AS angelone_token,
+                MAX(NULLIF(angelone_tsym, '')) AS angelone_tsym,
+                MAX(NULLIF(dhan_security_id, '')) AS dhan_security_id,
+                MAX(NULLIF(kite_instrument_token, '')) AS kite_instrument_token,
+                MAX(NULLIF(kite_exchange_token, '')) AS kite_exchange_token,
+                MAX(NULLIF(upstox_ikey, '')) AS upstox_ikey,
+                MAX(NULLIF(groww_token, '')) AS groww_token
+            FROM {table_name}
+            WHERE identity_key <> ''
+            GROUP BY identity_key
+        )
+        UPDATE {table_name} s
+        SET
+            fyers_symbol = COALESCE(NULLIF(s.fyers_symbol, ''), agg.fyers_symbol, ''),
+            fyers_token = COALESCE(NULLIF(s.fyers_token, ''), agg.fyers_token, ''),
+            shoonya_token = COALESCE(NULLIF(s.shoonya_token, ''), agg.shoonya_token, ''),
+            shoonya_tsym = COALESCE(NULLIF(s.shoonya_tsym, ''), agg.shoonya_tsym, ''),
+            angelone_token = COALESCE(NULLIF(s.angelone_token, ''), agg.angelone_token, ''),
+            angelone_tsym = COALESCE(NULLIF(s.angelone_tsym, ''), agg.angelone_tsym, ''),
+            dhan_security_id = COALESCE(NULLIF(s.dhan_security_id, ''), agg.dhan_security_id, ''),
+            kite_instrument_token = COALESCE(NULLIF(s.kite_instrument_token, ''), agg.kite_instrument_token, ''),
+            kite_exchange_token = COALESCE(NULLIF(s.kite_exchange_token, ''), agg.kite_exchange_token, ''),
+            upstox_ikey = COALESCE(NULLIF(s.upstox_ikey, ''), agg.upstox_ikey, ''),
+            groww_token = COALESCE(NULLIF(s.groww_token, ''), agg.groww_token, '')
+        FROM agg
+        WHERE s.identity_key = agg.identity_key
+        """
+    )
+
+
+def _refresh_broker_coverage(cur, table_name: str) -> None:
+    coverage = _broker_coverage_sql()
+    cur.execute(f"UPDATE {table_name} SET broker_coverage = {coverage}")
+
+
+def backfill_symbols_metadata() -> int:
+    """Backfill normalized/quality columns for an existing symbols table."""
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor()
+        _finalize_normalized_columns(cur, "symbols")
+        _enrich_broker_columns_by_identity(cur, "symbols")
+        _refresh_broker_coverage(cur, "symbols")
+        cur.execute("SELECT COUNT(*) FROM symbols")
+        updated = cur.fetchone()[0]
+        _create_symbols_fast_lookup_view(cur)
+        conn.commit()
+        logger.info("Symbols metadata backfilled for %d rows", updated)
+        validate_symbols_accuracy()
+        return updated
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to backfill symbols metadata")
+        raise
+    finally:
+        conn.close()
 
 
 def _merge_staging(cur):
     """Merge staging table into main symbols table using atomic swap."""
+    _finalize_normalized_columns(cur, "_sym_staging")
+    _enrich_broker_columns_by_identity(cur, "_sym_staging")
+    _refresh_broker_coverage(cur, "_sym_staging")
     # Delete all existing, insert from staging
     cur.execute("TRUNCATE symbols RESTART IDENTITY")
     cur.execute("""
@@ -549,6 +1044,8 @@ def _merge_staging(cur):
             exchange, exchange_token, symbol, trading_symbol,
             instrument_type, lot_size, tick_size, isin,
             expiry, strike, option_type, description,
+            normalized_underlying, normalized_trading_symbol,
+            identity_key, row_key, broker_coverage,
             fyers_symbol, fyers_token,
             shoonya_token, shoonya_tsym,
             angelone_token, angelone_tsym,
@@ -561,6 +1058,8 @@ def _merge_staging(cur):
             exchange, exchange_token, symbol, trading_symbol,
             instrument_type, lot_size, tick_size, isin,
             expiry, strike, option_type, description,
+            normalized_underlying, normalized_trading_symbol,
+            identity_key, row_key, broker_coverage,
             fyers_symbol, fyers_token,
             shoonya_token, shoonya_tsym,
             angelone_token, angelone_tsym,
@@ -572,6 +1071,35 @@ def _merge_staging(cur):
     """)
     count = cur.rowcount
     logger.info("Merged %d symbols into main table", count)
+    _create_symbols_fast_lookup_view(cur)
+
+
+def _create_symbols_fast_lookup_view(cur) -> None:
+    """Create compatibility view with fast-lookup columns requested by clients."""
+    cur.execute(
+        """
+        CREATE OR REPLACE VIEW symbols_fast_lookup AS
+        SELECT
+            id,
+            row_key,
+            exchange,
+            exchange_token,
+            trading_symbol,
+            normalized_trading_symbol,
+            instrument_type,
+            lot_size,
+            tick_size,
+            broker_coverage,
+            fyers_symbol,
+            shoonya_tsym AS shoonya_symbol,
+            angelone_tsym AS angelone_symbol,
+            dhan_security_id AS dhan_symbol,
+            COALESCE(NULLIF(kite_exchange_token, ''), kite_instrument_token, '') AS kite_symbol,
+            upstox_ikey AS upstox_symbol,
+            groww_token AS grow_symbol
+        FROM symbols
+        """
+    )
 
 
 # ── Lookup Functions ───────────────────────────────────────────────────────────
@@ -591,10 +1119,25 @@ def lookup_by_token(exchange: str, token: str) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+def lookup_by_row_key(row_key: str) -> Optional[Dict[str, Any]]:
+    """Fast lookup by row_key (format: EXCHANGE:EXCHANGE_TOKEN)."""
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT * FROM symbols_fast_lookup WHERE row_key = %s LIMIT 1",
+            (str(row_key).upper().strip(),),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def lookup_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Optional[Dict[str, Any]]:
     """Lookup by trading symbol (e.g. 'NIFTY26APR24500CE').
 
-    Prefers exact match over fuzzy (-EQ/-INDEX stripped) variants.
+    Prefers the highest-quality canonical row within the normalized symbol group.
     """
     conn = get_trading_conn()
     try:
@@ -607,43 +1150,73 @@ def lookup_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Optiona
                 exchange = parts[0]
             tsym = parts[1]
 
-        # First: try exact match
+        variants = _lookup_symbol_variants(tsym)
+        normalized = _normalize_trading_symbol_value(tsym)
+
         if exchange:
             cur.execute(
-                "SELECT * FROM symbols WHERE trading_symbol = %s AND exchange = %s LIMIT 1",
-                (tsym, exchange.upper()),
+                """
+                SELECT * FROM symbols
+                WHERE exchange = %s
+                  AND (trading_symbol = ANY(%s) OR normalized_trading_symbol = %s)
+                ORDER BY broker_coverage DESC,
+                         CASE WHEN trading_symbol = %s THEN 0 ELSE 1 END,
+                         CASE WHEN NULLIF(description, '') IS NOT NULL THEN 0 ELSE 1 END,
+                         trading_symbol
+                LIMIT 1
+                """,
+                (exchange.upper(), variants, normalized, tsym),
             )
         else:
             cur.execute(
-                "SELECT * FROM symbols WHERE trading_symbol = %s LIMIT 1",
-                (tsym,),
+                """
+                SELECT * FROM symbols
+                WHERE trading_symbol = ANY(%s) OR normalized_trading_symbol = %s
+                ORDER BY broker_coverage DESC,
+                         CASE WHEN trading_symbol = %s THEN 0 ELSE 1 END,
+                         CASE WHEN NULLIF(description, '') IS NOT NULL THEN 0 ELSE 1 END,
+                         trading_symbol
+                LIMIT 1
+                """,
+                (variants, normalized, tsym),
             )
         row = cur.fetchone()
         if row:
             return dict(row)
 
-        # Second: try without common suffixes (-EQ, -INDEX)
-        alt = None
-        if tsym.endswith("-EQ"):
-            alt = tsym[:-3]
-        elif tsym.endswith("-INDEX"):
-            alt = tsym[:-6]
+        # ── Broker-symbol fallback ──────────────────────────────────────────
+        # Some symbols (e.g. Shoonya MCX "GOLDPETAL30APR26") differ from the
+        # canonical trading_symbol stored on the primary row.  Try matching
+        # against per-broker symbol columns so callers can use any broker's
+        # native format.
+        broker_conditions = (
+            "shoonya_tsym = %s OR angelone_tsym = %s OR "
+            "fyers_symbol = %s OR fyers_symbol = %s OR "
+            "dhan_security_id = %s OR groww_token = %s"
+        )
+        fyers_prefixed = f"{exchange}:{tsym}" if exchange else tsym
+        broker_params = [tsym, tsym, tsym, fyers_prefixed, tsym, tsym]
 
-        if alt:
-            if exchange:
-                cur.execute(
-                    "SELECT * FROM symbols WHERE trading_symbol = %s AND exchange = %s LIMIT 1",
-                    (alt, exchange.upper()),
-                )
-            else:
-                cur.execute(
-                    "SELECT * FROM symbols WHERE trading_symbol = %s LIMIT 1",
-                    (alt,),
-                )
-            row = cur.fetchone()
-            return dict(row) if row else None
-
-        return None
+        if exchange:
+            cur.execute(
+                f"""
+                SELECT * FROM symbols
+                WHERE exchange = %s AND ({broker_conditions})
+                ORDER BY broker_coverage DESC LIMIT 1
+                """,
+                [exchange.upper()] + broker_params,
+            )
+        else:
+            cur.execute(
+                f"""
+                SELECT * FROM symbols
+                WHERE {broker_conditions}
+                ORDER BY broker_coverage DESC LIMIT 1
+                """,
+                broker_params,
+            )
+        row = cur.fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()
 
@@ -752,7 +1325,7 @@ def search_symbols(
             f"SELECT * FROM symbols WHERE {where} "
             f"ORDER BY CASE WHEN symbol = %s THEN 0 "
             f"WHEN symbol LIKE %s THEN 1 ELSE 2 END, "
-            f"instrument_type, symbol LIMIT %s",
+            f"broker_coverage DESC, instrument_type, symbol LIMIT %s",
             params + [q, q + "%", limit],
         )
         return [dict(r) for r in cur.fetchall()]
@@ -962,19 +1535,145 @@ def get_broker_symbol(exchange: str, token: str, broker: str) -> Optional[str]:
 # ── Utility ────────────────────────────────────────────────────────────────────
 
 def _parse_expiry(raw: str) -> Optional[str]:
-    """Parse DD-Mon-YYYY or YYYY-MM-DD to ISO date string."""
+    """Parse a wide variety of expiry date strings to ISO YYYY-MM-DD.
+
+    Handles:
+        - 2026-04-30  (ISO)
+        - 30-Apr-2026 / 30-April-2026
+        - 30/04/2026
+        - 30APR2026   (compact, Shoonya)
+        - 30-Apr-26   (two-digit year, Upstox/Shoonya)
+        - 30 APR 26   (Kite/Upstox NSE_COM space-separated two-digit year)
+    """
     if not raw:
         return None
-    # Already ISO?
+    raw = raw.strip()
+    # Already ISO YYYY-MM-DD?
     if len(raw) == 10 and raw[4] == "-":
         return raw
-    # DD-Mon-YYYY
-    for fmt in ("%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+    # Standard four-digit-year formats
+    for fmt in ("%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%d", "%d/%m/%Y",
+                "%d%b%Y", "%d%B%Y"):
         try:
-            return datetime.strptime(raw.strip(), fmt).strftime("%Y-%m-%d")
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    # Two-digit year variants: "30-Apr-26", "30 Apr 26", "30APR26"
+    normalized = raw.replace(" ", "-")
+    for fmt in ("%d-%b-%y", "%d-%B-%y", "%d%b%y"):
+        try:
+            return datetime.strptime(normalized, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
     return None
+
+
+def validate_symbols_accuracy() -> Dict[str, Any]:
+    """
+    Run accuracy checks on the symbols table and log a structured report.
+    Raises no exceptions — returns a dict of check results for callers to inspect.
+    """
+    report: Dict[str, Any] = {}
+    try:
+        conn = get_trading_conn()
+        try:
+            cur = conn.cursor()
+
+            cur.execute("SELECT COUNT(*) FROM symbols")
+            report["total_rows"] = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COUNT(*) FROM symbols
+                WHERE lot_size <= 0 OR tick_size <= 0
+                   OR symbol = '' OR trading_symbol = ''
+                   OR exchange = '' OR exchange_token = ''
+            """)
+            report["critical_missing_fields"] = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COUNT(*) FROM symbols
+                WHERE instrument_type IN ('FUT','OPT') AND expiry IS NULL
+            """)
+            report["fut_opt_missing_expiry"] = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COUNT(*) FROM symbols
+                WHERE fyers_symbol <> '' AND fyers_symbol NOT LIKE '%:%'
+            """)
+            report["bad_fyers_format"] = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COUNT(*) FROM symbols
+                WHERE upstox_ikey <> '' AND upstox_ikey NOT LIKE '%|%'
+            """)
+            report["bad_upstox_format"] = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COUNT(*) FROM (
+                    SELECT exchange, exchange_token
+                    FROM symbols
+                    GROUP BY exchange, exchange_token
+                    HAVING COUNT(*) > 1
+                ) t
+            """)
+            report["duplicate_primary_keys"] = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT
+                  SUM(CASE WHEN fyers_symbol <> '' THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN shoonya_tsym <> '' THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN angelone_tsym <> '' THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN dhan_security_id <> '' THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN (kite_exchange_token <> '' OR kite_instrument_token <> '') THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN upstox_ikey <> '' THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN groww_token <> '' THEN 1 ELSE 0 END),
+                  COUNT(*)
+                FROM symbols
+            """)
+            row = cur.fetchone()
+            total = row[7] or 1
+            report["broker_coverage"] = {
+                "fyers":    {"rows": row[0], "pct": round(row[0]/total*100, 1)},
+                "shoonya":  {"rows": row[1], "pct": round(row[1]/total*100, 1)},
+                "angelone": {"rows": row[2], "pct": round(row[2]/total*100, 1)},
+                "dhan":     {"rows": row[3], "pct": round(row[3]/total*100, 1)},
+                "kite":     {"rows": row[4], "pct": round(row[4]/total*100, 1)},
+                "upstox":   {"rows": row[5], "pct": round(row[5]/total*100, 1)},
+                "groww":    {"rows": row[6], "pct": round(row[6]/total*100, 1)},
+            }
+        finally:
+            conn.close()
+    except Exception as exc:
+        report["error"] = str(exc)
+        logger.error("Symbol accuracy validation failed: %s", exc)
+        return report
+
+    # Evaluate pass/fail
+    failures = []
+    if report.get("critical_missing_fields", 0) > 0:
+        failures.append(f"critical_missing_fields={report['critical_missing_fields']}")
+    if report.get("duplicate_primary_keys", 0) > 0:
+        failures.append(f"duplicate_primary_keys={report['duplicate_primary_keys']}")
+    if report.get("bad_fyers_format", 0) > 0:
+        failures.append(f"bad_fyers_format={report['bad_fyers_format']}")
+    if report.get("bad_upstox_format", 0) > 0:
+        failures.append(f"bad_upstox_format={report['bad_upstox_format']}")
+
+    remaining_expiry = report.get("fut_opt_missing_expiry", 0)
+
+    report["pass"] = len(failures) == 0
+    report["warnings"] = []
+    if remaining_expiry > 0:
+        report["warnings"].append(f"fut_opt_missing_expiry={remaining_expiry} (may be non-tradeable reference rows)")
+
+    if failures:
+        logger.error("SYMBOL DB ACCURACY FAILURES: %s", "; ".join(failures))
+    elif report["warnings"]:
+        logger.warning("Symbol DB accuracy warnings: %s", "; ".join(report["warnings"]))
+    else:
+        logger.info("Symbol DB accuracy check PASSED — %d rows, no critical issues", report["total_rows"])
+
+    return report
 
 
 # ── Daily 8:45 AM IST refresh scheduler ───────────────────────────────────────

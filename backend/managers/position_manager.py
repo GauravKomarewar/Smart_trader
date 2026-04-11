@@ -12,7 +12,7 @@ logger = logging.getLogger("smart_trader.mgr.positions")
 
 class PositionManager(BaseManager):
     MANAGER_NAME = "position_manager"
-    REFRESH_INTERVAL = 2.0  # Every 1 second for near-instant updates
+    REFRESH_INTERVAL = 1.0  # 1s refresh for scalping-grade updates
 
     def refresh_user(self, user_id: str, sessions: list):
         self._refresh_sessions_concurrent(user_id, sessions, self._refresh_session)

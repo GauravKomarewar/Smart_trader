@@ -606,10 +606,21 @@ def refresh_all(force: bool = False) -> Dict[str, int]:
     """
     global _initialized
     counts = {}
+    clean_stats = {}
+
+    from scripts.symbol_data_cleaning import (
+        sanitize_angelone_scriptmaster,
+        sanitize_dhan_scriptmaster,
+        sanitize_fyers_scriptmaster,
+        sanitize_kite_scriptmaster,
+        sanitize_shoonya_scriptmaster,
+    )
 
     try:
         from scripts.fyers_scriptmaster import refresh as fyers_refresh, FYERS_SCRIPTMASTER
         fyers_refresh(force=force)
+        kept, dropped = sanitize_fyers_scriptmaster(FYERS_SCRIPTMASTER)
+        clean_stats["fyers"] = {"kept": kept, "dropped": dropped}
         counts["fyers"] = len(FYERS_SCRIPTMASTER)
         logger.info("Fyers scriptmaster: %d symbols", counts["fyers"])
     except Exception as exc:
@@ -618,7 +629,15 @@ def refresh_all(force: bool = False) -> Dict[str, int]:
 
     try:
         from scripts.shoonya_scriptmaster import refresh as shoonya_refresh, SHOONYA_UNIVERSAL
+        from scripts.shoonya_scriptmaster import SHOONYA_SCRIPTMASTER
         shoonya_refresh(force=force)
+        kept, dropped = sanitize_shoonya_scriptmaster(SHOONYA_SCRIPTMASTER)
+        clean_stats["shoonya"] = {"kept": kept, "dropped": dropped}
+        # Rebuild universal map after cleaning
+        SHOONYA_UNIVERSAL.clear()
+        for exch, data in SHOONYA_SCRIPTMASTER.items():
+            for tok, rec in data.items():
+                SHOONYA_UNIVERSAL[f"{exch}|{tok}"] = rec
         counts["shoonya"] = len(SHOONYA_UNIVERSAL)
         logger.info("Shoonya scriptmaster: %d symbols", counts["shoonya"])
     except Exception as exc:
@@ -628,6 +647,8 @@ def refresh_all(force: bool = False) -> Dict[str, int]:
     try:
         from scripts.angelone_scriptmaster import refresh as angelone_refresh, ANGELONE_SCRIPTMASTER
         angelone_refresh(force=force)
+        kept, dropped = sanitize_angelone_scriptmaster(ANGELONE_SCRIPTMASTER)
+        clean_stats["angelone"] = {"kept": kept, "dropped": dropped}
         counts["angelone"] = len(ANGELONE_SCRIPTMASTER)
         logger.info("Angel One scriptmaster: %d symbols", counts["angelone"])
     except Exception as exc:
@@ -637,6 +658,8 @@ def refresh_all(force: bool = False) -> Dict[str, int]:
     try:
         from scripts.dhan_scriptmaster import refresh as dhan_refresh, DHAN_SCRIPTMASTER
         dhan_refresh(force=force)
+        kept, dropped = sanitize_dhan_scriptmaster(DHAN_SCRIPTMASTER)
+        clean_stats["dhan"] = {"kept": kept, "dropped": dropped}
         counts["dhan"] = len(DHAN_SCRIPTMASTER)
         logger.info("Dhan scriptmaster: %d symbols", counts["dhan"])
     except Exception as exc:
@@ -644,8 +667,15 @@ def refresh_all(force: bool = False) -> Dict[str, int]:
         counts["dhan"] = 0
 
     try:
-        from scripts.kite_scriptmaster import refresh as kite_refresh, KITE_SCRIPTMASTER
+        from scripts.kite_scriptmaster import refresh as kite_refresh, KITE_SCRIPTMASTER, TOKEN_INDEX as KITE_TOKEN_INDEX
         kite_refresh(force=force)
+        kept, dropped = sanitize_kite_scriptmaster(KITE_SCRIPTMASTER)
+        clean_stats["kite"] = {"kept": kept, "dropped": dropped}
+        KITE_TOKEN_INDEX.clear()
+        for rec in KITE_SCRIPTMASTER.values():
+            instrument_token = str(rec.get("InstrumentToken") or "").strip()
+            if instrument_token:
+                KITE_TOKEN_INDEX[instrument_token] = rec
         counts["kite"] = len(KITE_SCRIPTMASTER)
         logger.info("Kite scriptmaster: %d symbols", counts["kite"])
     except Exception as exc:
@@ -671,6 +701,8 @@ def refresh_all(force: bool = False) -> Dict[str, int]:
         counts["groww"] = 0
 
     _initialized = True
+    if clean_stats:
+        logger.info("Scriptmaster cleaning stats: %s", clean_stats)
     return counts
 
 

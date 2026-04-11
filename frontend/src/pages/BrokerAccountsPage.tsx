@@ -53,7 +53,20 @@ export default function BrokerAccountsPage({ initialTab = 'positions' }: { initi
   }, [accounts])
 
   useEffect(() => {
-    if (selectedId) ws.subscribeBroker(selectedId)
+    if (selectedId) {
+      ws.subscribeBroker(selectedId)
+      // Immediate REST fetch + periodic fallback for broker data
+      const fetchBrokerData = () => {
+        api.get<any>(`/orders/broker-data?config_id=${selectedId}`)
+          .then((d: any) => {
+            if (d) useBrokerAccountsStore.getState().setBrokerData(d)
+          })
+          .catch(() => {})
+      }
+      fetchBrokerData()
+      const t = setInterval(fetchBrokerData, 1_000)  // 1s REST fallback when WS misses
+      return () => { clearInterval(t); ws.unsubscribeBroker() }
+    }
     return () => { ws.unsubscribeBroker() }
   }, [selectedId])
 

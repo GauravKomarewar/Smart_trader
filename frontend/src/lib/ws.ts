@@ -27,8 +27,8 @@ type Subscriber<T = unknown> = (data: T) => void
 class SmartTraderWS {
   private ws: WebSocket | null = null
   private url: string = ''
-  private reconnectDelay = 2000
-  private maxDelay = 30_000
+  private reconnectDelay = 1000
+  private maxDelay = 15_000
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private subs: Map<WsEventType, Set<Subscriber>> = new Map()
   private _open = false
@@ -48,17 +48,21 @@ class SmartTraderWS {
 
     this.ws.onopen = () => {
       this._open = true
-      this.reconnectDelay = 2000
+      this.reconnectDelay = 1000  // reset on successful connection
       this._startPing()
       // restore broker subscription on reconnect
       if (this._subscribedBroker) {
         this._send({ action: 'subscribe_broker', config_id: this._subscribedBroker })
       }
+      // Request immediate data push on connect/reconnect
+      this._send({ action: 'force_refresh' })
     }
 
     this.ws.onmessage = (ev) => {
       try {
         const msg: WsMessage = JSON.parse(ev.data)
+        // Reset reconnect delay on first real data (not just connection open)
+        if (msg.type !== 'heartbeat') this.reconnectDelay = 2000
         const handlers = this.subs.get(msg.type)
         if (handlers) handlers.forEach(h => h(msg.data))
       } catch { /* ignore malformed */ }
@@ -68,7 +72,7 @@ class SmartTraderWS {
       this._open = false
       this._stopPing()
       setTimeout(() => {
-        this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, this.maxDelay)
+        this.reconnectDelay = Math.min(this.reconnectDelay * 1.3, this.maxDelay)
         this._connect()
       }, this.reconnectDelay)
     }
@@ -83,7 +87,7 @@ class SmartTraderWS {
   }
 
   private _startPing() {
-    this.pingTimer = setInterval(() => this._send({ action: 'ping' }), 20_000)
+    this.pingTimer = setInterval(() => this._send({ action: 'ping' }), 15_000)
   }
 
   private _stopPing() {
@@ -100,6 +104,11 @@ class SmartTraderWS {
   unsubscribeBroker() {
     this._subscribedBroker = null
     this._send({ action: 'unsubscribe_broker' })
+  }
+
+  /** Force immediate data refresh from backend */
+  forceRefresh() {
+    this._send({ action: 'force_refresh' })
   }
 
   /** Subscribe to option chain data for a symbol */
@@ -184,8 +193,8 @@ type MarketMsgType = 'connected' | 'subscribed' | 'unsubscribed' | 'tick' | 'hea
 class MarketWebSocket {
   private ws: WebSocket | null = null
   private _open = false
-  private reconnectDelay = 2000
-  private maxDelay = 30_000
+  private reconnectDelay = 1000
+  private maxDelay = 15_000
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private pendingSubscribe: Set<string> = new Set()
   private subscribed: Set<string> = new Set()
@@ -199,7 +208,6 @@ class MarketWebSocket {
 
     this.ws.onopen = () => {
       this._open = true
-      this.reconnectDelay = 2000
       this._startPing()
       // Re-subscribe any pending or previously subscribed symbols
       const all = new Set([...this.pendingSubscribe, ...this.subscribed])
@@ -212,9 +220,11 @@ class MarketWebSocket {
       try {
         const msg = JSON.parse(ev.data) as { type: MarketMsgType; data?: any; symbols?: string[] }
         if (msg.type === 'tick' && msg.data) {
+          this.reconnectDelay = 2000  // reset on real data
           const tick = msg.data as MarketTick
           this.tickHandlers.forEach(h => { try { h(tick) } catch {} })
         } else if (msg.type === 'subscribed') {
+          this.reconnectDelay = 1000
           this.subscribed = new Set(msg.symbols ?? [])
           this.pendingSubscribe.clear()
         }
@@ -225,7 +235,7 @@ class MarketWebSocket {
       this._open = false
       this._stopPing()
       setTimeout(() => {
-        this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, this.maxDelay)
+        this.reconnectDelay = Math.min(this.reconnectDelay * 1.3, this.maxDelay)
         this.connect()
       }, this.reconnectDelay)
     }
