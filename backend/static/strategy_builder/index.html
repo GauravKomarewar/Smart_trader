@@ -2254,7 +2254,7 @@ function buildJSON(){
   const out={
     schema_version:'4.0',name:gv('sName')||'Unnamed',id:gv('sId')||'UNNAMED',
     description:gv('sDesc'),type:gv('sType'),enabled:true,status:'IDLE',
-    identity:{instrument_type:ST.preserve.instrument_type||'OPTIDX',product_type:gv('sProductType'),order_type:gv('sOrderType'),lots:parseInt(gv('sLots'))||1},
+    identity:{exchange:gv('sExchange')||'NFO',underlying:sym,instrument_type:ST.preserve.instrument_type||'OPTIDX',product_type:gv('sProductType'),order_type:gv('sOrderType'),lots:parseInt(gv('sLots'))||1},
     timing:{entry_window_start:gv('schEntry'),entry_window_end:gv('schEntryEnd'),eod_exit_time:gv('schExit')},
     market_data:{source:'sqlite'},
     entry:{
