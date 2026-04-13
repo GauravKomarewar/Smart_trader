@@ -214,7 +214,13 @@ class EntryEngine:
             strike, opt_data = self.market.resolve_strike(
                 strike_cfg, symbol, expiry, reference_leg
             )
-
+            if strike is None or opt_data is None:
+                logger.warning(
+                    "ENTRY_LEG_SKIPPED | tag=%s | reason=STRIKE_RESOLVE_FAILED | "
+                    "selection=%s | will retry on next tick",
+                    tag, exec_config.get("strike_selection"),
+                )
+                return None
             leg = LegState(
                 tag=tag,
                 symbol=symbol,

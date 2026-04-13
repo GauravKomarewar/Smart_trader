@@ -467,7 +467,6 @@ html[data-theme="light"] body {
 .val-flash {
   animation: val-flash 0.55s ease-out forwards;
   border-radius: 3px;
-  display: inline-block;
 }
 
 /* ── Tabular nums for aligned number columns ── */

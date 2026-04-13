@@ -1480,6 +1480,12 @@ class PerStrategyExecutor:
         exchange = identity.get("exchange", "NFO")
         symbol = identity.get("underlying", "NIFTY")
         self.market = MarketReader(exchange, symbol, max_stale_seconds=30)
+        # Store the raw expiry mode for per-tick re-evaluation (weekly_auto support).
+        self._cycle_expiry_mode = str(
+            (config.get("schedule", {}) or {}).get("expiry_mode", "weekly_current")
+        ).strip() or "weekly_current"
+        if self._cycle_expiry_mode == "custom":
+            self._cycle_expiry_mode = "weekly_current"
         self._cycle_expiry_date = self._resolve_cycle_expiry(config)
 
         # Engines
@@ -1674,6 +1680,27 @@ class PerStrategyExecutor:
         # --- NEW: Reconcile pending orders ---
         self._reconcile_pending_orders()
 
+        # ── Chain availability guard ─────────────────────────────────────
+        # Resolve the live expiry ONCE per tick so ensure_chain_data and
+        # begin_tick both see the same value and every downstream read
+        # (market data, entry, adjustment) works on a single consistent
+        # snapshot without hitting SQLite multiple times per tick.
+        tick_expiry = self._get_current_expiry()
+        snap_expiry = tick_expiry if tick_expiry != "NO_EXPIRY" else None
+        if not self.market.ensure_chain_data(snap_expiry):
+            logger.warning(
+                "CHAIN_UNAVAILABLE | strategy=%s expiry=%s — skipping tick (will retry next interval)",
+                self.name, tick_expiry,
+            )
+            return
+        self.market.begin_tick(snap_expiry)
+        try:
+            self._process_tick_with_chain(now)
+        finally:
+            self.market.end_tick()
+
+    def _process_tick_with_chain(self, now: datetime):
+        """Inner tick body — runs with chain snapshot already locked."""
         # Update market data (including leg data)
         self._update_market_data()
 
@@ -2037,18 +2064,19 @@ class PerStrategyExecutor:
 
     def _update_market_data(self):
         """Refresh spot, ATM, and per‑leg data, but only for filled legs."""
-        self.state.spot_price = self.market.get_spot_price(self._cycle_expiry_date)
+        _expiry = self._get_current_expiry()
+        self.state.spot_price = self.market.get_spot_price(_expiry)
         if not self.state.spot_open and self.state.spot_price:
             self.state.spot_open = self.state.spot_price
-        self.state.atm_strike = self.market.get_atm_strike(self._cycle_expiry_date)
-        self.state.fut_ltp = self.market.get_fut_ltp(self._cycle_expiry_date)
+        self.state.atm_strike = self.market.get_atm_strike(_expiry)
+        self.state.fut_ltp = self.market.get_fut_ltp(_expiry)
         try:
-            chain_metrics = self.market.get_chain_metrics(self._cycle_expiry_date)
+            chain_metrics = self.market.get_chain_metrics(_expiry)
         except Exception as e:
             logger.warning(
                 "MARKET_METRICS_UNAVAILABLE | strategy=%s | expiry=%s | error=%s",
                 self.name,
-                self._cycle_expiry_date,
+                _expiry,
                 e,
             )
             chain_metrics = {}
@@ -2127,7 +2155,7 @@ class PerStrategyExecutor:
             return
 
         symbol = self.config["identity"]["underlying"]
-        default_expiry = self._cycle_expiry_date
+        default_expiry = self._get_current_expiry()
         new_legs = self.entry_engine.process_entry(
             self.config["entry"], symbol, default_expiry
         )
@@ -2143,7 +2171,7 @@ class PerStrategyExecutor:
 
         # Resolve lot_size and stamp on each leg for accurate PnL.
         try:
-            lot_size = max(1, int(self.market.get_lot_size(self._cycle_expiry_date)))
+            lot_size = max(1, int(self.market.get_lot_size(self._get_current_expiry())))
         except Exception:
             lot_size = 1
 
@@ -2261,6 +2289,19 @@ class PerStrategyExecutor:
                 e,
             )
             return self.market.resolve_expiry_mode("weekly_current")
+
+    def _get_current_expiry(self) -> str:
+        """
+        Re-resolve the active expiry on every call.
+
+        Uses the raw mode string (e.g. ``weekly_auto``) so that dynamic
+        expiry logic (skip to next week on expiry day) re-evaluates each
+        tick instead of using the frozen startup value.
+        """
+        try:
+            return self.market.resolve_expiry_mode(self._cycle_expiry_mode)
+        except Exception:
+            return self._cycle_expiry_date  # fallback to startup-resolved value
 
     def _update_time_context(self, now: datetime) -> None:
         """Refresh runtime time fields consumed by condition parameters."""
@@ -2380,7 +2421,8 @@ class PerStrategyExecutor:
                             )
                             pnl_snapshot = self.state.combined_pnl
                             for leg in self.state.legs.values():
-                                leg.close()
+                                if leg.is_active:
+                                    leg.close()
                             self.state.cumulative_daily_pnl += pnl_snapshot
                             self.state.entered_today = True
                             self.cycle_completed = True
@@ -2427,9 +2469,10 @@ class PerStrategyExecutor:
             # ✅ BUG FIX: Capture PnL BEFORE deactivating legs.
             # combined_pnl only sums active legs; reading after deactivation returns 0.
             pnl_snapshot = self.state.combined_pnl
-            # Mark all legs inactive
+            # Mark only active legs inactive (preserve exit_price of already-closed legs)
             for leg in self.state.legs.values():
-                leg.close()
+                if leg.is_active:
+                    leg.close()
             self.state.cumulative_daily_pnl += pnl_snapshot
             # BUG-H3 FIX: Reset trailing stop and profit step state for clean re-entry.
             self.state.trailing_stop_active = False

@@ -39,7 +39,11 @@ class StrategyExecutor:
             symbol=identity["underlying"],
             max_stale_seconds=30
         )
-        self._cycle_expiry_date = self._resolve_cycle_expiry()
+        # Store the raw expiry mode so it can be re-evaluated each tick.
+        # This enables weekly_auto to correctly switch to the next expiry on
+        # expiry day, instead of being frozen at the date resolved at startup.
+        self._cycle_expiry_mode = self._get_schedule_expiry_mode()
+        self._cycle_expiry_date = self._resolve_cycle_expiry()  # cached for logging/fallback
 
         # Initialize engines
         self.condition_engine = ConditionEngine(self.state)
@@ -72,15 +76,20 @@ class StrategyExecutor:
         self._sequential_legs: List[LegState] = []
         self._sequential_index = 0
 
-    def _resolve_cycle_expiry(self) -> str:
-        schedule_mode = str(
+    def _get_schedule_expiry_mode(self) -> str:
+        """Return the raw expiry_mode string from config (e.g. 'weekly_auto')."""
+        mode = str(
             (self.config.get("schedule", {}) or {}).get("expiry_mode", "weekly_current")
         ).strip() or "weekly_current"
-        if schedule_mode == "custom":
+        if mode == "custom":
             logger.warning(
                 "schedule.expiry_mode=custom is deprecated; falling back to weekly_current"
             )
-            schedule_mode = "weekly_current"
+            return "weekly_current"
+        return mode
+
+    def _resolve_cycle_expiry(self) -> str:
+        schedule_mode = self._get_schedule_expiry_mode()
 
         try:
             resolved = self.market.resolve_expiry_mode(schedule_mode)
@@ -108,6 +117,20 @@ class StrategyExecutor:
                     e2,
                 )
                 return "NO_EXPIRY"
+
+    def _get_current_expiry(self) -> str:
+        """
+        Re-resolve the active expiry from the raw mode on every call.
+
+        Unlike ``_cycle_expiry_date`` (which is frozen at startup), this method
+        re-runs the full ``resolve_expiry_mode`` logic so that dynamic modes such
+        as ``weekly_auto`` can transparently skip to the next expiry on expiry day
+        once the next-week SQLite chain file has been fetched.
+        """
+        try:
+            return self.market.resolve_expiry_mode(self._cycle_expiry_mode)
+        except Exception:
+            return self._cycle_expiry_date  # fallback to startup-resolved value
 
     def _load_or_create_state(self) -> StrategyState:
         state = StatePersistence.load(self.state_path)
@@ -203,7 +226,14 @@ class StrategyExecutor:
             order = self._oms.place_order(req)
             leg.order_id = order.id
             leg.broker_order_id = order.broker_order_id
-            leg.order_status = order.status.value if hasattr(order.status, 'value') else str(order.status)
+            raw_status = order.status.value if hasattr(order.status, 'value') else str(order.status)
+            norm_status = str(raw_status or "").upper()
+            if norm_status in ("COMPLETE", "EXECUTED", "FILLED"):
+                leg.order_status = "FILLED"
+                leg.is_active = True
+                leg.filled_qty = int(leg.order_qty)
+            else:
+                leg.order_status = str(raw_status)
 
             if order.avg_price and order.avg_price > 0:
                 leg.entry_price = order.avg_price
@@ -293,6 +323,31 @@ class StrategyExecutor:
             self.state.last_date = now.date()
             logger.info("Daily counters reset")
 
+        # ── Chain availability guard ─────────────────────────────────────
+        # Resolve the live expiry ONCE per tick so ensure_chain_data and
+        # begin_tick both see the same value and
+        # _update_market_data / entry / adjustment all share its snapshot.
+        tick_expiry = self._get_current_expiry()
+        if not self.market.ensure_chain_data(tick_expiry if tick_expiry != "NO_EXPIRY" else None):
+            logger.warning(
+                "Chain data unavailable for expiry=%s — skipping tick (will retry next interval)",
+                tick_expiry,
+            )
+            return
+
+        # ── Lock chain snapshot for this tick ───────────────────────────
+        # begin_tick loads the full chain into memory once so that all reads
+        # within this tick (spot, ATM, greeks, delta match, etc.) are
+        # consistent and never see a half-written SQLite update.
+        snap_expiry = tick_expiry if tick_expiry != "NO_EXPIRY" else None
+        self.market.begin_tick(snap_expiry)
+        try:
+            self._tick_body(now)
+        finally:
+            self.market.end_tick()
+
+    def _tick_body(self, now: datetime):
+        """Inner tick logic — runs with chain snapshot already locked."""
         # Update market data (including per‑leg data)
         self._update_market_data()
 
@@ -364,7 +419,7 @@ class StrategyExecutor:
         """Update spot, ATM, futures, per‑leg LTP, greeks, bid/ask, OI change, and index data.
         Uses SQLite option chain as base, then overlays real-time LTP from LiveTickService."""
         self.state.current_time = datetime.now()
-        self.state.spot_price = self.market.get_spot_price(self._cycle_expiry_date)
+        self.state.spot_price = self.market.get_spot_price(self._get_current_expiry())
 
         # Overlay live spot price from tick service (more current than 30s SQLite)
         if self._tick_service:
@@ -377,9 +432,9 @@ class StrategyExecutor:
 
         if not self.state.spot_open and self.state.spot_price:
             self.state.spot_open = self.state.spot_price
-        self.state.atm_strike = self.market.get_atm_strike(self._cycle_expiry_date)
-        self.state.fut_ltp = self.market.get_fut_ltp(self._cycle_expiry_date)
-        chain_metrics = self.market.get_chain_metrics(self._cycle_expiry_date)
+        self.state.atm_strike = self.market.get_atm_strike(self._get_current_expiry())
+        self.state.fut_ltp = self.market.get_fut_ltp(self._get_current_expiry())
+        chain_metrics = self.market.get_chain_metrics(self._get_current_expiry())
         self.state.pcr = float(chain_metrics.get("pcr", 0.0) or 0.0)
         self.state.pcr_volume = float(chain_metrics.get("pcr_volume", 0.0) or 0.0)
         self.state.max_pain_strike = float(chain_metrics.get("max_pain_strike", 0.0) or 0.0)
@@ -565,7 +620,7 @@ class StrategyExecutor:
 
         logger.info("Executing entry...")
         symbol = self.config["identity"]["underlying"]
-        default_expiry = self._cycle_expiry_date
+        default_expiry = self._get_current_expiry()
         new_legs = self.entry_engine.process_entry(
             self.config["entry"], symbol, default_expiry
         )
@@ -625,7 +680,7 @@ class StrategyExecutor:
             for leg in self.state.legs.values():
                 if leg.is_active:
                     self._place_exit_order(leg)
-                leg.close()
+                    leg.close()
             self.state.cumulative_daily_pnl += pnl_snapshot
             sl_cfg = self.exit_engine.exit_config.get("stop_loss", {})
             if sl_cfg.get("allow_reentry"):
@@ -657,7 +712,7 @@ class StrategyExecutor:
                     for leg in self.state.legs.values():
                         if leg.is_active:
                             self._place_exit_order(leg)
-                        leg.close()
+                            leg.close()
                     self.state.cumulative_daily_pnl += pnl_snapshot
                 else:
                     logger.warning(f"Unhandled leg_rule action: {leg_action}")

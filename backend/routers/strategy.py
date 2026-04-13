@@ -382,6 +382,66 @@ async def available_symbols(payload: dict = Depends(current_user)):
     return result
 
 
+@router.get("/strategy/chain-status")
+async def chain_status(
+    symbol: str,
+    exchange: str = "NFO",
+    payload: dict = Depends(current_user),
+):
+    """
+    Return whether a current option chain SQLite file exists for the given
+    symbol/exchange, how old it is (seconds), and the current spot price.
+    Used by the strategy page to show a live chain-ready indicator per symbol.
+    """
+    from datetime import date as _date
+    from trading.strategy_runner.market_reader import MarketReader
+
+    mr = MarketReader(exchange, symbol, max_stale_seconds=60)
+    try:
+        meta = mr.get_meta()
+        spot = float(meta.get("spot_ltp", 0) or 0)
+        snap_ts = float(meta.get("snapshot_ts", 0) or 0)
+        import time as _t
+        age = round(_t.time() - snap_ts, 1) if snap_ts > 0 else None
+        db_path_str = mr._resolve_db_path()
+        has_file = db_path_str is not None and Path(db_path_str).exists()
+        return {
+            "symbol": symbol.upper(),
+            "exchange": exchange.upper(),
+            "available": has_file and spot > 0,
+            "spot": spot,
+            "age_seconds": age,
+            "file": Path(db_path_str).name if db_path_str else None,
+        }
+    except Exception as exc:
+        logger.warning("chain_status failed for %s/%s: %s", symbol, exchange, exc)
+        return {"symbol": symbol.upper(), "exchange": exchange.upper(), "available": False, "spot": 0, "age_seconds": None, "file": None}
+    finally:
+        mr.close_all()
+
+
+@router.post("/strategy/fetch-chain")
+async def fetch_chain(
+    body: Dict[str, Any] = Body(default={}),
+    payload: dict = Depends(current_user),
+):
+    """
+    Trigger an immediate option chain fetch for a symbol/exchange.
+    Called from the strategy page when chain data is missing or stale.
+    """
+    symbol = str(body.get("symbol", "NIFTY")).upper()
+    exchange = str(body.get("exchange", "NFO")).upper()
+    try:
+        from trading.utils.option_chain_fetcher import fetch_and_store_from_broker
+        result = fetch_and_store_from_broker(exchange, symbol)
+        if result:
+            return {"ok": True, "file": Path(result).name, "symbol": symbol, "exchange": exchange}
+        return {"ok": False, "symbol": symbol, "exchange": exchange, "detail": "No broker source available"}
+    except Exception as exc:
+        logger.error("fetch_chain failed for %s/%s: %s", symbol, exchange, exc)
+        return {"ok": False, "symbol": symbol, "exchange": exchange, "detail": str(exc)}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # STRATEGY RUN HISTORY
 # ══════════════════════════════════════════════════════════════════════════════
@@ -583,15 +643,35 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
             if not paper_mode:
                 try:
                     from broker.multi_broker import registry as broker_registry
-                    sessions = broker_registry.get_all_sessions()
-                    if sessions:
-                        broker_adapter = list(sessions.values())[0]
+                    # Prefer the specific broker_config_id written at run-time.
+                    # Fall back to the first live session if no specific id was set.
+                    requested_cfg_id = cfg.get("_broker_config_id")
+                    all_sessions = broker_registry.get_all_sessions()
+                    if requested_cfg_id:
+                        # Find session matching the requested config_id
+                        broker_adapter = next(
+                            (s for s in all_sessions if getattr(s, "config_id", None) == requested_cfg_id),
+                            None,
+                        )
+                        if broker_adapter is None:
+                            logger.warning(
+                                "broker_config_id=%s not found in registry; "
+                                "falling back to first live session",
+                                requested_cfg_id,
+                            )
+                    if broker_adapter is None and all_sessions:
+                        # Take the first non-demo session
+                        broker_adapter = next(
+                            (s for s in all_sessions if not getattr(s, "is_demo", True)),
+                            all_sessions[0],
+                        )
                 except Exception as ba_err:
                     logger.warning("No live broker adapter available, falling back to paper: %s", ba_err)
             oms = OrderManagementSystem(broker_adapter=broker_adapter)
             executor.set_oms(oms)
-            logger.info("OMS injected into executor (paper=%s, broker=%s)",
-                        paper_mode, type(broker_adapter).__name__ if broker_adapter else "None")
+            logger.info("OMS injected into executor (paper=%s, broker=%s config_id=%s)",
+                        paper_mode, type(broker_adapter).__name__ if broker_adapter else "None",
+                        getattr(broker_adapter, "config_id", "N/A") if broker_adapter else "N/A")
         except Exception as oms_err:
             logger.warning("OMS injection failed, executor will run without OMS: %s", oms_err)
 

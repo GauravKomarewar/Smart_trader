@@ -24,9 +24,22 @@ class BrokerReconciliation:
         """
         warnings = []
         broker_tags = {p.get("tag") for p in broker_positions if p.get("tag")}
+        has_tagged_positions = bool(broker_tags)
+
+        # Do not perform destructive tag-based close logic on broker snapshots
+        # that do not carry strategy leg tags (common for OMS/broker position APIs).
+        if broker_positions and not has_tagged_positions:
+            warnings.append(
+                "Broker positions are untagged; skipping strict tag reconciliation to avoid false closes"
+            )
+            logger.warning(
+                "RECONCILE | Untagged broker positions snapshot (%d rows) — "
+                "skip tag-based state close",
+                len(broker_positions),
+            )
 
         for tag, leg in self.state.legs.items():
-            if leg.is_active and tag not in broker_tags:
+            if has_tagged_positions and leg.is_active and tag not in broker_tags:
                 warnings.append(f"Leg {tag} is active in state but missing in broker")
                 leg.close()
 

@@ -121,9 +121,20 @@ class AdjustmentEngine:
                         self.state.adjustments_today,
                     )
                 else:
-                    self._log_rule_skip(rule_name, "ELSE_CONDITIONS_FALSE", current_time)
+                    self._log_rule_skip(
+                        rule_name,
+                        "ELSE_CONDITIONS_FALSE",
+                        current_time,
+                        if_conditions=cond_objs,
+                        else_conditions=else_cond_objs,
+                    )
             else:
-                self._log_rule_skip(rule_name, "IF_CONDITIONS_FALSE", current_time)
+                self._log_rule_skip(
+                    rule_name,
+                    "IF_CONDITIONS_FALSE",
+                    current_time,
+                    if_conditions=cond_objs,
+                )
 
         return actions_taken
 
@@ -172,11 +183,44 @@ class AdjustmentEngine:
 
         return True
 
-    def _log_rule_skip(self, rule_name: str, reason: str, now: datetime) -> None:
+    def _describe_conditions(self, conditions: List[Condition]) -> str:
+        parts: List[str] = []
+        for idx, cond in enumerate(conditions):
+            try:
+                actual = self.condition_engine._resolve_parameter(cond.parameter)
+                passed = self.condition_engine._evaluate_single(cond)
+                join_txt = "" if idx == 0 or cond.join is None else f" {cond.join.value} "
+                parts.append(
+                    f"{join_txt}{cond.parameter}={actual} {cond.comparator.value} {cond.value}"
+                    f"{' .. ' + str(cond.value2) if cond.value2 is not None else ''} => {passed}"
+                )
+            except Exception as exc:
+                parts.append(f"{cond.parameter}=<error:{exc}>")
+        return "".join(parts) if parts else "<no-conditions>"
+
+    def _log_rule_skip(
+        self,
+        rule_name: str,
+        reason: str,
+        now: datetime,
+        if_conditions: Optional[List[Condition]] = None,
+        else_conditions: Optional[List[Condition]] = None,
+    ) -> None:
         last = self._rule_last_skip_log.get(rule_name)
         if last and (now - last).total_seconds() < 60:
             return
         self._rule_last_skip_log[rule_name] = now
+        if_debug = self._describe_conditions(if_conditions or []) if if_conditions is not None else ""
+        else_debug = self._describe_conditions(else_conditions or []) if else_conditions is not None else ""
+        if if_debug or else_debug:
+            logger.info(
+                "ADJUSTMENT_SKIPPED | rule=%s | reason=%s | if=%s | else=%s",
+                rule_name,
+                reason,
+                if_debug or "-",
+                else_debug or "-",
+            )
+            return
         logger.info("ADJUSTMENT_SKIPPED | rule=%s | reason=%s", rule_name, reason)
 
     def _execute_action(self, action_cfg: Dict[str, Any], branch: str, rule: Dict[str, Any]):
@@ -185,7 +229,7 @@ class AdjustmentEngine:
         if action_type == "close_leg":
             close_tag = self._resolve_close_tag(action_cfg.get("close_tag"))
             if close_tag and close_tag in self.state.legs:
-                self.state.legs[close_tag].is_active = False
+                self.state.legs[close_tag].close()
 
         elif action_type == "partial_close_lots":
             close_tag = self._resolve_close_tag(action_cfg.get("close_tag"))
@@ -512,7 +556,7 @@ class AdjustmentEngine:
                 if close_tag and close_tag in self.state.legs:
                     closing_pnl = self.state.legs[close_tag].pnl or 0.0
                     self.state.cumulative_daily_pnl += closing_pnl
-                    self.state.legs[close_tag].is_active = False
+                    self.state.legs[close_tag].close()
                 new_tag = self._open_new_leg(new_leg_cfg, closing_leg=closing_leg)
                 # ✅ No-op detection: if the new leg resolved to the same
                 # strike + option_type + expiry as the closing leg, the swap
@@ -661,6 +705,13 @@ class AdjustmentEngine:
         strike, opt_data = self.market.resolve_strike(
             strike_cfg, symbol, expiry=expiry, reference_leg_state=reference_leg
         )
+        if strike is None or opt_data is None:
+            logger.warning(
+                "ADJUSTMENT_LEG_SKIPPED | reason=STRIKE_RESOLVE_FAILED | "
+                "selection=%s | will skip this adjustment",
+                leg_cfg.get("strike_selection"),
+            )
+            return None
 
         # Generate unique tag
         base_tag = leg_cfg.get("tag", "NEW_LEG")

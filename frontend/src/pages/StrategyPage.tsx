@@ -248,6 +248,37 @@ function StrategyCard({
   const [selBroker, setSelBroker]     = useState(saved?.broker || '__paper__')
   const [running, setRunning]         = useState(false)
 
+  // Chain data status for selected symbol
+  const [chainSt, setChainSt] = useState<{ available: boolean; spot: number; age_seconds: number | null } | null>(null)
+  const [chainLoading, setChainLoading] = useState(false)
+  const [fetchingChain, setFetchingChain] = useState(false)
+
+  const refreshChainStatus = useCallback(async (sym: string, exch: string) => {
+    try {
+      const cs = await api.chainStatus(sym, exch)
+      setChainSt({ available: cs.available, spot: cs.spot, age_seconds: cs.age_seconds })
+    } catch { setChainSt(null) }
+  }, [])
+
+  // Reload chain status whenever card is expanded or selected symbol changes
+  useEffect(() => {
+    if (!expanded) return
+    let c = false
+    setChainLoading(true)
+    refreshChainStatus(selSymbol, selExchange).finally(() => { if (!c) setChainLoading(false) })
+    return () => { c = true }
+  }, [expanded, selSymbol, selExchange, refreshChainStatus])
+
+  async function handleFetchChain() {
+    setFetchingChain(true)
+    try {
+      await api.fetchChain(selSymbol, selExchange)
+      await refreshChainStatus(selSymbol, selExchange)
+    } catch { /* ignore */ } finally {
+      setFetchingChain(false)
+    }
+  }
+
   // Sync broker selection if brokers load after mount
   useEffect(() => {
     if (!brokers.length) return
@@ -379,6 +410,47 @@ function StrategyCard({
                   selectedExchange={selExchange}
                   onSelect={(sym, exch) => { setSelSymbol(sym); setSelExchange(exch) }}
                 />
+              </div>
+
+              {/* Chain data status indicator */}
+              <div className="flex items-center gap-2 flex-wrap">
+                {chainLoading ? (
+                  <span className="flex items-center gap-1.5 text-[10px] text-text-muted">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Checking chain…
+                  </span>
+                ) : chainSt ? (
+                  chainSt.available ? (
+                    <span className="flex items-center gap-1.5 text-[10px] text-profit bg-profit/10 border border-profit/20 rounded-md px-2 py-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-profit" />
+                      Chain ready · spot {chainSt.spot > 0 ? chainSt.spot.toFixed(0) : '—'}
+                      {chainSt.age_seconds != null && <span className="text-text-muted ml-1">{chainSt.age_seconds < 120 ? `${chainSt.age_seconds.toFixed(0)}s ago` : `${(chainSt.age_seconds / 60).toFixed(0)}m ago`}</span>}
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1.5 text-[10px] text-yellow-400 bg-yellow-400/10 border border-yellow-400/20 rounded-md px-2 py-1">
+                      <AlertCircle className="w-3 h-3" /> No chain data
+                    </span>
+                  )
+                ) : null}
+                {chainSt && !chainSt.available && (
+                  <button
+                    onClick={handleFetchChain}
+                    disabled={fetchingChain}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-semibold border border-brand/30 bg-brand/10 text-brand hover:bg-brand/20 transition-colors disabled:opacity-50"
+                  >
+                    {fetchingChain ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                    Fetch Chain
+                  </button>
+                )}
+                {chainSt?.available && (
+                  <button
+                    onClick={handleFetchChain}
+                    disabled={fetchingChain}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] text-text-muted hover:text-brand border border-white/[0.06] hover:border-brand/30 transition-colors disabled:opacity-50"
+                    title="Refresh chain data"
+                  >
+                    {fetchingChain ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                  </button>
+                )}
               </div>
 
               {/* Broker selection */}
@@ -627,37 +699,37 @@ function LiveMonitorPanel() {
     const orderedLegs = stableLegs(legs)
     return `
     <div class="overflow-x-auto">
-      <table class="w-full text-[11px]" style="border-collapse:collapse;table-layout:fixed">
+      <table class="w-full min-w-[1240px] text-[11px]" style="border-collapse:separate;border-spacing:0;table-layout:fixed">
         <colgroup>
-          <col style="width:100px"><!-- Tag -->
-          <col style="width:48px"><!-- Side -->
-          <col style="width:84px"><!-- Strike -->
-          <col style="width:72px"><!-- Entry -->
-          <col style="width:72px"><!-- LTP -->
-          <col style="width:60px"><!-- Qty -->
-          <col style="width:60px"><!-- Delta -->
-          <col style="width:56px"><!-- Theta -->
-          <col style="width:52px"><!-- IV -->
-          <col style="width:80px"><!-- Unrealized -->
-          <col style="width:72px"><!-- Realized -->
-          <col style="width:80px"><!-- Total PnL -->
-          <col style="width:72px"><!-- Status -->
+          <col style="width:110px"><!-- Tag -->
+          <col style="width:56px"><!-- Side -->
+          <col style="width:250px"><!-- Trading Symbol -->
+          <col style="width:84px"><!-- Entry -->
+          <col style="width:84px"><!-- LTP -->
+          <col style="width:76px"><!-- Qty -->
+          <col style="width:64px"><!-- Delta -->
+          <col style="width:84px"><!-- Theta -->
+          <col style="width:64px"><!-- IV -->
+          <col style="width:96px"><!-- Unrealized -->
+          <col style="width:96px"><!-- Realized -->
+          <col style="width:96px"><!-- Total PnL -->
+          <col style="width:84px"><!-- Status -->
         </colgroup>
         <thead>
           <tr class="text-[9px] text-text-muted uppercase tracking-wider" style="background:rgba(var(--c-bg-elevated),0.5)">
-            <th class="px-2 py-2 text-left font-semibold">Tag</th>
-            <th class="px-1 py-2 text-center font-semibold">Side</th>
-            <th class="px-2 py-2 text-left font-semibold">Strike</th>
-            <th class="px-2 py-2 text-right font-semibold">Entry</th>
-            <th class="px-2 py-2 text-right font-semibold">LTP</th>
-            <th class="px-2 py-2 text-right font-semibold">Qty</th>
-            <th class="px-2 py-2 text-right font-semibold">Δ</th>
-            <th class="px-2 py-2 text-right font-semibold">Θ</th>
-            <th class="px-2 py-2 text-right font-semibold">IV</th>
-            <th class="px-2 py-2 text-right font-semibold">Unrealized</th>
-            <th class="px-2 py-2 text-right font-semibold">Realized</th>
-            <th class="px-2 py-2 text-right font-semibold">Total PnL</th>
-            <th class="px-2 py-2 text-center font-semibold">Status</th>
+            <th class="px-3 py-2 text-left font-semibold">Tag</th>
+            <th class="px-2 py-2 text-center font-semibold">Side</th>
+            <th class="px-3 py-2 text-left font-semibold">Trading Symbol</th>
+            <th class="px-3 py-2 text-right font-semibold">Entry</th>
+            <th class="px-3 py-2 text-right font-semibold">LTP</th>
+            <th class="px-3 py-2 text-right font-semibold">Qty</th>
+            <th class="px-3 py-2 text-right font-semibold">Δ</th>
+            <th class="px-3 py-2 text-right font-semibold">Θ</th>
+            <th class="px-3 py-2 text-right font-semibold">IV</th>
+            <th class="px-3 py-2 text-right font-semibold">Unrealized</th>
+            <th class="px-3 py-2 text-right font-semibold">Realized</th>
+            <th class="px-3 py-2 text-right font-semibold">Total PnL</th>
+            <th class="px-3 py-2 text-center font-semibold">Status</th>
           </tr>
         </thead>
         <tbody>
@@ -671,26 +743,27 @@ function LiveMonitorPanel() {
               : status === 'SIMULATED' ? 'text-yellow-400 bg-yellow-400/10'
               : isActive ? 'text-profit bg-profit/10' : 'text-text-muted bg-bg-elevated'
             const tag = esc(p.tag ?? '—')
+            const tradingSymbol = esc(p.trading_symbol ?? p.tradingsymbol ?? p.tsym ?? p.symbol ?? '—')
             const orderQty = Number(p.order_qty ?? p.qty ?? p.netqty ?? 0)
             const lots = p.lots != null ? Number(p.lots) : null
             const lotSz = p.lot_size != null ? Number(p.lot_size) : null
             return `
             <tr data-tag="${tag}" style="border-top:1px solid rgba(var(--c-border),0.3);${!isActive ? 'opacity:0.5' : ''}">
-              <td class="px-2 py-1.5 font-mono text-brand text-[10px] truncate" title="${tag}">${tag}</td>
-              <td class="px-1 py-1.5 text-center">
+              <td class="px-3 py-2 align-top font-mono text-brand text-[10px] truncate" title="${tag}">${tag}</td>
+              <td class="px-2 py-2 align-top text-center">
                 <span class="text-[9px] font-bold px-1.5 py-0.5 rounded ${p.side === 'BUY' ? 'text-profit bg-profit/10' : 'text-loss bg-loss/10'}">${esc(p.side ?? '')}</span>
               </td>
-              <td class="px-2 py-1.5 font-mono text-text-bright text-[11px]">${p.strike ? `${Number(p.strike).toFixed(0)}${p.option_type || ''}` : p.instrument === 'FUT' ? 'FUT' : '—'}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums whitespace-nowrap">${f2(p.entry_price ?? p.avg_price ?? p.avgprc)}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-bright tabular-nums whitespace-nowrap" data-col="ltp">${f2(p.ltp)}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-bright tabular-nums whitespace-nowrap" data-col="qty">${Math.abs(orderQty)}${lots != null && lotSz != null ? `<div class="text-[8px] text-text-muted leading-tight">${lots}L×${lotSz}</div>` : ''}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums whitespace-nowrap" data-col="delta">${p.delta != null ? Number(p.delta).toFixed(3) : '—'}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums whitespace-nowrap" data-col="theta">${p.theta != null ? Number(p.theta).toFixed(2) : '—'}</td>
-              <td class="px-2 py-1.5 text-right font-mono text-text-sec tabular-nums whitespace-nowrap" data-col="iv">${p.iv != null && Number(p.iv) > 0 ? Number(p.iv).toFixed(1) + '%' : '—'}</td>
-              <td class="px-2 py-1.5 text-right font-mono tabular-nums whitespace-nowrap" data-col="upnl" style="color:${pCol(uPnl)}">${pSign(uPnl)}</td>
-              <td class="px-2 py-1.5 text-right font-mono tabular-nums whitespace-nowrap" data-col="rpnl" style="color:${pCol(rPnl)}">${pSign(rPnl)}</td>
-              <td class="px-2 py-1.5 text-right font-mono font-bold tabular-nums whitespace-nowrap" data-col="tpnl" style="color:${pCol(tPnl)}">${pSign(tPnl)}</td>
-              <td class="px-2 py-1.5 text-center"><span class="text-[8px] px-1.5 py-0.5 rounded ${statusCls}" data-col="status">${esc(status)}</span></td>
+              <td class="px-3 py-2 align-top font-mono text-text-bright text-[11px] truncate" data-col="tsym" title="${tradingSymbol}">${tradingSymbol}</td>
+              <td class="px-3 py-2 align-top text-right font-mono text-text-sec tabular-nums whitespace-nowrap">${f2(p.entry_price ?? p.avg_price ?? p.avgprc)}</td>
+              <td class="px-3 py-2 align-top text-right font-mono text-text-bright tabular-nums whitespace-nowrap" data-col="ltp">${f2(p.ltp)}</td>
+              <td class="px-3 py-2 align-top text-right font-mono text-text-bright tabular-nums whitespace-nowrap" data-col="qty">${Math.abs(orderQty)}${lots != null && lotSz != null ? `<div class="mt-0.5 text-[8px] text-text-muted leading-tight text-right">${lots}L×${lotSz}</div>` : ''}</td>
+              <td class="px-3 py-2 align-top text-right font-mono text-text-sec tabular-nums whitespace-nowrap" data-col="delta">${p.delta != null ? Number(p.delta).toFixed(3) : '—'}</td>
+              <td class="px-3 py-2 align-top text-right font-mono text-text-sec tabular-nums whitespace-nowrap" data-col="theta">${p.theta != null ? Number(p.theta).toFixed(2) : '—'}</td>
+              <td class="px-3 py-2 align-top text-right font-mono text-text-sec tabular-nums whitespace-nowrap" data-col="iv">${p.iv != null && Number(p.iv) > 0 ? Number(p.iv).toFixed(1) + '%' : '—'}</td>
+              <td class="px-3 py-2 align-top text-right font-mono tabular-nums whitespace-nowrap" data-col="upnl" style="color:${pCol(uPnl)}">${pSign(uPnl)}</td>
+              <td class="px-3 py-2 align-top text-right font-mono tabular-nums whitespace-nowrap" data-col="rpnl" style="color:${pCol(rPnl)}">${pSign(rPnl)}</td>
+              <td class="px-3 py-2 align-top text-right font-mono font-bold tabular-nums whitespace-nowrap" data-col="tpnl" style="color:${pCol(tPnl)}">${pSign(tPnl)}</td>
+              <td class="px-3 py-2 align-top text-center"><span class="text-[8px] px-1.5 py-0.5 rounded ${statusCls}" data-col="status">${esc(status)}</span></td>
             </tr>`
           }).join('')}
         </tbody>
@@ -726,6 +799,13 @@ function LiveMonitorPanel() {
       const uPnl = Number(p.unrealized_pnl ?? p.urmtom ?? 0)
       const rPnl = Number(p.realized_pnl ?? p.rpnl ?? 0)
       const tPnl = uPnl + rPnl
+
+      const tsEl = row.querySelector('[data-col="tsym"]') as HTMLElement | null
+      if (tsEl) {
+        const ts = String(p.trading_symbol ?? p.tradingsymbol ?? p.tsym ?? p.symbol ?? '—')
+        if (tsEl.textContent !== ts) tsEl.textContent = ts
+        if (tsEl.title !== ts) tsEl.title = ts
+      }
 
       // LTP
       const ltpEl = row.querySelector('[data-col="ltp"]') as HTMLElement | null
@@ -1361,7 +1441,7 @@ function LegTable({ legs }: { legs: any[] }) {
           <tr className="text-[8px] text-text-muted uppercase tracking-wider bg-bg-elevated/50">
             <th className="px-2 py-1.5 text-left">Tag</th>
             <th className="px-1 py-1.5 text-center">Side</th>
-            <th className="px-2 py-1.5 text-left">Strike</th>
+            <th className="px-2 py-1.5 text-left">Trading Symbol</th>
             <th className="px-2 py-1.5 text-right">Entry</th>
             <th className="px-2 py-1.5 text-right">Exit</th>
             <th className="px-2 py-1.5 text-right">LTP</th>
@@ -1385,7 +1465,7 @@ function LegTable({ legs }: { legs: any[] }) {
                 <td className="px-1 py-1.5 text-center">
                   <span className={cn('text-[9px] font-bold px-1 py-0.5 rounded', leg.side === 'BUY' ? 'text-profit bg-profit/10' : 'text-loss bg-loss/10')}>{leg.side}</span>
                 </td>
-                <td className="px-2 py-1.5 font-mono text-text-bright">{leg.strike ? `${Number(leg.strike).toFixed(0)}${leg.option_type || ''}` : '—'}</td>
+                <td className="px-2 py-1.5 font-mono text-text-bright max-w-[260px] truncate" title={leg.trading_symbol || leg.tradingsymbol || leg.tsym || leg.symbol || ''}>{leg.trading_symbol || leg.tradingsymbol || leg.tsym || leg.symbol || '—'}</td>
                 <td className="px-2 py-1.5 text-right font-mono text-text-sec">{entry.toFixed(2)}</td>
                 <td className="px-2 py-1.5 text-right font-mono text-text-sec">{exit != null ? exit.toFixed(2) : '—'}</td>
                 <td className="px-2 py-1.5 text-right font-mono text-text-bright">{ltp.toFixed(2)}</td>

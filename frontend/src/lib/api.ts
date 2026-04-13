@@ -244,6 +244,10 @@ export const api = {
     api.get<any[]>('/strategy/brokers'),
   availableSymbols: () =>
     api.get<any[]>('/strategy/available-symbols'),
+  chainStatus: (symbol: string, exchange: string) =>
+    api.getNoStore<{ symbol: string; exchange: string; available: boolean; spot: number; age_seconds: number | null; file: string | null }>(`/strategy/chain-status?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}`),
+  fetchChain: (symbol: string, exchange: string) =>
+    api.post<{ ok: boolean; file?: string; detail?: string }>('/strategy/fetch-chain', { symbol, exchange }),
 
   // ── Strategy Run History ─────────────────────────────────────────────────
   strategyRuns: (params?: { strategy_name?: string; status?: string; limit?: number }) => {

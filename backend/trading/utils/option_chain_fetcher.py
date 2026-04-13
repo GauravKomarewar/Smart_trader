@@ -169,6 +169,27 @@ def fetch_and_store_from_broker(
             if raw:
                 result = _process_fyers_chain(exchange, sym, raw)
                 if result:
+                    # On expiry day: also fetch the NEXT expiry so that
+                    # weekly_auto can switch to it instead of staying on 0-DTE.
+                    # Fyers expiryData is ordered nearest→furthest; index [1] is next.
+                    expiry_data = raw.get("expiryData", [])
+                    if len(expiry_data) >= 2:
+                        first_date_str = expiry_data[0].get("date", "")
+                        try:
+                            from datetime import date as _date
+                            first_date = datetime.strptime(first_date_str, "%Y-%m-%d").date()
+                            if first_date == _date.today():
+                                next_ts = str(expiry_data[1].get("expiry", ""))
+                                if next_ts:
+                                    next_raw = fyers.get_option_chain(sym, exchange=exchange, expiry_ts=next_ts)
+                                    if next_raw:
+                                        _process_fyers_chain(exchange, sym, next_raw)
+                                        logger.info(
+                                            "Fetched next-expiry chain for %s (expiry day detected, ts=%s)",
+                                            sym, next_ts,
+                                        )
+                        except Exception as _next_err:
+                            logger.debug("Next-expiry prefetch skipped: %s", _next_err)
                     return result
     except Exception as exc:
         logger.debug("Fyers option chain fetch for %s: %s", sym, exc)
@@ -284,7 +305,12 @@ def _process_fyers_chain(exchange: str, symbol: str, data: Dict) -> Optional[str
                     T = time_to_expiry_seconds(expiry_str, "15:30")
                     if T > 0:
                         iv_val = implied_volatility(ltp, spot, strike, T, 0.065, ot) or 0.0
-                        sigma = (iv_val / 100.0) if iv_val > 1 else (iv_val if iv_val > 0 else 0.20)
+                        sigma_raw = (iv_val / 100.0) if iv_val > 1 else (iv_val if iv_val > 0 else 0.20)
+                        # Floor at 15% to prevent near-zero sigma on expiry-day 0-DTE options.
+                        # Very low IV (<15%) causes delta to collapse to 0/1 at 50-pt intervals,
+                        # making delta-based strike selection impossible. The floor ensures stored
+                        # greeks remain useful for selection even on low-volatility expiry mornings.
+                        sigma = max(sigma_raw, 0.15)
                         greeks = bs_greeks(spot, strike, T, 0.065, sigma, ot) or {}
                         delta = greeks.get("delta", 0)
                         gamma = greeks.get("gamma", 0)
@@ -415,8 +441,9 @@ def _process_shoonya_chain(exchange: str, symbol: str, data: Dict) -> Optional[s
 
 def _fyers_date_to_dd_mmm_yyyy(date_str: str) -> str:
     """
-    Convert Fyers date format to MarketReader format.
-    '2026-04-10' or '16-04-2026' → '10-Apr-2026'
+    Convert Fyers date format to the DB filename date part.
+    '2026-04-10' or '16-04-2026' → '10-04-2026' (DD-MM-YYYY, numeric month)
+    MarketReader._resolve_db_path() handles both numeric and abbreviated month formats.
     """
     if not date_str:
         return ""

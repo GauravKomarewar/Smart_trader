@@ -82,6 +82,13 @@ class MarketReader:
         self._conn_info: Dict[str, Dict] = {}
         self._strike_step_cache: Dict[str, float] = {}  # expiry -> strike step
         self._prev_total_oi: Dict[str, Dict[str, float]] = {}
+
+        # ── Tick-scoped snapshot ─────────────────────────────────────────
+        # Loaded in begin_tick(); cleared in end_tick().
+        # While active, all get_meta / get_option_at_strike / find_option_by_delta
+        # / get_chain_metrics reads come from this in-memory snapshot so that all
+        # operations within a single strategy tick see the same consistent chain.
+        self._tick_snapshot: Optional[Dict] = None
     # ----------------------------------------------------------------------
     # Internal helpers
     # ----------------------------------------------------------------------
@@ -300,9 +307,141 @@ class MarketReader:
                 self._last_stale_warn = _now
 
     # ----------------------------------------------------------------------
+    # Chain availability + tick-scoped snapshot locking
+    # ----------------------------------------------------------------------
+
+    def ensure_chain_data(self, expiry: Optional[str] = None) -> bool:
+        """
+        Guarantee that a valid option chain SQLite file exists for *expiry*
+        before a strategy tick begins.
+
+        Algorithm:
+          1. Try to get a connection — if the file exists and has rows the chain
+             is ready and we return True immediately.
+          2. Otherwise call ``fetch_and_store_from_broker`` (blocking, ~1-3 s) to
+             populate the file from the best available broker source.
+          3. Invalidate any stale cached connection so the freshly written file
+             is picked up on the next ``_get_connection`` call.
+          4. Return True if spot_ltp > 0 in the new file, False otherwise.
+
+        Called at the start of every executor tick so that no tick ever runs
+        without chain data.
+        """
+        # Fast path: already have valid data
+        conn = self._get_connection(expiry)
+        if conn:
+            try:
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='spot_ltp'"
+                ).fetchone()
+                if row and float(row[0] or 0) > 0:
+                    return True
+            except Exception:
+                pass
+
+        # Slow path: fetch from broker
+        logger.info(
+            "MarketReader.ensure_chain_data: chain missing/empty for %s %s expiry=%s — fetching now",
+            self.exchange, self.symbol, expiry or "auto",
+        )
+        try:
+            from trading.utils.option_chain_fetcher import fetch_and_store_from_broker
+            result = fetch_and_store_from_broker(self.exchange, self.symbol)
+            if result:
+                # Invalidate stale connection cache so new file is opened fresh
+                key = expiry or "default"
+                if key in self._conn_info:
+                    try:
+                        self._conn_info[key]["conn"].close()
+                    except Exception:
+                        pass
+                    del self._conn_info[key]
+                # Also clear "default" key in case we matched via auto-resolve
+                if "default" in self._conn_info:
+                    try:
+                        self._conn_info["default"]["conn"].close()
+                    except Exception:
+                        pass
+                    del self._conn_info["default"]
+
+                # Verify the new data is usable
+                new_conn = self._get_connection(expiry)
+                if new_conn:
+                    try:
+                        row = new_conn.execute(
+                            "SELECT value FROM meta WHERE key='spot_ltp'"
+                        ).fetchone()
+                        ok = row is not None and float(row[0] or 0) > 0
+                        if ok:
+                            logger.info(
+                                "ensure_chain_data: chain populated for %s %s (expiry=%s)",
+                                self.exchange, self.symbol, expiry or "auto",
+                            )
+                        return ok
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error("ensure_chain_data: fetch failed: %s", exc)
+
+        logger.warning(
+            "ensure_chain_data: could not obtain chain data for %s %s (expiry=%s)",
+            self.exchange, self.symbol, expiry or "auto",
+        )
+        return False
+
+    def begin_tick(self, expiry: Optional[str] = None) -> bool:
+        """
+        Load the full option chain into an in-memory snapshot and lock it for
+        the duration of this strategy tick.
+
+        All subsequent ``get_meta``, ``get_option_at_strike``,
+        ``find_option_by_delta``, and ``get_chain_metrics`` calls will read from
+        this snapshot instead of hitting SQLite, guaranteeing that every
+        operation in the tick sees the same consistent chain state.
+
+        Must be paired with ``end_tick()`` (ideally in a try/finally block).
+
+        Returns:
+            True  — snapshot loaded; reads will use snapshot.
+            False — snapshot failed; reads fall back to live SQLite (safe).
+        """
+        self._tick_snapshot = None
+        conn = self._get_connection(expiry)
+        if not conn:
+            logger.debug("begin_tick: no connection for expiry=%s — tick will use live SQLite", expiry)
+            return False
+        try:
+            meta: Dict[str, str] = {
+                row["key"]: row["value"]
+                for row in conn.execute("SELECT key, value FROM meta").fetchall()
+            }
+            rows = conn.execute("SELECT * FROM option_chain").fetchall()
+            chain: Dict[tuple, Dict] = {
+                (float(r["strike"]), str(r["option_type"]).upper()): dict(r)
+                for r in rows
+            }
+            self._tick_snapshot = {"meta": meta, "chain": chain, "expiry": expiry}
+            logger.debug(
+                "begin_tick: snapshot loaded | expiry=%s rows=%d spot=%s",
+                expiry, len(chain), meta.get("spot_ltp", "?"),
+            )
+            return True
+        except Exception as exc:
+            logger.error("begin_tick: snapshot load failed: %s — using live SQLite", exc)
+            self._tick_snapshot = None
+            return False
+
+    def end_tick(self) -> None:
+        """Release the in-memory snapshot loaded by ``begin_tick``."""
+        self._tick_snapshot = None
+
+    # ----------------------------------------------------------------------
     # Public data retrieval methods (with optional expiry)
     # ----------------------------------------------------------------------
     def get_meta(self, expiry: Optional[str] = None) -> Dict[str, str]:
+        # Use in-memory snapshot when available (set by begin_tick)
+        if self._tick_snapshot is not None:
+            return self._tick_snapshot["meta"]
         conn = self._get_connection(expiry)
         if not conn:
             return {}
@@ -462,6 +601,12 @@ class MarketReader:
         self._check_freshness(expiry)
         if isinstance(option_type, OptionType):
             option_type = option_type.value
+        opt = option_type.upper()
+
+        # Fast path: use tick snapshot if active
+        if self._tick_snapshot is not None:
+            return self._tick_snapshot["chain"].get((float(strike), opt))
+
         conn = self._get_connection(expiry)
         if not conn:
             return None
@@ -470,7 +615,7 @@ class MarketReader:
             cur = conn.cursor()
             cur.execute(
                 "SELECT * FROM option_chain WHERE strike = ? AND option_type = ?",
-                (strike, option_type.upper())
+                (strike, opt)
             )
             row = cur.fetchone()
             return dict(row) if row else None
@@ -499,6 +644,39 @@ class MarketReader:
         self._check_freshness(expiry)
         if isinstance(option_type, OptionType):
             option_type = option_type.value
+        opt = option_type.upper()
+
+        # Fast path: use tick snapshot if active (avoids SQLite round-trip)
+        if self._tick_snapshot is not None:
+            candidates = [
+                row for (_, ot), row in self._tick_snapshot["chain"].items()
+                if ot == opt
+                and row.get("delta") is not None
+                and float(row.get("ltp", 0)) > 0
+            ]
+            if candidates:
+                # Sort by closeness to target_delta using abs value comparison
+                candidates.sort(key=lambda r: abs(abs(float(r["delta"])) - target_delta))
+                best = candidates[0]
+                diff = abs(abs(float(best["delta"])) - target_delta)
+                if diff <= tolerance:
+                    return best
+                MAX_DELTA_FALLBACK = 0.15
+                if diff <= MAX_DELTA_FALLBACK:
+                    logger.warning(
+                        "Delta target %.4f not found within tolerance %.4f for %s; "
+                        "using nearest strike=%s delta=%s (within max fallback %.4f)",
+                        target_delta, tolerance, opt,
+                        best.get("strike"), best.get("delta"), MAX_DELTA_FALLBACK,
+                    )
+                    return best
+            logger.critical(
+                "DELTA MATCH REJECTED: target=%.4f tolerance=%.4f max_fallback=0.15 "
+                "for %s — no suitable strike in chain. Chain may need re-centering.",
+                target_delta, tolerance, opt,
+            )
+            return None
+
         conn = self._get_connection(expiry)
         if not conn:
             return None
@@ -513,7 +691,7 @@ class MarketReader:
                   AND ABS(ABS(delta) - ?) <= ?
                 ORDER BY ABS(ABS(delta) - ?) ASC
                 LIMIT 1
-            """, (option_type.upper(), target_delta, tolerance, target_delta))
+            """, (opt, target_delta, tolerance, target_delta))
             row = cur.fetchone()
             if row:
                 return dict(row)
@@ -533,7 +711,7 @@ class MarketReader:
                 ORDER BY ABS(ABS(delta) - ?) ASC
                 LIMIT 1
                 """,
-                (option_type.upper(), target_delta, MAX_DELTA_FALLBACK, target_delta),
+                (opt, target_delta, MAX_DELTA_FALLBACK, target_delta),
             )
             row = cur.fetchone()
             if row:
@@ -543,7 +721,7 @@ class MarketReader:
                     "using nearest strike=%s delta=%s (within max fallback %.4f)",
                     target_delta,
                     tolerance,
-                    option_type.upper(),
+                    opt,
                     best.get("strike"),
                     best.get("delta"),
                     MAX_DELTA_FALLBACK,
@@ -554,7 +732,7 @@ class MarketReader:
             logger.critical(
                 "DELTA MATCH REJECTED: target=%.4f tolerance=%.4f max_fallback=%.4f "
                 "for %s — no suitable strike in chain. Chain may need re-centering.",
-                target_delta, tolerance, MAX_DELTA_FALLBACK, option_type.upper(),
+                target_delta, tolerance, MAX_DELTA_FALLBACK, opt,
             )
             return None
         except Exception as e:
@@ -910,7 +1088,7 @@ class MarketReader:
                     opt_data = self.find_option_by_delta(opt_type, target, expiry=expiry)
                 
                 if opt_data is None:
-                    raise ValueError(f"No option found for delta={target}")
+                    return None, None
                 strike = opt_data["strike"]
             elif sel == "theta":
                 # Theta is always negative for options. Users naturally enter
@@ -923,7 +1101,7 @@ class MarketReader:
                     expiry=expiry,
                 )
                 if opt_data is None:
-                    raise ValueError(f"No option found for theta≈{target}")
+                    return None, None
                 strike = opt_data["strike"]
             elif sel == "vega":
                 target = float(val) if val else 5.0
@@ -933,7 +1111,7 @@ class MarketReader:
                     expiry=expiry,
                 )
                 if opt_data is None:
-                    raise ValueError(f"No option found for vega={target}")
+                    return None, None
                 strike = opt_data["strike"]
             elif sel == "gamma":
                 target = float(val) if val else 0.0003
@@ -943,31 +1121,31 @@ class MarketReader:
                     expiry=expiry,
                 )
                 if opt_data is None:
-                    raise ValueError(f"No option found for gamma={target}")
+                    return None, None
                 strike = opt_data["strike"]
             elif sel == "premium":
                 target = float(val) if val else 50
                 opt_data = self.find_option_by_premium(opt_type, target, expiry=expiry)
                 if opt_data is None:
-                    raise ValueError(f"No option found for premium={target}")
+                    return None, None
                 strike = opt_data["strike"]
             elif sel == "oi":
                 target = float(val) if val else 0.0
                 opt_data = self.find_option_by_criteria(opt_type, "oi", target, tolerance=max(1000.0, target * 0.25), expiry=expiry)
                 if opt_data is None:
-                    raise ValueError(f"No option found for oi={target}")
+                    return None, None
                 strike = opt_data["strike"]
             elif sel == "volume":
                 target = float(val) if val else 0.0
                 opt_data = self.find_option_by_criteria(opt_type, "volume", target, tolerance=max(1000.0, target * 0.25), expiry=expiry)
                 if opt_data is None:
-                    raise ValueError(f"No option found for volume={target}")
+                    return None, None
                 strike = opt_data["strike"]
             elif sel == "iv":
                 target = float(val) if val else 15.0
                 opt_data = self.find_option_by_iv(opt_type, target, expiry=expiry)
                 if opt_data is None:
-                    raise ValueError(f"No option found for IV={target}")
+                    return None, None
                 strike = opt_data["strike"]
             elif sel == "otm_pct":
                 target_pct = float(val) if val else 0.5
@@ -1002,7 +1180,7 @@ class MarketReader:
                 # For simple strike selections, get option data now
                 opt_data = self.get_option_at_strike(strike, opt_type, expiry)
                 if opt_data is None:
-                    raise ValueError(f"No option data at strike {strike}")
+                    return None, None
 
         elif mode == StrikeMode.EXACT:
             exact = config.exact_strike
@@ -1013,7 +1191,7 @@ class MarketReader:
                 strike = round(strike / config.rounding) * config.rounding
             opt_data = self.get_option_at_strike(strike, opt_type, expiry)
             if opt_data is None:
-                raise ValueError(f"No option data at exact strike {strike}")
+                return None, None
 
         elif mode == StrikeMode.ATM_POINTS:
             offset = config.atm_offset_points or 0
@@ -1022,7 +1200,7 @@ class MarketReader:
                 strike = round(strike / config.rounding) * config.rounding
             opt_data = self.get_option_at_strike(strike, opt_type, expiry)
             if opt_data is None:
-                raise ValueError(f"No option data at ATM+{offset} (strike {strike})")
+                return None, None
 
         elif mode == StrikeMode.ATM_PCT:
             pct = config.atm_offset_pct or 0
@@ -1031,7 +1209,7 @@ class MarketReader:
                 strike = round(strike / config.rounding) * config.rounding
             opt_data = self.get_option_at_strike(strike, opt_type, expiry)
             if opt_data is None:
-                raise ValueError(f"No option data at ATM+{pct}% (strike {strike})")
+                return None, None
 
         elif mode == StrikeMode.MATCH_LEG:
             if reference_leg_state is None:
@@ -1048,7 +1226,7 @@ class MarketReader:
                 strike = round(strike / step) * step
                 opt_data = self.get_option_at_strike(strike, opt_type, expiry)
                 if opt_data is None:
-                    raise ValueError(f"No option found for moneyness-preserved strike {strike}")
+                    return None, None
                 return strike, opt_data
             if not hasattr(reference_leg_state, match_param):
                 raise ValueError(
@@ -1066,7 +1244,7 @@ class MarketReader:
                 expiry=expiry
             )
             if opt_data is None:
-                raise ValueError(f"No option found matching {match_param}={target} (tol={tol:.4f})")
+                return None, None
             strike = opt_data["strike"]
 
         else:
@@ -1074,9 +1252,9 @@ class MarketReader:
 
         # At this point, strike must be a numeric value and opt_data must be set.
         if not isinstance(strike, (int, float)):
-            raise ValueError(f"Strike must be numeric, got {type(strike).__name__}: {strike}")
+            return None, None
         if opt_data is None:
-            raise ValueError(f"Internal error: opt_data not assigned for strike {strike}")
+            return None, None
         return strike, opt_data
 
     def get_max_pain_strike(self, expiry: Optional[str] = None) -> float:
@@ -1178,17 +1356,41 @@ class MarketReader:
         Return chain-level aggregate metrics used by strategy conditions.
         """
         self._check_freshness(expiry)
+
+        _empty = {
+            "pcr": 0.0, "pcr_volume": 0.0,
+            "total_oi_ce": 0.0, "total_oi_pe": 0.0,
+            "oi_buildup_ce": 0.0, "oi_buildup_pe": 0.0,
+            "max_pain_strike": 0.0,
+        }
+
+        # Fast path: use tick snapshot if active
+        if self._tick_snapshot is not None:
+            rows = self._tick_snapshot["chain"].values()
+            ce_oi = sum(float(r.get("oi") or 0) for r in rows if r.get("option_type") == "CE")
+            pe_oi = sum(float(r.get("oi") or 0) for r in rows if r.get("option_type") == "PE")
+            ce_vol = sum(float(r.get("volume") or 0) for r in rows if r.get("option_type") == "CE")
+            pe_vol = sum(float(r.get("volume") or 0) for r in rows if r.get("option_type") == "PE")
+            cache_key = expiry if expiry is not None else "default"
+            prev = self._prev_total_oi.get(cache_key, {})
+            oi_buildup_ce = ce_oi - prev.get("CE", ce_oi)
+            oi_buildup_pe = pe_oi - prev.get("PE", pe_oi)
+            self._prev_total_oi[cache_key] = {"CE": ce_oi, "PE": pe_oi}
+            return {
+                "pcr": (pe_oi / ce_oi) if ce_oi > 0 else 0.0,
+                "pcr_volume": (pe_vol / ce_vol) if ce_vol > 0 else 0.0,
+                "total_oi_ce": ce_oi,
+                "total_oi_pe": pe_oi,
+                "prev_total_oi_ce": prev.get("CE", ce_oi),
+                "prev_total_oi_pe": prev.get("PE", pe_oi),
+                "oi_buildup_ce": oi_buildup_ce,
+                "oi_buildup_pe": oi_buildup_pe,
+                "max_pain_strike": self.get_max_pain_strike(expiry),
+            }
+
         conn = self._get_connection(expiry)
         if not conn:
-            return {
-                "pcr": 0.0,
-                "pcr_volume": 0.0,
-                "total_oi_ce": 0.0,
-                "total_oi_pe": 0.0,
-                "oi_buildup_ce": 0.0,
-                "oi_buildup_pe": 0.0,
-                "max_pain_strike": 0.0,
-            }
+            return _empty
         assert conn is not None
         try:
             cur = conn.cursor()
