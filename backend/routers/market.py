@@ -22,9 +22,25 @@ router = APIRouter(prefix="/market", tags=["market"])
 def _detect_exchange(sym: str, fallback: str = "NSE") -> str:
     """Auto-detect exchange from symbol pattern. Options/futures → NFO, else fallback."""
     upper = sym.upper().replace(" ", "")
-    inst = lookup_by_trading_symbol(upper)
-    if not inst and fallback:
-        inst = lookup_by_trading_symbol(f"{fallback}:{upper}")
+    fallback_upper = (fallback or "NSE").upper()
+
+    # Index aliases must never drift into derivatives/currency segments.
+    if upper in {
+        "NIFTY50", "NIFTY", "NIFTYBANK", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"
+    }:
+        return "NSE"
+    if upper in {"SENSEX", "BANKEX"}:
+        return "BSE"
+
+    # Resolve in the requested fallback exchange first to avoid cross-segment
+    # accidental matches (e.g. CDS rows outranking NSE index rows).
+    inst = None
+    if fallback_upper:
+        inst = lookup_by_trading_symbol(upper, fallback_upper)
+        if not inst:
+            inst = lookup_by_trading_symbol(f"{fallback_upper}:{upper}", fallback_upper)
+    if not inst:
+        inst = lookup_by_trading_symbol(upper)
     if inst and getattr(inst, "exchange", None):
         return str(inst.exchange)
     if re.search(r'\d{3,}(CE|PE)$', upper):
@@ -33,7 +49,7 @@ def _detect_exchange(sym: str, fallback: str = "NSE") -> str:
         return "NFO"
     if re.search(r'\d+FUT$', upper):
         return "NFO"
-    return fallback
+    return fallback_upper
 
 
 def _as_broker_symbol(sym: str, exchange: str) -> str:
