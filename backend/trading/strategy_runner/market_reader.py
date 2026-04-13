@@ -1330,8 +1330,10 @@ class MarketReader:
             for exp_date, exp_str in expiries:
                 if exp_date > cur_date:
                     return exp_str
-            # Wrap if only one expiry exists
-            return expiries[0][1]
+            # If no next expiry file exists yet, stay on current expiry.
+            # Never wrap to an older (past) expiry because that can point to stale
+            # chains and break strike selection (e.g., delta lookups).
+            return current
 
         elif mode == "weekly_next":
             # Find the first expiry after the current weekly (which we take as the first future expiry)
@@ -1340,8 +1342,9 @@ class MarketReader:
             for exp_date, exp_str in expiries:
                 if exp_date > cur_date:
                     return exp_str
-            # Wrap to first of next year? Or raise? We'll return first.
-            return expiries[0][1]
+            # If the next file is unavailable, keep current instead of moving
+            # backwards to an older expiry.
+            return current
 
         elif mode == "monthly_next":
             current = self.resolve_expiry_mode("monthly_current")
@@ -1349,7 +1352,7 @@ class MarketReader:
             for exp_date, exp_str in expiries:
                 if exp_date > cur_date:
                     return exp_str
-            return expiries[0][1]
+            return current
 
         else:
             raise ValueError(f"Unsupported expiry mode: {mode}")
