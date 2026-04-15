@@ -23,6 +23,7 @@ import os
 import re
 import threading
 import traceback
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -42,31 +43,140 @@ SAVED_CONFIGS_DIR = (
 )
 SAVED_CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── In-memory run-state registry (persist across API calls within same process)
-_running: Dict[str, Dict[str, Any]] = {}  # safe_name → state dict
+# ── In-memory run-state registry: keyed by run_id (not strategy name).
+# This allows multiple simultaneous instances of the same strategy template
+# running different symbols.
+_running: Dict[str, Dict[str, Any]] = {}  # run_id → instance state dict
 _lock = threading.Lock()
 
 
 def cleanup_stale_configs() -> None:
-    """Reset config files left as RUNNING from a previous server session.
-    Call once at startup when _running is empty."""
-    count = 0
-    for path in SAVED_CONFIGS_DIR.glob("*.json"):
-        if path.name.endswith(".schema.json"):
-            continue
+    """Legacy no-op kept for backward compat.  Actual stale-run cleanup is now
+    done via DB (abandon_stale_runs) and auto-resume instead of mutating
+    template config files."""
+    logger.info("cleanup_stale_configs: no-op (instance model active)")
+
+
+def auto_resume_today_runs() -> None:
+    """Restart threads for any strategy runs that were RUNNING when the server
+    last stopped/crashed — but only runs from the last 12 hours (today's session).
+
+    Older RUNNING runs (previous day) are abandoned by abandon_stale_runs().
+    Called once at server startup after broker sessions are restored.
+    """
+    try:
+        from trading.strategy_runner.db_persistence import DBPersistence
+        runs = DBPersistence.get_resumable_today_runs()
+    except Exception as exc:
+        logger.warning("auto_resume_today_runs: DB query failed: %s", exc)
+        return
+
+    if not runs:
+        logger.info("auto_resume_today_runs: no in-progress runs to resume")
+        return
+
+    logger.info("auto_resume_today_runs: found %d run(s) to resume", len(runs))
+    state_dir = SAVED_CONFIGS_DIR / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    for row in runs:
+        run_id = row["run_id"]
+        safe_name = row["strategy_name"]
+
+        with _lock:
+            if run_id in _running:
+                continue  # already running (shouldn't happen at startup)
+
+        # Rebuild instance config from snapshot.
+        # IMPORTANT: psycopg2 RealDictCursor returns JSONB columns as Python
+        # dicts, NOT strings.  json.loads(dict) raises TypeError, so we must
+        # handle both types.
+        snap = row.get("config_snapshot")
+        cfg: Optional[Dict[str, Any]] = None
+        if snap is not None:
+            if isinstance(snap, dict):
+                cfg = snap            # already parsed by psycopg2 JSONB
+            elif isinstance(snap, str):
+                try:
+                    cfg = json.loads(snap)
+                except Exception:
+                    cfg = None
+
+        if not cfg:
+            # Fallback: read the template file.  This MUST be augmented with
+            # the authoritative symbol/exchange from the DB row so that a
+            # BANKNIFTY instance doesn't silently become NIFTY.
+            path = _config_path(safe_name)
+            if path.exists():
+                with open(path) as fp:
+                    cfg = json.load(fp)
+                logger.warning(
+                    "auto_resume: config_snapshot missing/empty for %s — "
+                    "falling back to template; injecting symbol=%s exchange=%s from DB",
+                    run_id, row.get("symbol"), row.get("exchange"),
+                )
+            else:
+                logger.warning("auto_resume: no config for run %s — skipping", run_id)
+                try:
+                    from trading.strategy_runner.db_persistence import DBPersistence
+                    dp = DBPersistence(safe_name, {})
+                    dp.run_id = run_id
+                    dp.mark_stopped("resume_failed_no_config")
+                except Exception:
+                    pass
+                continue
+
+        # Always apply authoritative symbol/exchange/paper from DB row into
+        # the config — even if config_snapshot was valid — so that the
+        # executor never gets stale identity values.
+        identity = cfg.setdefault("identity", {})
+        if row.get("symbol"):
+            identity["underlying"] = row["symbol"]
+        if row.get("exchange"):
+            identity["exchange"] = row["exchange"]
+        if row.get("paper_mode") is not None:
+            identity["paper_mode"] = bool(row["paper_mode"])
+        # Tag instance-level metadata onto the config
+        cfg["_run_id"] = run_id
+        cfg["_template_name"] = safe_name
+
+        # Write instance config to state dir for the executor to read
+        instance_cfg_path = state_dir / f"{run_id}_config.json"
         try:
-            with open(path) as fp:
-                cfg = json.load(fp)
-            if cfg.get("status") == "RUNNING" or cfg.get("enabled") is True:
-                cfg["status"] = "STOPPED"
-                cfg["enabled"] = False
-                with open(path, "w") as fp:
-                    json.dump(cfg, fp, indent=2)
-                count += 1
+            with open(instance_cfg_path, "w") as fp:
+                json.dump(cfg, fp, indent=2)
         except Exception as exc:
-            logger.warning("cleanup_stale_configs: %s: %s", path.name, exc)
-    if count:
-        logger.info("cleanup_stale_configs: Reset %d stale config(s) to STOPPED", count)
+            logger.warning("auto_resume: could not write instance config for %s: %s", run_id, exc)
+            continue
+
+        symbol = identity.get("underlying", "NIFTY")
+        exchange = identity.get("exchange", "NFO")
+        paper_mode = identity.get("paper_mode", True)
+        display_name = f"{cfg.get('name', safe_name)} · {symbol}"
+
+        with _lock:
+            stop_evt = threading.Event()
+            t = threading.Thread(
+                target=_strategy_thread,
+                args=(run_id, safe_name, str(instance_cfg_path), stop_evt, True),
+                daemon=True,
+                name=f"strategy-{run_id[:30]}",
+            )
+            _running[run_id] = {
+                "thread": t,
+                "stop_event": stop_evt,
+                "started_at": datetime.utcnow().isoformat(),
+                "status": "running",
+                "error": None,
+                "template_name": safe_name,
+                "symbol": symbol,
+                "exchange": exchange,
+                "paper_mode": paper_mode,
+                "display_name": display_name,
+                "run_id": run_id,
+            }
+            t.start()
+        logger.info("auto_resume: started thread for run %s (%s %s)", run_id, safe_name, symbol)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -86,7 +196,17 @@ def _config_path(name: str) -> Path:
 
 @router.get("/dashboard/strategy/configs")
 async def list_configs(payload: dict = Depends(current_user)):
-    """List all saved strategy configs."""
+    """List all saved strategy templates (read-only, never mutated by run/stop)."""
+    # Build a set of template_names that have at least one running instance
+    with _lock:
+        running_copy = dict(_running)
+    templates_with_instances: Dict[str, int] = {}  # template_name → count of live instances
+    for run_id, entry in running_copy.items():
+        thread: Optional[threading.Thread] = entry.get("thread")
+        if thread and thread.is_alive():
+            tn = entry.get("template_name", "")
+            templates_with_instances[tn] = templates_with_instances.get(tn, 0) + 1
+
     configs: List[Dict[str, Any]] = []
     for path in sorted(SAVED_CONFIGS_DIR.glob("*.json")):
         if path.name.endswith(".schema.json"):
@@ -95,9 +215,7 @@ async def list_configs(payload: dict = Depends(current_user)):
             with open(path) as f:
                 c = json.load(f)
             safe = _safe_name(c.get("name", path.stem))
-            entry = _running.get(safe, {})
-            thread: Optional[threading.Thread] = entry.get("thread")
-            is_alive = thread.is_alive() if thread else False
+            instance_count = templates_with_instances.get(safe, 0)
             configs.append({
                 "name": c.get("name", path.stem),
                 "id": c.get("id", path.stem),
@@ -117,26 +235,12 @@ async def list_configs(payload: dict = Depends(current_user)):
                     c.get("timing", {}).get("eod_exit_time", "")
                     or c.get("schedule", {}).get("exit_time", "")
                 ),
-                "status": "running" if is_alive else entry.get("status", "stopped"),
-                "error": entry.get("error"),
+                # Templates are never RUNNING — show per-instance count instead
+                "status": "template",
+                "running_instances": instance_count,
                 "file": path.name,
                 "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
                 "schema_version": c.get("schema_version", ""),
-                # Executor state if running
-                "active_legs": 0,
-                "entered_today": False,
-                "combined_pnl": 0.0,
-                "spot_price": 0.0,
-                **(
-                    {
-                        "active_legs": entry.get("executor").state.active_legs_count,
-                        "entered_today": entry.get("executor").state.entered_today,
-                        "combined_pnl": entry.get("executor").state.combined_pnl,
-                        "spot_price": entry.get("executor").state.spot_price,
-                    }
-                    if is_alive and entry.get("executor")
-                    else {}
-                ),
             })
         except Exception as exc:
             logger.warning("Failed to read config %s: %s", path, exc)
@@ -183,13 +287,12 @@ async def save_config(
 
 @router.delete("/dashboard/strategy/config/{name}")
 async def delete_config(name: str, payload: dict = Depends(current_user)):
-    """Delete a strategy config."""
+    """Delete a strategy config template."""
     path = _config_path(name)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
     path.unlink()
-    with _lock:
-        _running.pop(_safe_name(name), None)
+    # Note: does NOT stop running instances — instances must be stopped separately
     return {"ok": True, "deleted": _safe_name(name)}
 
 
@@ -565,17 +668,32 @@ async def get_run_pnl(run_id: str, payload: dict = Depends(current_user)):
 # STRATEGY RUN / STOP / STATUS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event) -> None:
+def _strategy_thread(
+    run_id: str,
+    safe_name: str,
+    instance_config_path: str,
+    stop_evt: threading.Event,
+    resume_mode: bool = False,
+) -> None:
+    """Instance-based strategy execution thread.
+
+    Each call to this thread manages exactly one strategy *instance* identified
+    by *run_id*.  Multiple instances of the same template (safe_name) can run
+    concurrently for different symbols.
+
+    Args:
+        run_id: Unique instance ID (pre-generated by run_strategy or auto_resume).
+        safe_name: Template name (filesystem safe, e.g. 'dnss_dynamic_straddle').
+        instance_config_path: Path to the per-instance config JSON (with overrides).
+        stop_evt: Signals the thread to stop cleanly.
+        resume_mode: True when restarting after a crash (attaches to existing DB run).
     """
-    Strategy execution thread using the full StrategyExecutor engine.
-    Replaces the old heartbeat-only loop with real entry/exit/adjustment logic.
-    """
-    logger.info("Strategy thread started: %s", safe_name)
+    logger.info("Strategy thread started: run_id=%s safe_name=%s resume=%s", run_id, safe_name, resume_mode)
     executor = None
     db_persist = None
     try:
         from trading.strategy_runner.config_schema import validate_config  # type: ignore[import]
-        with open(config_path) as fp:
+        with open(instance_config_path) as fp:
             cfg = json.load(fp)
 
         ok, errors = validate_config(cfg)
@@ -584,15 +702,16 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
             if errs:
                 raise ValueError(f"Config validation failed: {'; '.join(errs[:3])}")
 
-        # Build state persistence path
+        # Per-instance state file — keyed by run_id so instances never share state
         state_dir = SAVED_CONFIGS_DIR / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
-        state_path = str(state_dir / f"{safe_name}_state.json")
+        state_path = str(state_dir / f"{run_id}_state.json")
 
-        # Attempt to populate option chain data if not already available
         identity = cfg.get("identity", {})
         underlying = identity.get("underlying", "NIFTY")
         exchange = identity.get("exchange", "NFO")
+
+        # Fetch option chain data on startup
         try:
             from trading.utils.option_chain_fetcher import fetch_and_store_from_broker
             result = fetch_and_store_from_broker(exchange, underlying)
@@ -607,35 +726,33 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
         except Exception as e:
             logger.warning("Option chain fetch attempt failed: %s", e)
 
-        # Create the StrategyExecutor with full engine pipeline
+        # Create the StrategyExecutor (reads from instance_config_path)
         from trading.strategy_runner.executor import StrategyExecutor
-        executor = StrategyExecutor(config_path, state_path)
+        executor = StrategyExecutor(instance_config_path, state_path)
 
-        # Wire DB persistence for restart-safe state
-        db_persist = None
+        # Wire DB persistence — use the pre-supplied run_id
         try:
             from trading.strategy_runner.db_persistence import DBPersistence
             db_persist = DBPersistence(safe_name, cfg)
-            # Check if there's a resumable run from a previous crash
-            resumable = DBPersistence.find_resumable_run(safe_name)
-            if resumable:
-                db_persist.attach_run(resumable)
+            if resume_mode:
+                # Attach to the existing DB run and restore state
+                db_persist.attach_run(run_id)
                 db_state = db_persist.load()
                 if db_state and db_state.legs:
                     executor.state = db_state
-                    logger.info("RESUME | Restored %d legs from DB run %s", len(db_state.legs), resumable)
+                    logger.info("RESUME | Restored %d legs from DB run %s", len(db_state.legs), run_id)
                 else:
-                    # No useful state — start fresh with new run
-                    db_persist.mark_stopped("stale_no_legs")
-                    db_persist = DBPersistence(safe_name, cfg)
-                    db_persist.create_run(executor.state)
+                    # Resuming but no useful state — start fresh within same run_id
+                    logger.info("RESUME | No legs found for run %s — starting fresh", run_id)
+                    db_persist.create_run(executor.state, pre_run_id=run_id)
             else:
-                db_persist.create_run(executor.state)
+                # Fresh start — create new DB row with the pre-supplied run_id
+                db_persist.create_run(executor.state, pre_run_id=run_id)
             executor.set_db_persistence(db_persist)
         except Exception as db_err:
             logger.warning("DB persistence setup failed (non-fatal): %s", db_err)
 
-        # Wire OMS into the executor for order placement
+        # Wire OMS
         try:
             from trading.oms import OrderManagementSystem
             paper_mode = cfg.get("identity", {}).get("paper_mode", True)
@@ -643,12 +760,9 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
             if not paper_mode:
                 try:
                     from broker.multi_broker import registry as broker_registry
-                    # Prefer the specific broker_config_id written at run-time.
-                    # Fall back to the first live session if no specific id was set.
                     requested_cfg_id = cfg.get("_broker_config_id")
                     all_sessions = broker_registry.get_all_sessions()
                     if requested_cfg_id:
-                        # Find session matching the requested config_id
                         broker_adapter = next(
                             (s for s in all_sessions if getattr(s, "config_id", None) == requested_cfg_id),
                             None,
@@ -656,11 +770,9 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
                         if broker_adapter is None:
                             logger.warning(
                                 "broker_config_id=%s not found in registry; "
-                                "falling back to first live session",
-                                requested_cfg_id,
+                                "falling back to first live session", requested_cfg_id,
                             )
                     if broker_adapter is None and all_sessions:
-                        # Take the first non-demo session
                         broker_adapter = next(
                             (s for s in all_sessions if not getattr(s, "is_demo", True)),
                             all_sessions[0],
@@ -669,31 +781,28 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
                     logger.warning("No live broker adapter available, falling back to paper: %s", ba_err)
             oms = OrderManagementSystem(broker_adapter=broker_adapter)
             executor.set_oms(oms)
-            logger.info("OMS injected into executor (paper=%s, broker=%s config_id=%s)",
+            logger.info("OMS injected (paper=%s, broker=%s config_id=%s)",
                         paper_mode, type(broker_adapter).__name__ if broker_adapter else "None",
                         getattr(broker_adapter, "config_id", "N/A") if broker_adapter else "N/A")
         except Exception as oms_err:
             logger.warning("OMS injection failed, executor will run without OMS: %s", oms_err)
 
-        # Wire LiveTickService for real-time LTP overlay (replaces stale 30s SQLite reads)
+        # Wire LiveTickService
         try:
             from broker.live_tick_service import get_tick_service
             tick_svc = get_tick_service()
             executor.set_tick_service(tick_svc)
-            # Subscribe the spot/underlying symbol for live spot price at strategy start
-            spot_symbols = [underlying]
-            tick_svc.subscribe(spot_symbols)
-            logger.info("LiveTickService injected + spot symbol subscribed: %s", spot_symbols)
-            # If resuming with existing legs, subscribe their symbols too
+            tick_svc.subscribe([underlying])
+            logger.info("LiveTickService injected + subscribed: %s", underlying)
             if executor.state.legs:
                 executor.subscribe_leg_symbols()
         except Exception as ts_err:
             logger.warning("LiveTickService injection failed (non-fatal): %s", ts_err)
 
-        # Store executor reference for monitoring endpoints
+        # Store executor reference for monitoring
         with _lock:
-            if safe_name in _running:
-                _running[safe_name]["executor"] = executor
+            if run_id in _running:
+                _running[run_id]["executor"] = executor
 
         # ── COMPREHENSIVE STARTUP LOG ──────────────────────────────────
         _identity = cfg.get("identity", {})
@@ -705,8 +814,9 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
         _broker_id = cfg.get("_broker_config_id", "none (paper)")
         _legs_def = _entry.get("legs", [])
         logger.info(
-            "━━━ STRATEGY RUN START ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "  Name       : %s\n"
+            "━━━ STRATEGY INSTANCE START ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "  run_id     : %s\n"
+            "  Template   : %s\n"
             "  Symbol     : %s  Exchange: %s\n"
             "  Paper Mode : %s\n"
             "  Broker CFG : %s\n"
@@ -719,6 +829,7 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
             "  Risk       : MaxLoss=%s  MaxDelta=%s  MaxLots=%s\n"
             "  Adjustments: %d rules defined\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            run_id,
             safe_name,
             _identity.get("underlying", "?"), _identity.get("exchange", "?"),
             _identity.get("paper_mode", True),
@@ -744,14 +855,13 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
             len(_adj.get("rules", [])),
         )
 
-        # Main tick loop — replaces the old heartbeat
+        # Main tick loop
         _backoff = 1
         tick_count = 0
         _last_chain_refresh = 0.0
-        _CHAIN_REFRESH_INTERVAL = 5.0  # Refresh option chain data every 5 seconds
+        _CHAIN_REFRESH_INTERVAL = 5.0
         while not stop_evt.is_set():
             try:
-                # Periodic option chain data refresh from broker
                 now_ts = __import__('time').time()
                 if now_ts - _last_chain_refresh >= _CHAIN_REFRESH_INTERVAL:
                     try:
@@ -763,15 +873,14 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
 
                 executor._tick()
                 tick_count += 1
-                _backoff = 1  # reset on clean tick
+                _backoff = 1
 
-                # Log heartbeat every 60 ticks (~1 min at 1s interval)
                 if tick_count % 60 == 0:
                     state = executor.state
                     logger.info(
                         "HEARTBEAT | %s | tick=%d | entered=%s | legs=%d | "
                         "spot=%.2f | pnl=%.2f | adj_today=%d",
-                        safe_name, tick_count,
+                        run_id, tick_count,
                         state.entered_today,
                         state.active_legs_count,
                         state.spot_price,
@@ -780,8 +889,8 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
                     )
             except Exception as e:
                 logger.exception(
-                    "Tick error for '%s' (backing off %ds): %s",
-                    safe_name, _backoff, e,
+                    "Tick error for instance '%s' (backing off %ds): %s",
+                    run_id, _backoff, e,
                 )
                 try:
                     executor._save_state()
@@ -789,34 +898,31 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
                     pass
                 _backoff = min(_backoff * 2, 60)
 
-            # Wait for next tick (1s default) or until stop is signalled
             stop_evt.wait(timeout=max(1, _backoff))
 
-        # Clean shutdown — save final state
+        # Clean shutdown
         if executor:
             try:
-                executor.unsubscribe_all()  # Release WS subscriptions
+                executor.unsubscribe_all()
             except Exception:
                 pass
             try:
                 executor._save_state()
-                logger.info("Strategy '%s' state saved on shutdown", safe_name)
+                logger.info("Instance '%s' state saved on shutdown", run_id)
             except Exception as e:
-                logger.warning("Failed to save state for '%s': %s", safe_name, e)
-        # Mark DB run as stopped
+                logger.warning("Failed to save state for '%s': %s", run_id, e)
         if db_persist:
             try:
                 db_persist.mark_stopped("normal_stop")
             except Exception as e:
-                logger.warning("Failed to mark DB run stopped for '%s': %s", safe_name, e)
+                logger.warning("Failed to mark DB run stopped for '%s': %s", run_id, e)
 
     except Exception as exc:
-        logger.error("Strategy '%s' error: %s", safe_name, exc, exc_info=True)
+        logger.error("Instance '%s' error: %s", run_id, exc, exc_info=True)
         with _lock:
-            if safe_name in _running:
-                _running[safe_name]["status"] = "error"
-                _running[safe_name]["error"] = str(exc)
-        # Mark DB run as error
+            if run_id in _running:
+                _running[run_id]["status"] = "error"
+                _running[run_id]["error"] = str(exc)
         if db_persist:
             try:
                 db_persist.mark_error(str(exc))
@@ -825,9 +931,17 @@ def _strategy_thread(safe_name: str, config_path: str, stop_evt: threading.Event
         return
 
     with _lock:
-        if safe_name in _running:
-            _running[safe_name]["status"] = "stopped"
-    logger.info("Strategy thread stopped: %s", safe_name)
+        if run_id in _running:
+            _running[run_id]["status"] = "stopped"
+    logger.info("Strategy instance stopped: %s", run_id)
+    # Remove from registry after a short delay so the UI can display final state
+    import threading as _threading
+    def _deregister():
+        import time as _time
+        _time.sleep(30)   # keep visible for 30s after stop
+        with _lock:
+            _running.pop(run_id, None)
+    _threading.Thread(target=_deregister, daemon=True).start()
 
 
 @router.post("/strategy/run/{name}")
@@ -836,12 +950,16 @@ async def run_strategy(
     body: Dict[str, Any] = Body(default={}),
     payload: dict = Depends(current_user),
 ):
-    """
-    Enable and start a strategy.
-    Optional body fields for runtime overrides (config file is NOT modified):
-      symbol      — underlying symbol (e.g. "NIFTY", "BANKNIFTY")
-      exchange    — exchange code (e.g. "NFO", "BFO")
-      paper_mode  — true/false
+    """Start a new strategy *instance* from the named template.
+
+    The template JSON file is **never mutated**.  Each call creates a fresh
+    isolated instance with a unique run_id, so the same template can run
+    concurrently for NIFTY, BANKNIFTY, etc.
+
+    Optional body fields (runtime overrides applied only to instance config):
+      symbol           — underlying symbol (e.g. "NIFTY", "BANKNIFTY")
+      exchange         — exchange code (e.g. "NFO", "BFO")
+      paper_mode       — true/false
       broker_config_id — config_id of a connected broker session
     """
     safe = _safe_name(name)
@@ -849,24 +967,13 @@ async def run_strategy(
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
 
-    with _lock:
-        entry = _running.get(safe, {})
-        thread: Optional[threading.Thread] = entry.get("thread")
-        if thread and thread.is_alive():
-            raise HTTPException(status_code=409, detail=f"Strategy '{name}' is already running")
-        # Clean up stale entry if thread is dead
-        if thread and not thread.is_alive():
-            logger.info("Cleaning up stale running entry for '%s' (thread dead)", safe)
-            _running.pop(safe, None)
-
-    # Pre-validate config before spawning thread
-    # Apply overrides FIRST so validation sees the runtime symbol/exchange
+    # Load template — do NOT write back
     warnings_list: List[str] = []
     try:
         with open(path) as fp:
             cfg = json.load(fp)
 
-        # Apply runtime overrides before validation
+        # Apply runtime overrides into a copy (template file unchanged)
         override_symbol = body.get("symbol")
         override_exchange = body.get("exchange")
         override_paper = body.get("paper_mode")
@@ -876,7 +983,6 @@ async def run_strategy(
             identity["underlying"] = override_symbol
         if override_exchange:
             identity["exchange"] = override_exchange
-        # Set sensible defaults if still missing (symbol-agnostic configs)
         identity.setdefault("underlying", "NIFTY")
         identity.setdefault("exchange", "NFO")
         if override_paper is not None:
@@ -896,138 +1002,170 @@ async def run_strategy(
                     status_code=422,
                     detail=f"Config validation failed: {'; '.join(errs[:5])}"
                 )
-        # Collect warnings for the response
         warnings_list = [str(e) for e in errors if e.severity == "warning"]
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Cannot read config: {exc}")
 
-    # Patch config file BEFORE starting thread to avoid race condition
-    try:
-        cfg["enabled"] = True
-        cfg["status"] = "RUNNING"
+    # Generate unique run_id for this instance
+    run_id = f"{safe}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
-        with open(path, "w") as fp:
+    # Write per-instance config (with overrides applied) to state directory
+    state_dir = SAVED_CONFIGS_DIR / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    instance_config_path = state_dir / f"{run_id}_config.json"
+    try:
+        cfg["_run_id"] = run_id
+        cfg["_template_name"] = safe
+        with open(instance_config_path, "w") as fp:
             json.dump(cfg, fp, indent=2)
     except Exception as exc:
-        logger.warning("Could not update enabled flag for %s: %s", name, exc)
+        raise HTTPException(status_code=500, detail=f"Cannot write instance config: {exc}")
 
-    # Clear old state file so the strategy starts fresh (0 PnL).
-    # State files are only useful for crash recovery, not for manual re-starts.
-    state_dir = SAVED_CONFIGS_DIR / "state"
-    old_state = state_dir / f"{safe}_state.json"
-    if old_state.exists():
-        try:
-            old_state.unlink()
-            logger.info("Cleared old state file for fresh start: %s", old_state.name)
-        except Exception as exc:
-            logger.warning("Could not remove old state file %s: %s", old_state, exc)
+    symbol = cfg.get("identity", {}).get("underlying", "NIFTY")
+    exchange = cfg.get("identity", {}).get("exchange", "NFO")
+    paper_mode = cfg.get("identity", {}).get("paper_mode", True)
+    display_name = f"{safe} · {symbol}"
 
     with _lock:
         stop_evt = threading.Event()
         t = threading.Thread(
             target=_strategy_thread,
-            args=(safe, str(path), stop_evt),
+            args=(run_id, safe, str(instance_config_path), stop_evt, False),
             daemon=True,
-            name=f"strategy-{safe}",
+            name=f"strategy-{run_id}",
         )
-        _running[safe] = {
+        _running[run_id] = {
+            "run_id": run_id,
+            "template_name": safe,
+            "symbol": symbol,
+            "exchange": exchange,
+            "paper_mode": paper_mode,
+            "display_name": display_name,
             "thread": t,
             "stop_event": stop_evt,
             "started_at": datetime.utcnow().isoformat(),
             "status": "running",
             "error": None,
+            "executor": None,
         }
         t.start()
 
+    logger.info("Started strategy instance: run_id=%s template=%s symbol=%s paper=%s", run_id, safe, symbol, paper_mode)
+
     return {
         "ok": True,
+        "run_id": run_id,
         "name": safe,
+        "symbol": symbol,
+        "exchange": exchange,
+        "paper_mode": paper_mode,
+        "display_name": display_name,
         "status": "running",
         "warnings": warnings_list[:5] if warnings_list else [],
     }
 
 
-@router.post("/strategy/stop/{name}")
-async def stop_strategy(name: str, payload: dict = Depends(current_user)):
-    """Stop a running strategy."""
-    safe = _safe_name(name)
+@router.post("/strategy/stop/{run_id_or_name}")
+async def stop_strategy(run_id_or_name: str, payload: dict = Depends(current_user)):
+    """Stop a running strategy instance (or all instances of a template).
+
+    Accepts either:
+    - A specific run_id (e.g. 'dnss_dynamic_straddle_20260415_100000_abc123') — stops that instance.
+    - A template name (e.g. 'dnss_dynamic_straddle') — stops ALL running instances of that template.
+    """
+    stopped: List[str] = []
     with _lock:
-        entry = _running.get(safe)
-    if not entry:
+        # Try exact run_id match first
+        if run_id_or_name in _running:
+            entry = _running[run_id_or_name]
+            entry["stop_event"].set()
+            entry["status"] = "stopping"
+            stopped.append(run_id_or_name)
+        else:
+            # Fall back: stop all instances whose template_name matches
+            safe = _safe_name(run_id_or_name)
+            for rid, entry in list(_running.items()):
+                if entry.get("template_name") == safe:
+                    entry["stop_event"].set()
+                    entry["status"] = "stopping"
+                    stopped.append(rid)
+
+    if not stopped:
         raise HTTPException(
             status_code=404,
-            detail=f"Strategy '{name}' is not in the running registry",
+            detail=f"No running instance found for '{run_id_or_name}'",
         )
-    entry["stop_event"].set()
-    entry["status"] = "stopping"
 
-    # Patch config
-    path = _config_path(name)
-    try:
-        with open(path) as fp:
-            cfg = json.load(fp)
-        cfg["enabled"] = False
-        cfg["status"] = "STOPPED"
-        with open(path, "w") as fp:
-            json.dump(cfg, fp, indent=2)
-    except Exception as exc:
-        logger.warning("Could not update status for %s: %s", name, exc)
-
-    return {"ok": True, "name": safe, "status": "stopping"}
+    logger.info("Stopping strategy instance(s): %s", stopped)
+    return {"ok": True, "stopped": stopped, "status": "stopping"}
 
 
 def _get_all_strategy_status() -> list:
-    """Return status of all saved strategies (usable from WS feed too)."""
+    """Return status of all running strategy instances (keyed by run_id).
+
+    Only active (thread-alive) and recent error instances are returned.
+    Stopped instances are purged from _running and excluded from results
+    to keep the Running tab clean.
+    """
     result: List[Dict[str, Any]] = []
-    for path in sorted(SAVED_CONFIGS_DIR.glob("*.json")):
-        if path.name.endswith(".schema.json"):
-            continue
-        try:
-            with open(path) as fp:
-                cfg = json.load(fp)
-            safe = _safe_name(cfg.get("name", path.stem))
-            with _lock:
-                entry = _running.get(safe, {})
-            thread: Optional[threading.Thread] = entry.get("thread")
-            is_alive = thread.is_alive() if thread else False
-            result.append({
-                "name": safe,
-                "display_name": cfg.get("name", safe),
-                "description": cfg.get("description", ""),
-                "type": cfg.get("type", "neutral"),
-                "underlying": cfg.get("identity", {}).get("underlying", ""),
-                "paper_mode": cfg.get("identity", {}).get("paper_mode", True),
-                "status": "running" if is_alive else entry.get("status", "stopped"),
-                "started_at": entry.get("started_at"),
-                "error": entry.get("error"),
-                "file": path.name,
-                "entered_today": (
-                    entry.get("executor").state.entered_today
-                    if is_alive and entry.get("executor") else False
-                ),
-                "active_legs": (
-                    entry.get("executor").state.active_legs_count
-                    if is_alive and entry.get("executor") else 0
-                ),
-                "combined_pnl": (
-                    entry.get("executor").state.combined_pnl
-                    if is_alive and entry.get("executor") else 0.0
-                ),
-                "spot_price": (
-                    entry.get("executor").state.spot_price
-                    if is_alive and entry.get("executor") else 0.0
-                ),
-            })
-        except Exception as exc:
-            logger.warning("Status read error for %s: %s", path.name, exc)
+    with _lock:
+        snapshot = dict(_running)
+
+    # Purge cleanly-stopped threads so they don't pollute the Running tab.
+    dead_run_ids = [
+        rid for rid, entry in snapshot.items()
+        if not (entry.get("thread") and entry["thread"].is_alive())
+        and entry.get("status") not in ("running", "error")
+    ]
+    if dead_run_ids:
+        with _lock:
+            for rid in dead_run_ids:
+                _running.pop(rid, None)
+        for rid in dead_run_ids:
+            snapshot.pop(rid, None)
+
+    for run_id, entry in snapshot.items():
+        thread: Optional[threading.Thread] = entry.get("thread")
+        is_alive = thread.is_alive() if thread else False
+        executor = entry.get("executor")
+        result.append({
+            "run_id": run_id,
+            "name": run_id,                          # backward-compat key for LiveMonitorPanel
+            "template_name": entry.get("template_name", ""),
+            "display_name": entry.get("display_name", run_id),
+            "symbol": entry.get("symbol", ""),
+            "exchange": entry.get("exchange", ""),
+            "paper_mode": entry.get("paper_mode", True),
+            "status": "running" if is_alive else entry.get("status", "stopped"),
+            "started_at": entry.get("started_at"),
+            "error": entry.get("error"),
+            "entered_today": (
+                executor.state.entered_today if is_alive and executor else False
+            ),
+            "active_legs": (
+                executor.state.active_legs_count if is_alive and executor else 0
+            ),
+            "combined_pnl": (
+                executor.state.combined_pnl if is_alive and executor else 0.0
+            ),
+            "spot_price": (
+                executor.state.spot_price if is_alive and executor else 0.0
+            ),
+        })
     return result
+
+
+@router.get("/strategy/instances")
+async def strategy_instances(payload: dict = Depends(current_user)):
+    """Return all running strategy instances."""
+    return _get_all_strategy_status()
 
 
 @router.get("/strategy/status")
 async def all_status(payload: dict = Depends(current_user)):
-    """Return status of all saved strategies."""
+    """Return status of all running strategy instances (alias for /instances)."""
     return _get_all_strategy_status()
 
 
@@ -1112,25 +1250,42 @@ def _executor_legs_to_positions(executor, safe_name: str) -> List[Dict[str, Any]
     return positions
 
 
-@router.get("/strategy/monitor/{name}")
-async def strategy_monitor(name: str, payload: dict = Depends(current_user)):
+@router.get("/strategy/monitor/{run_id_or_name}")
+async def strategy_monitor(run_id_or_name: str, payload: dict = Depends(current_user)):
+    """Get real-time monitoring data for a running strategy instance.
+
+    Accepts either a run_id (exact instance) or a template name (returns the
+    first active instance of that template for backward compatibility).
     """
-    Get real-time monitoring data for a running strategy.
-    Returns executor state in OMS-compatible format for the LiveMonitorPanel.
-    """
-    safe = _safe_name(name)
     with _lock:
-        entry = _running.get(safe)
+        # Prefer exact run_id match
+        entry = _running.get(run_id_or_name)
+        if not entry:
+            # Fallback: find first running instance of the template
+            safe = _safe_name(run_id_or_name)
+            entry = next(
+                (e for e in _running.values() if e.get("template_name") == safe),
+                None,
+            )
+            run_id_or_name = next(
+                (rid for rid, e in _running.items() if e.get("template_name") == safe),
+                run_id_or_name,
+            )
+
     if not entry:
-        raise HTTPException(status_code=404, detail=f"Strategy '{name}' is not running")
+        raise HTTPException(status_code=404, detail=f"Strategy '{run_id_or_name}' is not running")
 
     executor = entry.get("executor")
     thread: Optional[threading.Thread] = entry.get("thread")
     is_alive = thread.is_alive() if thread else False
+    run_id = entry.get("run_id", run_id_or_name)
+    template_name = entry.get("template_name", run_id)
 
     if not executor:
         return {
-            "strategy": safe,
+            "strategy": run_id,
+            "template_name": template_name,
+            "display_name": entry.get("display_name", run_id),
             "status": entry.get("status", "starting"),
             "legs": [],
             "market_data": {},
@@ -1138,10 +1293,12 @@ async def strategy_monitor(name: str, payload: dict = Depends(current_user)):
         }
 
     state = executor.state
-    legs = _executor_legs_to_positions(executor, safe)
+    legs = _executor_legs_to_positions(executor, template_name)
 
     return {
-        "strategy": safe,
+        "strategy": run_id,
+        "template_name": template_name,
+        "display_name": entry.get("display_name", run_id),
         "status": "running" if is_alive else entry.get("status", "stopped"),
         "error": entry.get("error"),
         "legs": legs,
@@ -1180,25 +1337,20 @@ async def strategy_monitor(name: str, payload: dict = Depends(current_user)):
 
 @router.get("/strategy/monitor")
 async def all_strategy_positions(payload: dict = Depends(current_user)):
-    """
-    Aggregate positions from ALL running strategy executors.
-    Returns a flat list of OMS-compatible positions for the LiveMonitorPanel.
-    This endpoint is polled by the frontend as a fallback/supplement to /oms/positions.
-    """
+    """Aggregate positions from ALL running strategy instances."""
     all_positions: List[Dict[str, Any]] = []
     with _lock:
         running_copy = dict(_running)
 
-    for safe_name, entry in running_copy.items():
+    for run_id, entry in running_copy.items():
         executor = entry.get("executor")
         thread: Optional[threading.Thread] = entry.get("thread")
         is_alive = thread.is_alive() if thread else False
         if executor and is_alive:
             try:
-                positions = _executor_legs_to_positions(executor, safe_name)
-                # Only include active legs for the live monitor
+                positions = _executor_legs_to_positions(executor, entry.get("template_name", run_id))
                 all_positions.extend(p for p in positions if p.get("is_active"))
             except Exception as e:
-                logger.warning("Monitor read error for %s: %s", safe_name, e)
+                logger.warning("Monitor read error for %s: %s", run_id, e)
 
     return all_positions

@@ -222,12 +222,17 @@ async def on_startup():
 
     logger.info("FastAPI startup complete — listening on %s:%d", config.HOST, config.PORT)
 
-    # ── Reset any strategy configs left as RUNNING from previous session ──
+    # ── Mark stale RUNNING DB strategy runs as ABANDONED; resume today's ────
     try:
-        from routers.strategy import cleanup_stale_configs
-        cleanup_stale_configs()
+        from trading.strategy_runner.db_persistence import DBPersistence
+        DBPersistence.abandon_stale_runs()
     except Exception as exc:
-        logger.warning("Strategy config cleanup failed (non-fatal): %s", exc)
+        logger.warning("Strategy stale-run cleanup failed (non-fatal): %s", exc)
+    try:
+        from routers.strategy import auto_resume_today_runs
+        auto_resume_today_runs()
+    except Exception as exc:
+        logger.warning("Strategy auto-resume failed (non-fatal): %s", exc)
 
     # ── Restore broker sessions from DB ──────────────────────────────────────
     # This allows sessions to survive server restarts (session tokens are persistent)

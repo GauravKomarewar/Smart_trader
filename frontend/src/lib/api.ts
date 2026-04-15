@@ -227,9 +227,11 @@ export const api = {
 
   // ── Strategy Runner — run / stop / status ────────────────────────────────
   runStrategy:  (name: string, overrides?: { symbol?: string; exchange?: string; paper_mode?: boolean; broker_config_id?: string }) =>
-    api.post<{ ok: boolean; name: string; status: string }>(`/strategy/run/${encodeURIComponent(name)}`, overrides || {}),
-  stopStrategy: (name: string) =>
-    api.post<{ ok: boolean; name: string; status: string }>(`/strategy/stop/${encodeURIComponent(name)}`, {}),
+    api.post<{ ok: boolean; run_id: string; name: string; symbol: string; exchange: string; paper_mode: boolean; display_name: string; status: string; warnings: string[] }>(`/strategy/run/${encodeURIComponent(name)}`, overrides || {}),
+  stopStrategy: (runIdOrName: string) =>
+    api.post<{ ok: boolean; stopped: string[]; status: string }>(`/strategy/stop/${encodeURIComponent(runIdOrName)}`, {}),
+  strategyInstances: () =>
+    api.getNoStore<any[]>('/strategy/instances'),
   strategyStatus: () =>
     api.getNoStore<any[]>('/strategy/status'),
 

@@ -33,9 +33,18 @@ class DBPersistence:
 
     # ── Create a new run ────────────────────────────────────────────────────
 
-    def create_run(self, state: StrategyState) -> str:
-        """Insert a new strategy_runs row, return run_id."""
-        self.run_id = f"{self.strategy_name}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    def create_run(self, state: StrategyState, pre_run_id: Optional[str] = None) -> str:
+        """Insert a new strategy_runs row, return run_id.
+
+        If *pre_run_id* is provided, that value is used instead of generating
+        a fresh one.  This is needed when the caller (strategy thread) has
+        already registered the run_id in the in-memory _running dict before
+        the thread starts, so the DB row matches the in-memory key.
+        """
+        if pre_run_id:
+            self.run_id = pre_run_id
+        else:
+            self.run_id = f"{self.strategy_name}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         identity = self._config.get("identity", {})
         with trading_cursor() as cur:
             cur.execute("""
@@ -44,6 +53,7 @@ class DBPersistence:
                      paper_mode, broker_config_id, status, config_snapshot,
                      entered_today, started_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (run_id) DO NOTHING
             """, (
                 self.run_id,
                 self.strategy_name,
@@ -63,15 +73,64 @@ class DBPersistence:
 
     @classmethod
     def find_resumable_run(cls, strategy_name: str) -> Optional[str]:
-        """Find the latest RUNNING run_id for this strategy (for restart recovery)."""
+        """Find the latest RUNNING run_id for this strategy started within the last 12 hours.
+
+        The 12-hour window ensures we only resume same-day runs (crash recovery)
+        and never accidentally carry over history from previous days.
+        """
         with trading_cursor() as cur:
             cur.execute("""
                 SELECT run_id FROM strategy_runs
-                WHERE strategy_name = %s AND status = 'RUNNING'
+                WHERE strategy_name = %s
+                  AND status = 'RUNNING'
+                  AND started_at >= NOW() - INTERVAL '12 hours'
                 ORDER BY started_at DESC LIMIT 1
             """, (strategy_name,))
             row = cur.fetchone()
             return row["run_id"] if row else None
+
+    @classmethod
+    def get_resumable_today_runs(cls) -> list:
+        """Return all RUNNING strategy runs started within the last 12 hours.
+
+        Used at startup to auto-resume threads after a crash/restart.
+        Returns list of dicts with run_id, strategy_name, config_snapshot.
+        """
+        with trading_cursor() as cur:
+            cur.execute("""
+                SELECT run_id, strategy_name, config_name, symbol, exchange,
+                       paper_mode, config_snapshot
+                FROM strategy_runs
+                WHERE status = 'RUNNING'
+                  AND started_at >= NOW() - INTERVAL '12 hours'
+                ORDER BY started_at ASC
+            """)
+            rows = cur.fetchall()
+        return [dict(r) for r in rows]
+
+    @classmethod
+    def abandon_stale_runs(cls) -> int:
+        """Mark all RUNNING runs older than 12 hours as ABANDONED.
+
+        Called at server startup to clean up runs that were left
+        in RUNNING state from a previous server session that crashed
+        more than 12 hours ago (i.e., previous day's market session).
+        Returns the number of runs abandoned.
+        """
+        with trading_cursor() as cur:
+            cur.execute("""
+                UPDATE strategy_runs
+                SET status = 'ABANDONED',
+                    exit_reason = 'server_restart_stale',
+                    stopped_at = NOW(),
+                    updated_at = NOW()
+                WHERE status = 'RUNNING'
+                  AND started_at < NOW() - INTERVAL '12 hours'
+            """)
+            count = cur.rowcount
+        if count:
+            logger.info("DB: Abandoned %d stale RUNNING run(s) older than 12 hours", count)
+        return count
 
     def attach_run(self, run_id: str) -> None:
         """Attach to an existing run_id (for resume after restart)."""

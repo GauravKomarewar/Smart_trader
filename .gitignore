@@ -38,6 +38,10 @@ backend/data/
 /tmp/
 logs/
 
+# Runtime instance state files
+backend/trading/strategy_runner/saved_configs/state/*_config.json
+backend/trading/strategy_runner/saved_configs/state/*_state.json
+
 # IDE
 .vscode/
 .idea/

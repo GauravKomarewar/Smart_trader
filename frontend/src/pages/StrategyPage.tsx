@@ -15,7 +15,7 @@ import {
   Wifi, Loader2, PauseCircle, PlayCircle, Cpu, Pencil, Trash2,
   Clock, Layers, Settings2, Shield, BarChart3, Target, BarChart2,
   Repeat, ChevronRight, X, Search, History, ChevronDown, ChevronUp,
-  ArrowUpRight, ArrowDownRight, Info,
+  ArrowUpRight, ArrowDownRight, Info, Rocket, StopCircle,
 } from 'lucide-react'
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip as RTooltip,
@@ -27,7 +27,7 @@ type PageTab = 'all' | 'running' | 'monitor' | 'history'
 
 // ── Quick-run presets stored in localStorage ──────
 const QR_KEY = 'st_quick_run_presets'
-type QuickRunPreset = { symbol: string; exchange: string; broker: string; paper: boolean }
+type QuickRunPreset = { symbol: string; exchange: string; broker: string; paper: boolean; brokers?: string[] }
 
 function loadPresets(): Record<string, QuickRunPreset> {
   try { return JSON.parse(localStorage.getItem(QR_KEY) || '{}') } catch { return {} }
@@ -55,11 +55,11 @@ const TYPE_CONFIG: Record<string, { icon: typeof TrendingUp; color: string; bg: 
 /* ════════════════════════════════════════════════
    Summary KPIs
    ════════════════════════════════════════════════ */
-function SummaryKPIs({ strategies }: { strategies: any[] }) {
+function SummaryKPIs({ strategies, instances }: { strategies: any[]; instances: any[] }) {
   const total      = strategies.length
-  const liveCount  = strategies.filter(s => !s.paper_mode && s.status === 'running').length
-  const paperCount = strategies.filter(s => s.paper_mode && s.status === 'running').length
-  const errors     = strategies.filter(s => s.status === 'error').length
+  const liveCount  = instances.filter(i => !i.paper_mode).length
+  const paperCount = instances.filter(i => i.paper_mode).length
+  const errors     = instances.filter(i => i.status === 'error').length
 
   const kpis = [
     { label: 'Total',  value: String(total), cls: 'text-text-bright', icon: Activity, live: false },
@@ -217,36 +217,169 @@ function SymbolPicker({
 /* ════════════════════════════════════════════════
    Strategy Card — compact row with inline run panel
    ════════════════════════════════════════════════ */
+/* ════════════════════════════════════════════════
+   InstanceCard — one running strategy instance
+   Used exclusively in the "Running" tab
+   ════════════════════════════════════════════════ */
+function InstanceCard({
+  inst, onStop, onSwitchToMonitor,
+}: {
+  inst: any
+  onStop: (runId: string) => void
+  onSwitchToMonitor: () => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const isAlive  = inst.status === 'running'
+  const isError  = inst.status === 'error'
+  const pnl      = Number(inst.combined_pnl ?? 0)
+  const templateLabel = (inst.template_name || '').replace(/_/g, ' ')
+
+  // Duration since started_at
+  const durationStr = (() => {
+    if (!inst.started_at) return '—'
+    const ms = Date.now() - new Date(inst.started_at).getTime()
+    const m = Math.floor(ms / 60000)
+    return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`
+  })()
+
+  return (
+    <div className={cn(
+      'relative rounded-xl border transition-all duration-200',
+      inst.paper_mode ? 'strat-card-mock' : 'strat-card-live',
+      isAlive && 'strat-card-running',
+      expanded && 'ring-1 ring-profit/30',
+    )}>
+      {/* Header */}
+      <div className="px-4 py-3 cursor-pointer" onClick={() => setExpanded(x => !x)}>
+        <div className="flex items-center gap-2.5 flex-wrap">
+          {/* Status dot */}
+          {isAlive
+            ? <span className="w-2.5 h-2.5 rounded-full bg-profit live-dot-blink shrink-0 shadow-[0_0_8px_rgba(34,197,94,0.6)]" />
+            : isError
+              ? <span className="w-2.5 h-2.5 rounded-full bg-loss shrink-0" />
+              : <span className="w-2.5 h-2.5 rounded-full bg-yellow-400/60 shrink-0" />}
+
+          {/* Template name */}
+          <span className="text-[13px] font-semibold text-text-bright capitalize truncate">{templateLabel}</span>
+
+          {/* Symbol chip */}
+          <span className="text-[10px] font-mono font-bold text-brand bg-brand/10 border border-brand/20 rounded px-1.5 py-0.5">
+            {inst.symbol} · {inst.exchange}
+          </span>
+
+          {/* Paper / Live */}
+          {inst.paper_mode
+            ? <span className="text-[9px] px-2 py-0.5 rounded-full font-bold border border-brand/40 bg-brand/15 text-brand">🧪 PAPER</span>
+            : <span className="text-[9px] px-2 py-0.5 rounded-full font-bold border border-loss/40 bg-loss/15 text-[#fda4af]">
+                <span className="w-1.5 h-1.5 rounded-full bg-current live-dot-blink inline-block mr-1" />LIVE
+              </span>}
+
+          {/* Status badge */}
+          <span className={cn(
+            'text-[9px] px-2 py-0.5 rounded-full font-bold border uppercase',
+            isAlive ? 'border-profit/40 bg-profit/15 text-profit' :
+            isError ? 'border-loss/40 bg-loss/15 text-loss' :
+            'border-yellow-400/40 bg-yellow-400/10 text-yellow-400'
+          )}>{inst.status}</span>
+
+          {/* Duration */}
+          <span className="text-[10px] text-text-muted ml-auto shrink-0">{durationStr}</span>
+
+          <ChevronRight className={cn('w-3.5 h-3.5 text-text-muted transition-transform shrink-0', expanded && 'rotate-90')} />
+        </div>
+
+        {/* Metrics row */}
+        <div className="mt-2 flex items-center gap-4 text-[11px] flex-wrap">
+          {inst.active_legs != null && (
+            <span className="text-text-muted">Legs: <strong className="text-text-bright font-mono">{inst.active_legs}</strong></span>
+          )}
+          <span className="text-text-muted">PnL:
+            <strong className={cn('font-mono ml-1', pnl >= 0 ? 'text-profit' : 'text-loss')}>
+              {pnl >= 0 ? '+' : ''}₹{pnl.toFixed(0)}
+            </strong>
+          </span>
+          {inst.spot_price > 0 && (
+            <span className="text-text-muted">Spot: <strong className="text-brand font-mono">{Number(inst.spot_price).toFixed(0)}</strong></span>
+          )}
+          {inst.entered_today && (
+            <span className="text-[9px] text-profit font-semibold">● Entered</span>
+          )}
+          {isError && inst.error && (
+            <span className="text-[10px] text-loss truncate max-w-xs">{inst.error}</span>
+          )}
+        </div>
+      </div>
+
+      {/* Expanded actions */}
+      {expanded && (
+        <div className="border-t border-white/[0.06] px-4 py-3 flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => onStop(inst.run_id)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-loss/10 text-loss border border-loss/20 hover:bg-loss/20 transition-colors"
+          >
+            <StopCircle className="w-3.5 h-3.5" /> Stop Instance
+          </button>
+          <button
+            onClick={onSwitchToMonitor}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium bg-profit/10 text-profit border border-profit/20 hover:bg-profit/20 transition-colors"
+          >
+            <Activity className="w-3.5 h-3.5" /> View in Monitor
+          </button>
+          <span className="text-[9px] text-text-muted font-mono ml-auto">{inst.run_id}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ════════════════════════════════════════════════
+   StrategyCard — template card for "All Strategies" tab
+   Deploy button launches new instance(s).
+   No stop/running state here.
+   ════════════════════════════════════════════════ */
 function StrategyCard({
-  s, expanded, onToggle, onRun, onStop, onEdit, onDelete, brokers, symbols, loadingBS,
+  s, expanded, onToggle, onRun, onEdit, onDelete, brokers, symbols, loadingBS, instanceCount,
 }: {
   s: any
   expanded: boolean
   onToggle: () => void
   onRun: (name: string, overrides?: any) => Promise<void>
-  onStop: (name: string) => void
   onEdit: (name: string) => void
   onDelete: (name: string) => void
   brokers: any[]
   symbols: any[]
   loadingBS: boolean
+  instanceCount: number   // how many instances are currently running from this template
 }) {
-  const isRunning = s.status === 'running'
-  const isError   = s.status === 'error'
-  const isPaper   = !!s.paper_mode
   const typeConf  = TYPE_CONFIG[s.type] || TYPE_CONFIG.neutral
   const TypeIcon  = typeConf.icon
   const displayName = (s.name || s.id || '').replace(/_/g, ' ')
   const legCount = s.legs ?? 0
   const lots = s.lots ?? 1
 
-  // Quick-run state (saved per strategy)
+  // Deploy state (saved per strategy)
   const presets = loadPresets()
   const saved = presets[s.name]
   const [selSymbol, setSelSymbol]     = useState(saved?.symbol || 'NIFTY')
   const [selExchange, setSelExchange] = useState(saved?.exchange || 'NFO')
-  const [selBroker, setSelBroker]     = useState(saved?.broker || '__paper__')
-  const [running, setRunning]         = useState(false)
+  // Multi-broker selection — Set of config_ids; each selected broker = separate instance
+  const [selBrokers, setSelBrokers]   = useState<Set<string>>(
+    new Set(saved?.brokers || (saved?.broker ? [saved.broker] : ['__paper__']))
+  )
+  const [deploying, setDeploying]     = useState(false)
+  const [deployProgress, setDeployProgress] = useState<{ done: number; total: number } | null>(null)
+
+  function toggleBroker(configId: string) {
+    setSelBrokers(prev => {
+      const next = new Set(prev)
+      if (next.has(configId)) {
+        if (next.size > 1) next.delete(configId)
+      } else {
+        next.add(configId)
+      }
+      return next
+    })
+  }
 
   // Chain data status for selected symbol
   const [chainSt, setChainSt] = useState<{ available: boolean; spot: number; age_seconds: number | null } | null>(null)
@@ -260,7 +393,6 @@ function StrategyCard({
     } catch { setChainSt(null) }
   }, [])
 
-  // Reload chain status whenever card is expanded or selected symbol changes
   useEffect(() => {
     if (!expanded) return
     let c = false
@@ -279,50 +411,42 @@ function StrategyCard({
     }
   }
 
-  // Sync broker selection if brokers load after mount
   useEffect(() => {
     if (!brokers.length) return
-    if (!saved?.broker) {
+    if (!saved?.brokers && !saved?.broker) {
       const paper = brokers.find(b => b.mode === 'PAPER')
-      if (paper) setSelBroker(paper.config_id)
+      if (paper) setSelBrokers(new Set([paper.config_id]))
     }
-  }, [brokers, saved?.broker])
+  }, [brokers, saved?.brokers, saved?.broker])
 
-  const runIsPaper = selBroker === '__paper__' || brokers.find(b => b.config_id === selBroker)?.mode === 'PAPER'
+  const selBrokersArr = Array.from(selBrokers)
+  const anyLiveBroker = selBrokersArr.some(id =>
+    id !== '__paper__' && brokers.find(b => b.config_id === id)?.mode !== 'PAPER'
+  )
+  const willLaunch = selBrokersArr.length
 
-  async function handleQuickRun() {
-    setRunning(true)
-    const overrides = {
-      symbol: selSymbol,
-      exchange: selExchange,
-      paper_mode: runIsPaper,
-      broker_config_id: selBroker,
+  async function handleDeploy() {
+    setDeploying(true)
+    setDeployProgress({ done: 0, total: willLaunch })
+    savePreset(s.name, { symbol: selSymbol, exchange: selExchange, brokers: selBrokersArr, broker: selBrokersArr[0], paper: !anyLiveBroker })
+    let launched = 0
+    for (const brokerId of selBrokersArr) {
+      const isPaper = brokerId === '__paper__' || brokers.find(b => b.config_id === brokerId)?.mode === 'PAPER'
+      try {
+        await onRun(s.name, { symbol: selSymbol, exchange: selExchange, paper_mode: isPaper, broker_config_id: brokerId })
+        launched++
+      } catch { /* parent handles toast */ }
+      setDeployProgress({ done: launched, total: willLaunch })
     }
-    savePreset(s.name, { symbol: selSymbol, exchange: selExchange, broker: selBroker, paper: runIsPaper })
-    try {
-      await onRun(s.name, overrides)
-    } catch { /* parent handles toast */ } finally {
-      setRunning(false)
-    }
+    setDeploying(false)
+    setDeployProgress(null)
   }
 
-  const modeClass = isPaper ? 'strat-card-mock' : isRunning ? 'strat-card-live' : ''
-  const runClass  = isRunning ? 'strat-card-running' : ''
-
   return (
-    <div className={cn('relative rounded-xl border transition-all duration-200', modeClass, runClass, expanded && 'ring-1 ring-brand/30')}>
-      {/* ── Card Header (always visible) ── */}
+    <div className={cn('relative rounded-xl border transition-all duration-200', expanded && 'ring-1 ring-brand/30')}>
+      {/* ── Card Header ── */}
       <div className="px-4 py-3 cursor-pointer" onClick={onToggle}>
         <div className="flex items-center gap-2.5 flex-wrap">
-          {/* Status dot */}
-          {isRunning ? (
-            <span className="w-2.5 h-2.5 rounded-full bg-profit live-dot-blink shrink-0 shadow-[0_0_8px_rgba(34,197,94,0.6)]" />
-          ) : isError ? (
-            <span className="w-2.5 h-2.5 rounded-full bg-loss shrink-0" />
-          ) : (
-            <span className="w-2.5 h-2.5 rounded-full bg-text-muted/30 shrink-0" />
-          )}
-
           {/* Type icon */}
           <div className={cn('p-1 rounded-md shrink-0', typeConf.bg)}>
             <TypeIcon className={cn('w-3.5 h-3.5', typeConf.color)} />
@@ -331,58 +455,30 @@ function StrategyCard({
           {/* Name */}
           <span className="text-[13px] font-semibold text-text-bright capitalize truncate">{displayName}</span>
 
-          {/* Mode badge */}
-          {isRunning && (
-            isPaper ? (
-              <span className="text-[9px] px-2 py-0.5 rounded-full font-bold border border-brand/40 bg-brand/15 text-brand tracking-wider">🧪 PAPER</span>
-            ) : (
-              <span className="text-[9px] px-2 py-0.5 rounded-full font-bold border border-loss/40 bg-loss/15 text-[#fda4af] tracking-wider">
-                <span className="w-1.5 h-1.5 rounded-full bg-current live-dot-blink inline-block mr-1" />LIVE
-              </span>
-            )
-          )}
-
-          {/* Status */}
-          {isRunning && (
-            <span className="text-[9px] px-2 py-0.5 rounded-full font-bold border border-profit/40 bg-profit/15 text-profit">RUNNING</span>
+          {/* Running instances badge (read-only info) */}
+          {instanceCount > 0 && (
+            <span className="text-[9px] px-2 py-0.5 rounded-full font-bold border border-profit/40 bg-profit/15 text-profit flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-profit live-dot-blink" />
+              {instanceCount} running
+            </span>
           )}
 
           <span className="text-[9px] badge badge-neutral">{typeConf.label}</span>
 
-          {/* Meta pills */}
+          {/* Meta */}
           <div className="flex items-center gap-1.5 ml-auto shrink-0">
             <span className="text-[10px] text-text-muted font-mono">{legCount}L × {lots}</span>
             {s.entry_time && <span className="text-[9px] text-text-muted">{s.entry_time}–{s.exit_time || '15:15'}</span>}
           </div>
 
-          {/* Arrow */}
           <ChevronRight className={cn('w-3.5 h-3.5 text-text-muted transition-transform shrink-0', expanded && 'rotate-90')} />
         </div>
-
-        {/* Error */}
-        {isError && s.error && (
-          <div className="mt-2 flex items-start gap-1.5 text-[10px] text-loss bg-loss/5 border border-loss/20 rounded-lg px-2.5 py-2">
-            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-            <span className="line-clamp-2">{s.error}</span>
-          </div>
-        )}
-
-        {/* Running metrics */}
-        {isRunning && s.active_legs != null && (
-          <div className="mt-2 flex items-center gap-4 text-[11px]">
-            <span className="text-text-muted">Legs: <strong className="text-text-bright font-mono">{s.active_legs}</strong></span>
-            <span className="text-text-muted">PnL: <strong className={cn('font-mono', Number(s.combined_pnl) >= 0 ? 'text-profit' : 'text-loss')}>
-              ₹{Number(s.combined_pnl ?? 0).toFixed(0)}
-            </strong></span>
-            {s.spot_price && <span className="text-text-muted">Spot: <strong className="text-brand font-mono">{Number(s.spot_price).toFixed(0)}</strong></span>}
-          </div>
-        )}
       </div>
 
-      {/* ── Expanded Panel ── */}
+      {/* ── Expanded Deploy Panel ── */}
       {expanded && (
         <div className="border-t border-white/[0.06]">
-          {/* Actions row */}
+          {/* Actions row — Edit / Delete only, no Stop */}
           <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] flex-wrap">
             <button onClick={() => onEdit(s.name)} className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-brand/10 text-brand border border-brand/20 hover:bg-brand/20 transition-colors">
               <Pencil className="w-3 h-3" /> Edit
@@ -390,17 +486,19 @@ function StrategyCard({
             <button onClick={() => onDelete(s.name)} className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium text-text-muted hover:text-loss hover:bg-loss/10 border border-white/[0.08] hover:border-loss/20 transition-colors">
               <Trash2 className="w-3 h-3" /> Delete
             </button>
-            {isRunning && (
-              <button onClick={() => onStop(s.name)} className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-loss/10 text-loss border border-loss/20 hover:bg-loss/20 transition-colors">
-                <Square className="w-3 h-3" /> Stop
-              </button>
-            )}
           </div>
 
-          {/* Run panel (only when not running) */}
-          {!isRunning && (
+          {/* Deploy panel — symbol + broker selection */}
+          {
             <div className="px-4 py-3 space-y-3">
-              {/* Symbol selection — grouped dropdown with search */}
+              {/* Section label */}
+              <div className="flex items-center gap-2">
+                <Rocket className="w-3.5 h-3.5 text-brand" />
+                <span className="text-[11px] font-semibold text-text-bright">Deploy Instance</span>
+                <span className="text-[10px] text-text-muted">— select symbol &amp; broker(s), then click Deploy</span>
+              </div>
+
+              {/* Symbol selection */}
               <div>
                 <label className="text-[9px] text-text-muted uppercase tracking-wider font-semibold block mb-1">Symbol</label>
                 <SymbolPicker
@@ -453,41 +551,68 @@ function StrategyCard({
                 )}
               </div>
 
-              {/* Broker selection */}
+              {/* Broker selection — multi-select: each selected broker = one instance */}
               <div>
-                <label className="text-[9px] text-text-muted uppercase tracking-wider font-semibold block mb-1">Broker</label>
+                <div className="flex items-center gap-2 mb-1">
+                  <label className="text-[9px] text-text-muted uppercase tracking-wider font-semibold">Broker</label>
+                  {instanceCount > 1 && (
+                    <span className="text-[9px] font-bold text-brand bg-brand/10 border border-brand/30 rounded-full px-1.5 py-0">
+                      {instanceCount} instances
+                    </span>
+                  )}
+                </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {loadingBS ? (
                     <Loader2 className="w-4 h-4 animate-spin text-brand" />
-                  ) : brokers.map(b => (
-                    <button
-                      key={b.config_id}
-                      onClick={(e) => { e.stopPropagation(); setSelBroker(b.config_id) }}
-                      className={cn(
-                        'px-2.5 py-1 rounded-md text-[10px] font-semibold border transition-all',
-                        selBroker === b.config_id
-                          ? b.mode === 'PAPER'
-                            ? 'bg-brand/20 text-brand border-brand/50'
-                            : 'bg-loss/20 text-[#fda4af] border-loss/50'
-                          : 'bg-bg-elevated text-text-sec border-border hover:border-brand/30'
-                      )}
-                    >
-                      {b.mode === 'PAPER' ? '🧪 ' : '⚡ '}{b.label}
-                    </button>
-                  ))}
+                  ) : brokers.map(b => {
+                    const isSelected = selBrokers.has(b.config_id)
+                    const isLive = b.mode !== 'PAPER'
+                    return (
+                      <button
+                        key={b.config_id}
+                        onClick={(e) => { e.stopPropagation(); toggleBroker(b.config_id) }}
+                        className={cn(
+                          'relative px-2.5 py-1 rounded-md text-[10px] font-semibold border transition-all',
+                          isSelected
+                            ? isLive
+                              ? 'bg-loss/20 text-[#fda4af] border-loss/50'
+                              : 'bg-brand/20 text-brand border-brand/50'
+                            : 'bg-bg-elevated text-text-sec border-border hover:border-brand/30'
+                        )}
+                      >
+                        {isSelected && (
+                          <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-brand flex items-center justify-center">
+                            <span className="text-[7px] font-black text-bg-base">✓</span>
+                          </span>
+                        )}
+                        {isLive ? '⚡ ' : '🧪 '}{b.label}
+                      </button>
+                    )
+                  })}
                 </div>
+                {instanceCount > 1 && (
+                  <p className="text-[9px] text-text-muted mt-1">
+                    Will launch <strong className="text-brand">{instanceCount} independent instances</strong> of <em>{selSymbol}</em> — one per broker
+                  </p>
+                )}
               </div>
 
               {/* Run bar */}
               <div className="flex items-center gap-3 pt-1">
-                <div className="flex items-center gap-2 text-[10px] text-text-muted">
+                <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-text-muted">
                   <span className="font-mono font-bold text-brand">{selSymbol}</span>
                   <span>·</span>
                   <span>{selExchange}</span>
                   <span>·</span>
-                  <span className={cn('font-bold', runIsPaper ? 'text-brand' : 'text-[#fda4af]')}>
-                    {runIsPaper ? '🧪 Paper' : '⚡ Live'}
-                  </span>
+                  {anyLiveBroker
+                    ? <span className="font-bold text-[#fda4af]">⚡ Live{instanceCount > 1 ? ` (+${selBrokersArr.filter(id => brokers.find(b => b.config_id === id)?.mode === 'PAPER').length > 0 ? 'Paper mix' : ''})` : ''}</span>
+                    : <span className="font-bold text-brand">🧪 Paper</span>
+                  }
+                  {instanceCount > 1 && (
+                    <span className="text-[9px] font-bold text-brand bg-brand/10 border border-brand/30 rounded px-1.5 py-0.5">
+                      ×{instanceCount}
+                    </span>
+                  )}
                 </div>
                 <div className="flex-1" />
 
@@ -499,25 +624,35 @@ function StrategyCard({
                 )}
 
                 <button
-                  onClick={handleQuickRun}
-                  disabled={running}
+                  onClick={handleDeploy}
+                  disabled={deploying}
                   className={cn(
-                    'flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-[11px] font-bold transition-all',
-                    runIsPaper
-                      ? 'bg-brand text-bg-base hover:bg-brand/80'
-                      : 'bg-loss text-white hover:bg-loss/80',
-                    running && 'opacity-50 cursor-not-allowed'
+                    'flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-[11px] font-bold transition-all min-w-[90px] justify-center',
+                    anyLiveBroker
+                      ? 'bg-loss text-white hover:bg-loss/80'
+                      : 'bg-brand text-bg-base hover:bg-brand/80',
+                    deploying && 'opacity-50 cursor-not-allowed'
                   )}
                 >
-                  {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                  {runIsPaper ? 'Run Paper' : 'Run LIVE'}
+                  {deploying ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      {deployProgress ? `${deployProgress.done}/${deployProgress.total}` : '…'}
+                    </>
+                  ) : (
+                    <>
+                      <Rocket className="w-3.5 h-3.5" />
+                      {anyLiveBroker ? 'Deploy LIVE' : 'Deploy Paper'}
+                      {instanceCount > 1 && ` ×${instanceCount}`}
+                    </>
+                  )}
                 </button>
               </div>
             </div>
-          )}
+          }
 
-          {/* Strategy config detail (when running) */}
-          {isRunning && <StrategyRunDetail name={s.name} />}
+          {/* Strategy config detail */}
+          <StrategyRunDetail name={s.name} />
         </div>
       )}
     </div>
@@ -885,7 +1020,8 @@ function LiveMonitorPanel() {
   }
 
   // ── Build full strategy group card HTML ──
-  function buildGroupHtml(name: string, mon: any, isPaper: boolean): string {
+  function buildGroupHtml(name: string, mon: any, isPaper: boolean, displayName?: string): string {
+    const label = displayName || name
     const s = mon?.summary ?? {}
     const md = mon?.market_data ?? {}
     const allLegs: any[] = mon?.legs ?? []
@@ -919,7 +1055,7 @@ function LiveMonitorPanel() {
         <div class="px-4 py-3" style="border-bottom:1px solid rgba(255,255,255,0.06)">
           <div class="flex items-center gap-2 flex-wrap">
             <span class="w-2.5 h-2.5 rounded-full shrink-0 ${isRunning ? 'bg-profit live-dot-blink' : 'bg-text-muted/50'}" style="${isRunning ? 'box-shadow:0 0 8px rgba(34,197,94,0.6)' : ''}" data-field="sdot"></span>
-            <span class="text-[13px] font-semibold text-text-bright font-mono">${esc(name)}</span>
+            <span class="text-[13px] font-semibold text-text-bright font-mono">${esc(label)}</span>
             ${isPaper
               ? '<span class="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full font-bold border border-brand/40 bg-brand/15 text-brand tracking-wider">🧪 PAPER</span>'
               : '<span class="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full font-bold border border-loss/40 bg-loss/15 tracking-wider" style="color:#fda4af"><span class="w-1.5 h-1.5 rounded-full bg-current live-dot-blink"></span> LIVE</span>'}
@@ -1067,9 +1203,9 @@ function LiveMonitorPanel() {
     if (pollInFlightRef.current) return
     pollInFlightRef.current = true
     try {
-      // 1) Get all running strategies
-      const statuses: any[] = await api.strategyStatus()
-      const running = (statuses || []).filter((s: any) => s.status === 'running')
+      // 1) Get all running instances
+      const instances: any[] = await api.strategyInstances()
+      const running = (instances || []).filter((s: any) => s.status === 'running')
 
       if (running.length === 0) {
         // No running strategies
@@ -1085,15 +1221,15 @@ function LiveMonitorPanel() {
         return
       }
 
-      // 2) Fetch monitor data for ALL running strategies in parallel
+      // 2) Fetch monitor data for ALL running instances in parallel
       const monResults = await Promise.allSettled(
-        running.map((s: any) => api.strategyMonitor(s.name).then(mon => ({ name: s.name, mon, paper: s.paper_mode })))
+        running.map((s: any) => api.strategyMonitor(s.run_id).then(mon => ({ name: s.run_id, displayName: s.display_name || s.run_id, mon, paper: s.paper_mode })))
       )
-      const monitorData: { name: string; mon: any; paper: boolean }[] = []
+      const monitorData: { name: string; displayName: string; mon: any; paper: boolean }[] = []
       for (const r of monResults) {
         if (r.status === 'fulfilled') monitorData.push(r.value)
       }
-      monitorData.sort((a, b) => a.name.localeCompare(b.name))
+      monitorData.sort((a, b) => a.displayName.localeCompare(b.displayName))
 
       // 3) Compute aggregate summary
       let totalPnl = 0, totalRealized = 0, totalUnrealized = 0
@@ -1134,7 +1270,7 @@ function LiveMonitorPanel() {
         // Groups changed (strategy started/stopped) — rebuild all cards
         prevGroupNamesRef.current = newGroupNames
         legCacheRef.current = {}
-        container.innerHTML = monitorData.map(d => buildGroupHtml(d.name, d.mon, d.paper)).join('')
+        container.innerHTML = monitorData.map(d => buildGroupHtml(d.name, d.mon, d.paper, d.displayName)).join('')
       } else {
         // Same groups — update each card in-place (no DOM teardown!)
         const cardMap: Record<string, Element> = {}
@@ -1668,6 +1804,24 @@ export default function StrategyPage() {
   const [savedStrategies, setSavedStrategies] = useState<any[]>([])
   const [savedLoading, setSavedLoading] = useState(false)
 
+  // ── Running instances (from /strategy/instances) ───
+  const [instances, setInstances] = useState<any[]>([])
+
+  const loadInstances = useCallback(async () => {
+    try {
+      const data = await api.strategyInstances()
+      setInstances(data || [])
+    } catch { /* ignore */ }
+  }, [])
+
+  useEffect(() => { loadInstances() }, [loadInstances])
+
+  // Poll instances every 5 seconds for live status updates
+  useEffect(() => {
+    const timer = setInterval(loadInstances, 5000)
+    return () => clearInterval(timer)
+  }, [loadInstances])
+
   // ── Shared broker + symbol data (loaded once) ──────
   const [brokers, setBrokers] = useState<any[]>([])
   const [symbols, setSymbols] = useState<any[]>([])
@@ -1703,9 +1857,11 @@ export default function StrategyPage() {
     try {
       const res = await api.runStrategy(name, overrides) as any
       const warns = res?.warnings?.length ? ` (${res.warnings.length} warnings)` : ''
-      toast(`Strategy "${name}" started${warns}`, 'success')
+      const label = res?.display_name || res?.run_id || name
+      toast(`Instance "${label}" started${warns}`, 'success')
       setExpanded(null)
       loadSaved()
+      loadInstances()
     } catch (e: any) {
       let msg = 'Failed to start strategy'
       try {
@@ -1718,11 +1874,11 @@ export default function StrategyPage() {
     }
   }
 
-  async function handleStop(name: string) {
+  async function handleStop(runId: string) {
     try {
-      await api.stopStrategy(name)
-      toast(`Strategy "${name}" stopped`, 'warning')
-      loadSaved()
+      await api.stopStrategy(runId)
+      toast(`Stopping instance…`, 'warning')
+      loadInstances()
     } catch (e: any) { toast(e?.message || 'Failed to stop strategy', 'error') }
   }
 
@@ -1735,13 +1891,8 @@ export default function StrategyPage() {
     } catch (e: any) { toast(e?.message || 'Failed to delete strategy', 'error') }
   }
 
-  const filtered = savedStrategies.filter((s: any) => {
-    if (tab === 'running') return s.status === 'running'
-    return true
-  })
-
-  const runningCount = savedStrategies.filter(s => s.status === 'running').length
-  const liveCount    = savedStrategies.filter(s => !s.paper_mode && s.status === 'running').length
+  const runningCount = instances.length
+  const liveCount    = instances.filter(i => !i.paper_mode).length
 
   const TABS: { id: PageTab; label: string; badge?: number; badgeLive?: boolean }[] = [
     { id: 'all',     label: 'All Strategies' },
@@ -1777,7 +1928,7 @@ export default function StrategyPage() {
         </div>
 
         {/* Summary KPIs — hide on monitor/history tab */}
-        {tab !== 'monitor' && tab !== 'history' && <SummaryKPIs strategies={savedStrategies} />}
+        {tab !== 'monitor' && tab !== 'history' && <SummaryKPIs strategies={savedStrategies} instances={instances} />}
 
         {/* Tab bar */}
         <div className="flex items-center gap-1 bg-bg-surface border border-border rounded-lg p-1 w-fit">
@@ -1809,8 +1960,29 @@ export default function StrategyPage() {
         {/* ── History tab ── */}
         {tab === 'history' && <HistoryPanel />}
 
-        {/* ── Strategy list (non-monitor, non-history tabs) ── */}
-        {tab !== 'monitor' && tab !== 'history' && (
+        {/* ── Running tab — instance cards ── */}
+        {tab === 'running' && (
+          <div className="space-y-2">
+            {instances.length === 0 ? (
+              <div className="card flex flex-col items-center justify-center h-40 text-text-muted text-sm gap-2">
+                <GitBranch className="w-6 h-6" />
+                No running strategies. Go to <button className="text-brand underline" onClick={() => setTab('all')}>All Strategies</button> to deploy one.
+              </div>
+            ) : (
+              instances.map(inst => (
+                <InstanceCard
+                  key={inst.run_id}
+                  inst={inst}
+                  onStop={handleStop}
+                  onSwitchToMonitor={() => setTab('monitor')}
+                />
+              ))
+            )}
+          </div>
+        )}
+
+        {/* ── All Strategies tab — template cards ── */}
+        {tab === 'all' && (
           <>
             {savedLoading && savedStrategies.length === 0 ? (
               <div className="flex items-center justify-center h-40">
@@ -1818,25 +1990,25 @@ export default function StrategyPage() {
               </div>
             ) : (
               <div className="space-y-2">
-                {filtered.map(s => (
+                {savedStrategies.map((s: any) => (
                   <StrategyCard
                     key={s.name}
                     s={s}
                     expanded={expanded === s.name}
                     onToggle={() => setExpanded(expanded === s.name ? null : s.name)}
                     onRun={handleRun}
-                    onStop={handleStop}
                     onEdit={name => navigate(`/app/strategy-builder?name=${encodeURIComponent(name)}`)}
                     onDelete={handleDelete}
                     brokers={brokers}
                     symbols={symbols}
                     loadingBS={loadingBS}
+                    instanceCount={instances.filter(i => i.template_name === s.name).length}
                   />
                 ))}
-                {filtered.length === 0 && (
+                {savedStrategies.length === 0 && (
                   <div className="card flex flex-col items-center justify-center h-40 text-text-muted text-sm gap-2">
                     <GitBranch className="w-6 h-6" />
-                    {tab === 'running' ? 'No running strategies.' : 'No strategies found. Use the Builder to create one.'}
+                    No strategies found. Use the Builder to create one.
                   </div>
                 )}
               </div>
