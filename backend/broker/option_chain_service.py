@@ -224,8 +224,8 @@ class OptionChainService:
                     sigma = iv_pct / 100
                     iv_val = round(iv_pct, 2)
 
-            g = bs_greeks(spot, strike, T, 0.065, sigma, option_type)
-            price = bs_price(spot, strike, T, 0.065, sigma, option_type)
+            g = bs_greeks(spot, strike, T, 0.065, sigma, option_type) or {}
+            price = bs_price(spot, strike, T, 0.065, sigma, option_type) or 0.0
             return {
                 "iv":       iv_val,
                 "bs_price": round(price, 2),

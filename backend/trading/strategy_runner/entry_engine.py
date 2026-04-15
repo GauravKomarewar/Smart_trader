@@ -221,6 +221,14 @@ class EntryEngine:
                     tag, exec_config.get("strike_selection"),
                 )
                 return None
+            _ltp = opt_data.get("ltp")
+            if _ltp is None or _ltp <= 0:
+                logger.warning(
+                    "ENTRY_LEG_SKIPPED | tag=%s | reason=LTP_UNAVAILABLE | "
+                    "strike=%s | will retry on next tick",
+                    tag, strike,
+                )
+                return None
             leg = LegState(
                 tag=tag,
                 symbol=symbol,

@@ -392,6 +392,12 @@ class AdjustmentEngine:
             if opt_data is None:
                 raise ValueError(f"Could not resolve option for roll: {leg_tag} -> {new_expiry}")
 
+            if opt_data.get("ltp") is None or opt_data["ltp"] <= 0:
+                raise ValueError(
+                    f"Roll aborted: option {strike} {new_expiry} has no valid LTP "
+                    f"(market may not be open yet or chain data not refreshed)"
+                )
+
             # ✅ BUG-015 FIX: Tag collision on multiple rolls — use numeric counter
             base_tag = leg_tag.split("_ROLLED")[0]
             roll_num = 1

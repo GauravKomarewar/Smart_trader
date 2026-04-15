@@ -319,7 +319,7 @@ class OptionChainSupervisor:
                 if ltp > 0.01 and T > 1e-9:
                     iv = implied_volatility(ltp, spot, strike, T, _RISK_FREE_RATE, side)
                     sigma = (iv / 100) if iv else 0.20
-                    greeks = bs_greeks(spot, strike, T, _RISK_FREE_RATE, sigma, side)
+                    greeks = bs_greeks(spot, strike, T, _RISK_FREE_RATE, sigma, side) or {}
                 else:
                     iv, greeks, sigma = None, {}, 0.0
 

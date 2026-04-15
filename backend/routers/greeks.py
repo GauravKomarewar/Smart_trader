@@ -63,9 +63,9 @@ def calculate_greeks(req: GreeksRequest):
             iv_val = iv_pct
 
     greeks = bs_greeks(req.spot, req.strike, T, req.risk_free,
-                       sigma, req.option_type, q=req.dividend_yield)
+                       sigma, req.option_type, q=req.dividend_yield) or {}
     price  = bs_price(req.spot, req.strike, T, req.risk_free,
-                      sigma, req.option_type, q=req.dividend_yield)
+                      sigma, req.option_type, q=req.dividend_yield) or 0.0
 
     return {
         "bs_price": round(price, 2),
