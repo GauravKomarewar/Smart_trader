@@ -351,6 +351,28 @@ class StrategyExecutor:
         # Update market data (including per‑leg data)
         self._update_market_data()
 
+        # ── Hard EOD safety cutoff ──────────────────────────────────────────────
+        # If timing.eod_exit_time is set and we are past it, force an exit
+        # regardless of what exit.time.strategy_exit_time says.  This prevents
+        # the scenario where a mis-configured (or forgotten) strategy_exit_time
+        # keeps positions open after market close.
+        if self.state.any_leg_active:
+            eod_str = self.config.get("timing", {}).get("eod_exit_time")
+            if eod_str:
+                try:
+                    eod_t = datetime.strptime(eod_str, "%H:%M").time()
+                    if now.time() >= eod_t:
+                        logger.info(
+                            "EOD_HARD_EXIT | timing.eod_exit_time=%s reached — force closing all legs",
+                            eod_str,
+                        )
+                        self._execute_exit("exit_all")
+                        self._log_event("EXIT", reason=f"eod_exit_time:{eod_str}")
+                        self._save_state()
+                        return
+                except ValueError:
+                    logger.error("Invalid timing.eod_exit_time format: %s", eod_str)
+
         # Compute minutes to exit
         exit_time_str = self.config.get("exit", {}).get("time", {}).get("strategy_exit_time")
         if exit_time_str:

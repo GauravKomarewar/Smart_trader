@@ -4,8 +4,8 @@
   "id": "DNSS_DYNAMIC_STRADDLE",
   "description": "",
   "type": "neutral",
-  "enabled": false,
-  "status": "STOPPED",
+  "enabled": true,
+  "status": "RUNNING",
   "identity": {
     "instrument_type": "OPTIDX",
     "product_type": "NRML",
@@ -18,8 +18,8 @@
   },
   "timing": {
     "entry_window_start": "09:18",
-    "entry_window_end": "23:10",
-    "eod_exit_time": "15:28"
+    "entry_window_end": "14:45",
+    "eod_exit_time": "15:29"
   },
   "market_data": {
     "source": "sqlite"
@@ -193,7 +193,7 @@
       "breakeven_buffer": null
     },
     "time": {
-      "strategy_exit_time": "23:28",
+      "strategy_exit_time": "15:29",
       "expiry_day_action": "none",
       "expiry_day_time": "09:15",
       "roll_target": "weekly_next"

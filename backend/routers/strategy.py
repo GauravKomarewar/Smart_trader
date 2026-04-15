@@ -739,7 +739,18 @@ def _strategy_thread(
                 db_persist.attach_run(run_id)
                 db_state = db_persist.load()
                 if db_state and db_state.legs:
+                    # Preserve last_date / entered_today from the local file state —
+                    # the DB does not store last_date, so db_state.last_date is always
+                    # None.  If we used it as-is, executor._tick()'s daily-reset guard
+                    # would fire on the very first tick (last_date is None → reset
+                    # entered_today=False) and allow a spurious re-entry even though
+                    # the run already exited for the day.
+                    _file_last_date = executor.state.last_date
+                    _file_entered = executor.state.entered_today
                     executor.state = db_state
+                    if _file_last_date is not None:
+                        executor.state.last_date = _file_last_date
+                        executor.state.entered_today = _file_entered
                     logger.info("RESUME | Restored %d legs from DB run %s", len(db_state.legs), run_id)
                 else:
                     # Resuming but no useful state — start fresh within same run_id
