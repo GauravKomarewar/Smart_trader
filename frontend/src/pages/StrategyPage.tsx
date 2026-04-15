@@ -555,9 +555,9 @@ function StrategyCard({
               <div>
                 <div className="flex items-center gap-2 mb-1">
                   <label className="text-[9px] text-text-muted uppercase tracking-wider font-semibold">Broker</label>
-                  {instanceCount > 1 && (
+                  {willLaunch > 1 && (
                     <span className="text-[9px] font-bold text-brand bg-brand/10 border border-brand/30 rounded-full px-1.5 py-0">
-                      {instanceCount} instances
+                      {willLaunch} instances
                     </span>
                   )}
                 </div>
@@ -590,9 +590,9 @@ function StrategyCard({
                     )
                   })}
                 </div>
-                {instanceCount > 1 && (
+                {willLaunch > 1 && (
                   <p className="text-[9px] text-text-muted mt-1">
-                    Will launch <strong className="text-brand">{instanceCount} independent instances</strong> of <em>{selSymbol}</em> — one per broker
+                    Will launch <strong className="text-brand">{willLaunch} independent instances</strong> of <em>{selSymbol}</em> — one per broker
                   </p>
                 )}
               </div>
@@ -605,12 +605,12 @@ function StrategyCard({
                   <span>{selExchange}</span>
                   <span>·</span>
                   {anyLiveBroker
-                    ? <span className="font-bold text-[#fda4af]">⚡ Live{instanceCount > 1 ? ` (+${selBrokersArr.filter(id => brokers.find(b => b.config_id === id)?.mode === 'PAPER').length > 0 ? 'Paper mix' : ''})` : ''}</span>
+                    ? <span className="font-bold text-[#fda4af]">⚡ Live{willLaunch > 1 ? ` (+${selBrokersArr.filter(id => brokers.find(b => b.config_id === id)?.mode === 'PAPER').length > 0 ? 'Paper mix' : ''})` : ''}</span>
                     : <span className="font-bold text-brand">🧪 Paper</span>
                   }
-                  {instanceCount > 1 && (
+                  {willLaunch > 1 && (
                     <span className="text-[9px] font-bold text-brand bg-brand/10 border border-brand/30 rounded px-1.5 py-0.5">
-                      ×{instanceCount}
+                      ×{willLaunch}
                     </span>
                   )}
                 </div>
@@ -643,7 +643,7 @@ function StrategyCard({
                     <>
                       <Rocket className="w-3.5 h-3.5" />
                       {anyLiveBroker ? 'Deploy LIVE' : 'Deploy Paper'}
-                      {instanceCount > 1 && ` ×${instanceCount}`}
+                      {willLaunch > 1 && ` ×${willLaunch}`}
                     </>
                   )}
                 </button>

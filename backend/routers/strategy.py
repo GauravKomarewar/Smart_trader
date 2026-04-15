@@ -692,9 +692,10 @@ def _strategy_thread(
     executor = None
     db_persist = None
     try:
-        from trading.strategy_runner.config_schema import validate_config  # type: ignore[import]
+        from trading.strategy_runner.config_schema import validate_config, coerce_config_numerics  # type: ignore[import]
         with open(instance_config_path) as fp:
             cfg = json.load(fp)
+        cfg = coerce_config_numerics(cfg)  # normalise any string-typed numerics from builder
 
         ok, errors = validate_config(cfg)
         if not ok:
@@ -1004,7 +1005,8 @@ async def run_strategy(
         elif override_broker == "__paper__":
             identity["paper_mode"] = True
 
-        from trading.strategy_runner.config_schema import validate_config
+        from trading.strategy_runner.config_schema import validate_config, coerce_config_numerics
+        cfg = coerce_config_numerics(cfg)  # normalise any string-typed numerics from builder
         ok, errors = validate_config(cfg)
         if not ok:
             errs = [str(e) for e in errors if e.severity == "error"]
