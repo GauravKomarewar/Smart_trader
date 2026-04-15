@@ -267,6 +267,54 @@ async def get_screener(
     return {"data": rows, "count": len(rows)}
 
 
+# ── /market/fno-underlyings ────────────────────────────────────────────────────
+
+# Simple in-process cache: refresh at most every 5 minutes
+_fno_underlyings_cache: list = []
+_fno_underlyings_ts: float = 0.0
+
+@router.get("/fno-underlyings")
+async def get_fno_underlyings():
+    """
+    Return distinct FNO underlying symbols from the symbols DB.
+
+    Response: [{"symbol": "NIFTY", "exchange": "NFO", "instrument_types": ["OPT", "FUT"]}, ...]
+
+    Used by OptionChainPage, StrategyPage and WatchlistPage to populate symbol dropdowns.
+    Falls back to a hardcoded list when the DB is unavailable.
+    """
+    import time as _t
+    global _fno_underlyings_cache, _fno_underlyings_ts
+
+    # Serve from cache if fresh (< 5 min)
+    if _fno_underlyings_cache and (_t.time() - _fno_underlyings_ts) < 300:
+        return _fno_underlyings_cache
+
+    try:
+        from db.symbols_db import get_fno_underlyings as _db_fno
+        rows = _db_fno()
+        if rows:
+            _fno_underlyings_cache = rows
+            _fno_underlyings_ts = _t.time()
+            return rows
+    except Exception as exc:
+        logger.warning("DB fno-underlyings failed, using fallback: %s", exc)
+
+    # Hardcoded fallback when DB unavailable
+    return [
+        {"symbol": "NIFTY",      "exchange": "NFO", "instrument_types": ["OPT", "FUT"]},
+        {"symbol": "BANKNIFTY",  "exchange": "NFO", "instrument_types": ["OPT", "FUT"]},
+        {"symbol": "FINNIFTY",   "exchange": "NFO", "instrument_types": ["OPT", "FUT"]},
+        {"symbol": "MIDCPNIFTY", "exchange": "NFO", "instrument_types": ["OPT", "FUT"]},
+        {"symbol": "SENSEX",     "exchange": "BFO", "instrument_types": ["OPT"]},
+        {"symbol": "BANKEX",     "exchange": "BFO", "instrument_types": ["OPT"]},
+        {"symbol": "CRUDEOIL",   "exchange": "MCX", "instrument_types": ["OPT", "FUT"]},
+        {"symbol": "GOLD",       "exchange": "MCX", "instrument_types": ["OPT", "FUT"]},
+        {"symbol": "SILVER",     "exchange": "MCX", "instrument_types": ["OPT", "FUT"]},
+        {"symbol": "USDINR",     "exchange": "CDS", "instrument_types": ["OPT", "FUT"]},
+    ]
+
+
 # ── /market/option-chain/{symbol} ─────────────────────────────────────────────
 
 def _normalise_expiry_date(raw: str) -> str:
@@ -324,15 +372,16 @@ def _convert_fyers_oc(fyers_data: dict, underlying: str) -> Optional[dict]:
                 continue
             strike   = row["strike_price"]
             opt_type = row.get("option_type", "")
+            _ltp  = row.get("ltp") or None      # 0 → None (no active trade price)
             leg = {
-                "ltp":      row.get("ltp", 0),
-                "iv":       0.0,
-                "delta":    0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0,
+                "ltp":      _ltp,
+                "iv":       None,    # greeks computed later by oc_svc.enrich_with_live_greeks
+                "delta":    None, "gamma": None, "theta": None, "vega": None,
                 "oi":       row.get("oi", 0),
                 "oiChange": row.get("oich", 0),
                 "volume":   row.get("volume", 0),
-                "bid":      row.get("bid", 0),
-                "ask":      row.get("ask", 0),
+                "bid":      row.get("bid") or None,
+                "ask":      row.get("ask") or None,
             }
             if opt_type == "CE":
                 by_strike[strike]["call"] = leg

@@ -302,7 +302,38 @@ async def delete_config(name: str, payload: dict = Depends(current_user)):
 
 @router.get("/dashboard/option-chain/active-symbols")
 async def active_symbols(payload: dict = Depends(current_user)):
-    """Return all FNO indices, FNO stocks, BSE indices, and MCX commodities with option chains."""
+    """Return all FNO underlyings with option chains. DB-driven with hardcoded fallback."""
+    # Try DB first for a live, complete list
+    try:
+        from db.symbols_db import get_fno_underlyings
+        db_rows = get_fno_underlyings()
+        if db_rows:
+            result = []
+            for r in db_rows:
+                sym  = r.get("symbol", "")
+                exch = r.get("exchange", "")
+                itypes = r.get("instrument_types") or []
+                # Determine category
+                if exch == "MCX":
+                    cat = "commodity"
+                elif exch in ("BFO",):
+                    cat = "index"
+                elif sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50",
+                              "SENSEX", "BANKEX", "SENSEX50"):
+                    cat = "index"
+                else:
+                    cat = "stock"
+                result.append({
+                    "symbol":           sym,
+                    "exchange":         exch,
+                    "category":         cat,
+                    "instrument_types": itypes,
+                })
+            return result
+    except Exception as exc:
+        logger.warning("active_symbols DB lookup failed: %s", exc)
+
+    # Hardcoded fallback
     return [
         # ── NSE Indices (NFO) ──────────────────────────────
         {"symbol": "NIFTY",        "exchange": "NFO", "category": "index"},

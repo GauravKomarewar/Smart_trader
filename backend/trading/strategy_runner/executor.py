@@ -478,12 +478,13 @@ class StrategyExecutor:
                 try:
                     opt_data = self.market.get_option_at_strike(leg.strike, leg.option_type, leg.expiry)
                     if opt_data:
-                        # Update standard fields from SQLite (greeks, OI, etc.)
-                        leg.delta = opt_data.get("delta", leg.delta)
-                        leg.gamma = opt_data.get("gamma", leg.gamma)
-                        leg.theta = opt_data.get("theta", leg.theta)
-                        leg.vega = opt_data.get("vega", leg.vega)
-                        leg.iv = opt_data.get("iv", leg.iv)
+                        # Update Greeks only if SQLite has computed non-NULL values.
+                        # When ltp=0 (illiquid strike), greeks are stored as NULL in
+                        # SQLite, so we preserve the last-known valid value on the leg.
+                        for _attr in ("delta", "gamma", "theta", "vega", "iv"):
+                            _val = opt_data.get(_attr)
+                            if _val is not None:
+                                setattr(leg, _attr, _val)
                         leg.volume = opt_data.get("volume", leg.volume)
 
                         # LTP: prefer live tick service, fall back to SQLite
@@ -492,7 +493,10 @@ class StrategyExecutor:
                         if live_ltp and live_ltp > 0:
                             leg.ltp = live_ltp
                         else:
-                            leg.ltp = opt_data.get("ltp", leg.ltp)
+                            # Only update from SQLite if it has a valid non-zero price
+                            _sq_ltp = opt_data.get("ltp")
+                            if _sq_ltp is not None and _sq_ltp > 0:
+                                leg.ltp = _sq_ltp
 
                         # Bid/Ask: use live tick data if available
                         if self._tick_service:

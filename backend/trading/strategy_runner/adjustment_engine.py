@@ -351,6 +351,15 @@ class AdjustmentEngine:
 
             new_expiry = self._resolve_next_expiry(target_expiry, old_leg.expiry)
 
+            # Guard: if next-expiry resolution returned the current expiry (only one
+            # SQLite file available), abort the roll instead of silently closing the leg.
+            if new_expiry == old_leg.expiry:
+                raise ValueError(
+                    f"Roll aborted: could not find a next expiry for {old_leg.symbol} "
+                    f"after {old_leg.expiry}. Ensure the next-expiry option chain DB file "
+                    f"has been fetched."
+                )
+
             # Determine new strike and option data
             opt_data: Optional[Dict[str, Any]] = None
             strike: float = 0.0

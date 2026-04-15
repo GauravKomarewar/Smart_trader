@@ -70,16 +70,16 @@ def create_or_update_chain_db(
             CREATE TABLE IF NOT EXISTS option_chain (
                 strike         REAL NOT NULL,
                 option_type    TEXT NOT NULL,
-                ltp            REAL DEFAULT 0,
-                delta          REAL DEFAULT 0,
-                gamma          REAL DEFAULT 0,
-                theta          REAL DEFAULT 0,
-                vega           REAL DEFAULT 0,
-                iv             REAL DEFAULT 0,
+                ltp            REAL DEFAULT NULL,
+                delta          REAL DEFAULT NULL,
+                gamma          REAL DEFAULT NULL,
+                theta          REAL DEFAULT NULL,
+                vega           REAL DEFAULT NULL,
+                iv             REAL DEFAULT NULL,
                 oi             INTEGER DEFAULT 0,
                 volume         INTEGER DEFAULT 0,
-                bid            REAL DEFAULT 0,
-                ask            REAL DEFAULT 0,
+                bid            REAL DEFAULT NULL,
+                ask            REAL DEFAULT NULL,
                 lot_size       INTEGER DEFAULT 1,
                 trading_symbol TEXT DEFAULT '',
                 PRIMARY KEY (strike, option_type)
@@ -106,6 +106,16 @@ def create_or_update_chain_db(
             )
 
         # Upsert chain rows
+        def _opt_float(v):
+            """Return float if v is a truthy non-None number, else None (stores as SQL NULL)."""
+            if v is None:
+                return None
+            try:
+                f = float(v)
+                return f if f != 0.0 else None  # 0.0 from missing data → NULL
+            except (ValueError, TypeError):
+                return None
+
         for row in chain_rows:
             conn.execute("""
                 INSERT OR REPLACE INTO option_chain
@@ -115,16 +125,16 @@ def create_or_update_chain_db(
             """, (
                 float(row.get("strike", 0)),
                 str(row.get("option_type", "CE")),
-                float(row.get("ltp", 0)),
-                float(row.get("delta", 0)),
-                float(row.get("gamma", 0)),
-                float(row.get("theta", 0)),
-                float(row.get("vega", 0)),
-                float(row.get("iv", 0)),
-                int(row.get("oi", 0)),
-                int(row.get("volume", 0)),
-                float(row.get("bid", 0)),
-                float(row.get("ask", 0)),
+                _opt_float(row.get("ltp")),
+                row.get("delta"),   # None → NULL (greeks computed only when ltp>0)
+                row.get("gamma"),
+                row.get("theta"),
+                row.get("vega"),
+                row.get("iv"),
+                int(row.get("oi", 0) or 0),
+                int(row.get("volume", 0) or 0),
+                _opt_float(row.get("bid")),
+                _opt_float(row.get("ask")),
                 int(row.get("lot_size", lot_size)),
                 str(row.get("trading_symbol", "")),
             ))
@@ -295,8 +305,8 @@ def _process_fyers_chain(exchange: str, symbol: str, data: Dict) -> Optional[str
                 continue
             ltp = float(leg.get("ltp", 0) or 0)
 
-            # Compute Greeks
-            delta = gamma = theta = vega = iv_val = 0.0
+            # Compute Greeks — only when the option has an active trade price
+            delta = gamma = theta = vega = iv_val = None  # None = no data (stored as SQL NULL)
             if ltp > 0.01 and spot > 0:
                 try:
                     from trading.utils.bs_greeks import (
@@ -304,18 +314,15 @@ def _process_fyers_chain(exchange: str, symbol: str, data: Dict) -> Optional[str
                     )
                     T = time_to_expiry_seconds(expiry_str, "15:30")
                     if T > 0:
-                        iv_val = implied_volatility(ltp, spot, strike, T, 0.065, ot) or 0.0
-                        sigma_raw = (iv_val / 100.0) if iv_val > 1 else (iv_val if iv_val > 0 else 0.20)
-                        # Floor at 15% to prevent near-zero sigma on expiry-day 0-DTE options.
-                        # Very low IV (<15%) causes delta to collapse to 0/1 at 50-pt intervals,
-                        # making delta-based strike selection impossible. The floor ensures stored
-                        # greeks remain useful for selection even on low-volatility expiry mornings.
-                        sigma = max(sigma_raw, 0.15)
-                        greeks = bs_greeks(spot, strike, T, 0.065, sigma, ot) or {}
-                        delta = greeks.get("delta", 0)
-                        gamma = greeks.get("gamma", 0)
-                        theta = greeks.get("theta", 0)
-                        vega  = greeks.get("vega", 0)
+                        iv_val = implied_volatility(ltp, spot, strike, T, 0.065, ot)
+                        if iv_val is not None:
+                            sigma_raw = (iv_val / 100.0) if iv_val > 1 else (iv_val if iv_val > 0 else 0.20)
+                            sigma = max(sigma_raw, 0.15)
+                            greeks = bs_greeks(spot, strike, T, 0.065, sigma, ot) or {}
+                            delta = greeks.get("delta")
+                            gamma = greeks.get("gamma")
+                            theta = greeks.get("theta")
+                            vega  = greeks.get("vega")
                 except Exception:
                     pass
 
@@ -400,19 +407,21 @@ def _process_shoonya_chain(exchange: str, symbol: str, data: Dict) -> Optional[s
             if not side_data:
                 continue
             ltp = float(side_data.get("ltp", 0) or 0)
+            # Use None for greeks when ltp=0 (no active market) so callers
+            # can distinguish "no data" from a genuine zero greek.
             chain_rows.append({
                 "strike":         strike,
                 "option_type":    ot,
-                "ltp":            ltp,
-                "delta":          float(side_data.get("delta", 0) or 0),
-                "gamma":          float(side_data.get("gamma", 0) or 0),
-                "theta":          float(side_data.get("theta", 0) or 0),
-                "vega":           float(side_data.get("vega", 0) or 0),
-                "iv":             float(side_data.get("iv", 0) or 0),
+                "ltp":            ltp if ltp > 0 else None,
+                "delta":          float(side_data["delta"]) if side_data.get("delta") else None,
+                "gamma":          float(side_data["gamma"]) if side_data.get("gamma") else None,
+                "theta":          float(side_data["theta"]) if side_data.get("theta") else None,
+                "vega":           float(side_data["vega"])  if side_data.get("vega")  else None,
+                "iv":             float(side_data["iv"])    if side_data.get("iv")    else None,
                 "oi":             int(side_data.get("oi", 0) or 0),
                 "volume":         int(side_data.get("volume", 0) or 0),
-                "bid":            float(side_data.get("bid", 0) or 0),
-                "ask":            float(side_data.get("ask", 0) or 0),
+                "bid":            float(side_data["bid"]) if side_data.get("bid") else None,
+                "ask":            float(side_data["ask"]) if side_data.get("ask") else None,
                 "lot_size":       lot_size,
                 "trading_symbol": str(side_data.get("tsym", "")),
             })

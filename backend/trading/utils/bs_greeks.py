@@ -163,7 +163,7 @@ def bs_price(S, K, T, r, sigma, option_type="CE", q=0.0):
         Option price
     """
     if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0
+        return None
 
     try:
         sqrt_T = math.sqrt(T)
@@ -175,7 +175,7 @@ def bs_price(S, K, T, r, sigma, option_type="CE", q=0.0):
         else:
             return K * math.exp(-r * T) * norm.cdf(-d2) - S * math.exp(-q * T) * norm.cdf(-d1)
     except (ValueError, OverflowError):
-        return 0.0
+        return None
 
 
 # =============================================================================
@@ -202,7 +202,7 @@ def bs_greeks(S, K, T, r, sigma, opt_type="CE", q=0.0):
     option_type = opt_type
     
     if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return dict(delta=0, gamma=0, theta=0, vega=0, rho=0)
+        return None
 
     try:
         sqrt_T = math.sqrt(T)
@@ -236,7 +236,7 @@ def bs_greeks(S, K, T, r, sigma, opt_type="CE", q=0.0):
             "rho": rho
         }
     except (ValueError, OverflowError, ZeroDivisionError):
-        return dict(delta=0, gamma=0, theta=0, vega=0, rho=0)
+        return None
 
 
 # =============================================================================

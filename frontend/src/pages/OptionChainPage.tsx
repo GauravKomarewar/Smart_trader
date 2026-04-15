@@ -15,14 +15,14 @@ import {
 } from 'lucide-react'
 import type { BasketLeg, TransactionType, OrderType } from '../types'
 
-// Underlying → F&O exchange mapping
-const UNDERLYING_MAP: Record<string, string> = {
+// Underlying → F&O exchange mapping — built dynamically from /market/fno-underlyings
+// Kept as a static fallback for when API unavailable (first load or offline)
+const UNDERLYING_MAP_FALLBACK: Record<string, string> = {
   NIFTY: 'NFO', BANKNIFTY: 'NFO', FINNIFTY: 'NFO', MIDCPNIFTY: 'NFO',
   SENSEX: 'BFO', BANKEX: 'BFO',
   CRUDEOIL: 'MCX', GOLD: 'MCX', SILVER: 'MCX', NATURALGAS: 'MCX', COPPER: 'MCX',
   USDINR: 'CDS',
 }
-const UNDERLYINGS = Object.keys(UNDERLYING_MAP)
 
 type OCTab = 'chain' | 'analytics' | 'basket'
 
@@ -44,6 +44,16 @@ export default function OptionChainPage() {
   useOptionChain()
   const { data, selectedUnderlying, selectedExpiry, setUnderlying, setExpiry, isLoading } = useOptionChainStore()
   const [tab, setTab] = useState<OCTab>('chain')
+  const [underlyings, setUnderlyings] = useState<{ symbol: string; exchange: string }[]>(
+    Object.entries(UNDERLYING_MAP_FALLBACK).map(([symbol, exchange]) => ({ symbol, exchange }))
+  )
+
+  // Fetch FNO underlyings from API on mount
+  useEffect(() => {
+    api.fnoUnderlyings()
+      .then(rows => { if (rows && rows.length > 0) setUnderlyings(rows) })
+      .catch(() => { /* keep fallback */ })
+  }, [])
 
   return (
     <div className="h-full overflow-y-auto">
@@ -59,9 +69,11 @@ export default function OptionChainPage() {
           <select
             value={selectedUnderlying}
             onChange={e => setUnderlying(e.target.value)}
-            className="select-base w-32 text-[12px] py-1"
+            className="select-base w-36 text-[12px] py-1"
           >
-            {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
+            {underlyings.map(u => (
+              <option key={`${u.exchange}:${u.symbol}`} value={u.symbol}>{u.symbol}</option>
+            ))}
           </select>
 
           {/* Expiry selector */}
@@ -409,7 +421,7 @@ function OptionChainTable() {
                   {/* Call LTP (always visible) */}
                   <td
                     className={cn('px-2 py-1.5 text-right font-mono font-bold text-profit bg-profit/5 cursor-pointer hover:underline', flashCls(row.strike, 'call', 'ltp'))}
-                    onClick={() => openOrderModal((row.call as any)?.trading_symbol || data.underlying + `${row.strike}CE`, (data as any)?.exchange || UNDERLYING_MAP[data.underlying] || 'NFO')}
+                    onClick={() => openOrderModal((row.call as any)?.trading_symbol || data.underlying + `${row.strike}CE`, (data as any)?.exchange || UNDERLYING_MAP_FALLBACK[data.underlying] || 'NFO')}
                   >
                     {fmtNum(getLtp(row.call))}
                   </td>
@@ -424,7 +436,7 @@ function OptionChainTable() {
                   {/* PUT LTP (always visible) */}
                   <td
                     className={cn('px-2 py-1.5 text-left font-mono font-bold text-loss bg-loss/5 cursor-pointer hover:underline', flashCls(row.strike, 'put', 'ltp'))}
-                    onClick={() => openOrderModal((row.put as any)?.trading_symbol || data.underlying + `${row.strike}PE`, (data as any)?.exchange || UNDERLYING_MAP[data.underlying] || 'NFO')}
+                    onClick={() => openOrderModal((row.put as any)?.trading_symbol || data.underlying + `${row.strike}PE`, (data as any)?.exchange || UNDERLYING_MAP_FALLBACK[data.underlying] || 'NFO')}
                   >
                     {fmtNum(getLtp(row.put))}
                   </td>
@@ -549,7 +561,7 @@ function BasketOrder() {
     const tsym = (side as any)?.trading_symbol || `${data.underlying}${data.expiry}${newLeg.strike}${newLeg.type}`
     const lotSize = (side as any)?.lot_size || (data as any)?.lot_size || 50
     addToBasket({
-      id: uid(), symbol: tsym, tradingsymbol: tsym, exchange: (data as any)?.exchange || UNDERLYING_MAP[data.underlying] || 'NFO',
+      id: uid(), symbol: tsym, tradingsymbol: tsym, exchange: (data as any)?.exchange || UNDERLYING_MAP_FALLBACK[data.underlying] || 'NFO',
       transactionType: newLeg.txn, quantity: newLeg.qty * lotSize,
       orderType: newLeg.orderType, price: ltp ?? newLeg.price, product: 'MIS', ltp,
     })

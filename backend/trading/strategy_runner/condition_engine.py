@@ -506,9 +506,22 @@ class ConditionEngine:
                         return (leg.strike - self.state.spot_price) / self.state.spot_price
                     elif hasattr(leg, metric):
                         return getattr(leg, metric)
-            return 0.0
+            # Unknown tag.metric — log and treat as None so condition evaluates False
+            logger.warning(
+                "ConditionEngine: unknown tag parameter %r — treating as None. "
+                "Check for typos in your strategy config.",
+                param,
+            )
+            return None
         else:
-            return getattr(self.state, param, 0.0)
+            if not hasattr(self.state, param):
+                logger.warning(
+                    "ConditionEngine: unknown parameter %r — treating as None (condition will be False). "
+                    "Check for typos in your strategy config.",
+                    param,
+                )
+                return None
+            return getattr(self.state, param)
 
     def _find_leg_by_option_type(self, opt_type: str):
         """Helper to find first active leg with given option type (for CE/PE-centric params)."""

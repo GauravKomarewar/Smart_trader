@@ -224,6 +224,8 @@ export const api = {
       `/dashboard/strategy/config/${encodeURIComponent(name)}`),
   activeSymbols: () =>
     api.get<{ symbol: string; exchange: string }[]>('/dashboard/option-chain/active-symbols'),
+  fnoUnderlyings: () =>
+    api.get<{ symbol: string; exchange: string; instrument_types: string[] }[]>('/market/fno-underlyings'),
 
   // ── Strategy Runner — run / stop / status ────────────────────────────────
   runStrategy:  (name: string, overrides?: { symbol?: string; exchange?: string; paper_mode?: boolean; broker_config_id?: string }) =>

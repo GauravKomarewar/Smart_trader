@@ -1461,6 +1461,56 @@ def get_lot_size(symbol: str, exchange: str = "NFO") -> int:
         conn.close()
 
 
+def get_fno_underlyings() -> List[Dict[str, Any]]:
+    """
+    Return distinct underlying symbols that have option (OPT) or futures (FUT)
+    contracts in FNO segments: NFO, BFO, MCX, CDS.
+
+    Returns a list of dicts:
+        {"symbol": "NIFTY", "exchange": "NFO", "instrument_types": ["OPT", "FUT"]}
+    Sorted by exchange priority (NFO first) then symbol alphabetically.
+    """
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT
+                symbol,
+                exchange,
+                array_agg(DISTINCT
+                    CASE
+                        WHEN instrument_type LIKE 'OPT%' THEN 'OPT'
+                        WHEN instrument_type LIKE 'FUT%' THEN 'FUT'
+                        ELSE instrument_type
+                    END
+                ) AS instrument_types
+            FROM symbols
+            WHERE exchange IN ('NFO', 'BFO', 'MCX', 'CDS')
+              AND (instrument_type LIKE 'OPT%' OR instrument_type LIKE 'FUT%')
+              AND symbol IS NOT NULL
+              AND symbol != ''
+            GROUP BY symbol, exchange
+            ORDER BY
+                CASE exchange
+                    WHEN 'NFO' THEN 1
+                    WHEN 'BFO' THEN 2
+                    WHEN 'MCX' THEN 3
+                    WHEN 'CDS' THEN 4
+                    ELSE 5
+                END,
+                symbol
+            """
+        )
+        rows = cur.fetchall()
+        return [dict(r) for r in rows] if rows else []
+    except Exception as exc:
+        logger.warning("get_fno_underlyings failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
 def get_broker_symbols_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Dict[str, str]:
     """Resolve all broker symbol identifiers from a canonical trading symbol."""
     rec = lookup_by_trading_symbol(trading_symbol, exchange)
