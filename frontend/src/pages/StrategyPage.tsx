@@ -1436,6 +1436,8 @@ function EventTimeline({ runId }: { runId: string }) {
     TRAIL_ACTIVATE: 'text-cyan-400 bg-cyan-400/15 border-cyan-400/30',
     PROFIT_STEP: 'text-brand bg-brand/15 border-brand/30',
     SL_HIT: 'text-loss bg-loss/15 border-loss/30',
+    PENDING_RECOVER: 'text-cyan-400 bg-cyan-400/15 border-cyan-400/30',
+    PENDING_TIMEOUT: 'text-loss bg-loss/15 border-loss/30',
   }
   const eventIcons: Record<string, typeof ArrowUpRight> = {
     ENTRY: ArrowUpRight,
@@ -1444,6 +1446,8 @@ function EventTimeline({ runId }: { runId: string }) {
     TRAIL_ACTIVATE: Shield,
     PROFIT_STEP: Target,
     SL_HIT: AlertCircle,
+    PENDING_RECOVER: Repeat,
+    PENDING_TIMEOUT: AlertCircle,
   }
 
   return (
@@ -1452,20 +1456,27 @@ function EventTimeline({ runId }: { runId: string }) {
         const cls = eventColors[ev.event_type] || 'text-text-muted bg-bg-elevated border-border'
         const Icon = eventIcons[ev.event_type] || Info
         const time = ev.created_at ? new Date(ev.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'
+        const details = ev.details ?? {}
         return (
           <div key={i} className={cn('flex items-start gap-2 px-3 py-2 rounded-lg border', cls.split(' ').slice(1).join(' '))}>
             <Icon className={cn('w-3.5 h-3.5 shrink-0 mt-0.5', cls.split(' ')[0])} />
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className={cn('text-[10px] font-bold uppercase', cls.split(' ')[0])}>{ev.event_type}</span>
                 <span className="text-[9px] text-text-muted">{time}</span>
                 {ev.leg_tag && <span className="text-[9px] font-mono text-brand">{ev.leg_tag}</span>}
+                {details.rule && <span className="text-[9px] text-text-muted">Rule: {details.rule}</span>}
                 <span className="ml-auto text-[10px] font-mono" style={{ color: Number(ev.pnl_at_event) >= 0 ? 'var(--profit)' : 'var(--loss, #f43f5e)' }}>
                   ₹{Number(ev.pnl_at_event || 0).toFixed(0)}
                 </span>
               </div>
               {ev.reason && <div className="text-[10px] text-text-sec mt-0.5">{ev.reason}</div>}
-              {ev.spot_at_event > 0 && <span className="text-[9px] text-text-muted">Spot: {Number(ev.spot_at_event).toFixed(0)}</span>}
+              <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                {ev.spot_at_event > 0 && <span className="text-[9px] text-text-muted">Spot: {Number(ev.spot_at_event).toFixed(0)}</span>}
+                {details.net_delta != null && <span className="text-[9px] text-text-muted">Δ: {Number(details.net_delta).toFixed(3)}</span>}
+                {details.atm_strike > 0 && <span className="text-[9px] text-text-muted">ATM: {Number(details.atm_strike).toFixed(0)}</span>}
+                {details.adjustments_today != null && <span className="text-[9px] text-text-muted">Adj#: {details.adjustments_today}</span>}
+              </div>
             </div>
           </div>
         )
@@ -1821,6 +1832,40 @@ export default function StrategyPage() {
     const timer = setInterval(loadInstances, 5000)
     return () => clearInterval(timer)
   }, [loadInstances])
+
+  // ── Strategy event push notifications via WebSocket ──
+  useEffect(() => {
+    // Import dynamically to avoid circular deps
+    import('../lib/ws').then(({ marketWs }) => {
+      marketWs.connect()
+      return marketWs.onStrategyEvent(({ strategy, event }) => {
+        const ev = event
+        const evType: string = ev.event_type ?? ''
+        const reason: string = ev.reason ?? ''
+        const pnl: number = Number(ev.pnl_at_event ?? 0)
+        const label = strategy.replace(/_/g, ' ')
+        const pnlStr = pnl !== 0 ? ` | PnL ₹${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}` : ''
+        const msg = reason ? `${reason}${pnlStr}` : `${evType}${pnlStr}`
+
+        if (evType === 'ENTRY') {
+          toast(`📥 ENTRY — ${label}: ${msg}`, 'success', 'Strategy Entry')
+        } else if (evType === 'EXIT' || evType === 'SL_HIT') {
+          const toastType = evType === 'SL_HIT' ? 'error' : 'warning'
+          toast(`📤 ${evType} — ${label}: ${msg}`, toastType, 'Strategy Exit')
+        } else if (evType === 'ADJUSTMENT') {
+          toast(`🔄 ADJUSTMENT — ${label}: ${msg}`, 'info', 'Strategy Adjustment')
+        } else if (evType === 'PENDING_TIMEOUT') {
+          toast(`⚠️ PENDING TIMEOUT — ${label}: ${msg}`, 'error', 'Order Timeout')
+        } else if (evType === 'PENDING_RECOVER') {
+          toast(`🔁 RECOVERED — ${label}: ${msg}`, 'info', 'Order Recovery')
+        }
+        // Unknown event types are not toasted (e.g. intermediate condition checks)
+      })
+    }).then(unsub => {
+      // unsub is the unsubscribe function returned by onStrategyEvent
+      return () => { if (typeof unsub === 'function') unsub() }
+    })
+  }, [toast])
 
   // ── Shared broker + symbol data (loaded once) ──────
   const [brokers, setBrokers] = useState<any[]>([])

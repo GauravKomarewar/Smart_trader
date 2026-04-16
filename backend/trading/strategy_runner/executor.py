@@ -288,6 +288,99 @@ class StrategyExecutor:
         except Exception as exc:
             logger.error("ORDER_FAILED | EXIT %s: %s", leg.tag, exc)
 
+    def _recover_pending_legs(self, now: datetime) -> None:
+        """Dispatch entry orders for any PENDING legs that never received an order_id.
+
+        This handles legs created by adjustment_engine before the BUG-ADJ fix was
+        deployed, or legs whose order dispatch was interrupted by a crash.
+        Legs older than 5 minutes (300s) with no order_id are timed out as FAILED.
+        """
+        for tag, leg in list(self.state.legs.items()):
+            if leg.order_status != "PENDING" or leg.is_active or leg.order_id:
+                continue
+            age_raw = leg.order_placed_at
+            if age_raw is not None:
+                # Normalize to naive datetime for safe subtraction regardless of DB tz-aware
+                if getattr(age_raw, 'tzinfo', None) is not None:
+                    from datetime import timezone as _tz
+                    age_raw = age_raw.astimezone(_tz.utc).replace(tzinfo=None)
+                age = (now - age_raw).total_seconds()
+            else:
+                age = 9999
+            if age < 300:
+                logger.info(
+                    "PENDING_RECOVER | dispatching entry order for stale PENDING leg %s "
+                    "(age=%.0fs strike=%s %s)",
+                    tag, age, leg.strike,
+                    leg.option_type.value if leg.option_type else "?",
+                )
+                self._place_entry_order(leg)
+                if leg.is_active:
+                    self.subscribe_leg_symbols()
+                    self._log_event(
+                        "PENDING_RECOVER",
+                        reason=f"Recovered stale PENDING leg after {age:.0f}s",
+                        leg_tag=tag,
+                        details={"age_sec": age, "strike": leg.strike},
+                    )
+            else:
+                logger.warning(
+                    "PENDING_TIMEOUT | leg %s has been PENDING for %.0fs with no order_id — "
+                    "marking FAILED",
+                    tag, age,
+                )
+                leg.order_status = "FAILED"
+                self._log_event(
+                    "PENDING_TIMEOUT",
+                    reason=f"Leg stuck PENDING for {age:.0f}s — marked FAILED",
+                    leg_tag=tag,
+                    details={"age_sec": age, "strike": leg.strike},
+                )
+
+    def _place_exit_order_adj(self, leg: LegState) -> None:
+        """Place an exit order for a leg that was closed by the adjustment engine.
+
+        Unlike _place_exit_order(), this method works on already-closed (is_active=False)
+        legs and uses exit_price (set by leg.close()) as the fill price.
+        """
+        if not self._oms:
+            leg.order_status = "SIM_CLOSED"
+            logger.info(
+                "ORDER_SIM | ADJ_EXIT %s %s strike=%s exit_price=%.2f pnl=%.2f",
+                leg.tag, leg.symbol, leg.strike,
+                leg.exit_price or leg.ltp, leg.pnl,
+            )
+            return
+
+        try:
+            from trading.oms import OrderRequest, OrderSide, OrderType, ProductType
+            exit_side = OrderSide.SELL if leg.side == Side.BUY else OrderSide.BUY
+            tsym = leg.trading_symbol or leg.symbol
+            exchange = getattr(self.market, 'exchange', 'NFO')
+            fill_price = leg.exit_price if (leg.exit_price and leg.exit_price > 0) else leg.ltp
+
+            req = OrderRequest(
+                symbol=tsym,
+                exchange=exchange,
+                side=exit_side,
+                order_type=OrderType.MARKET,
+                product=ProductType.NRML,
+                quantity=leg.order_qty,
+                price=fill_price,
+                strategy_id=self._strategy_id,
+                tag="ADJUSTMENT",
+                test_mode=self._paper_mode,
+                remarks=f"strat={self._strategy_id} leg={leg.tag} adj_close",
+            )
+            order = self._oms.place_order(req)
+            leg.order_status = "CLOSED"
+            logger.info(
+                "ORDER_PLACED | ADJ_EXIT %s %s | order_id=%s exit_price=%.2f pnl=%.2f",
+                leg.tag, tsym, order.id[:8], fill_price, leg.pnl,
+            )
+        except Exception as exc:
+            logger.error("ORDER_FAILED | ADJ_EXIT %s: %s", leg.tag, exc)
+
     def run(self, interval_sec: int = 1):
         logger.info("Starting strategy executor...")
         _backoff = 1  # seconds; reset on successful tick
@@ -351,6 +444,12 @@ class StrategyExecutor:
         # Update market data (including per‑leg data)
         self._update_market_data()
 
+        # ✅ BUG-ADJ FIX: Recover any PENDING adjustment legs that were never
+        # dispatched (e.g. created before this fix was deployed, or after a crash
+        # that interrupted order dispatch).  Dispatch entry orders for them now.
+        # Legs older than 5 minutes with no order_id are timed out as FAILED.
+        self._recover_pending_legs(now)
+
         # ── Hard EOD safety cutoff ──────────────────────────────────────────────
         # If timing.eod_exit_time is set and we are past it, force an exit
         # regardless of what exit.time.strategy_exit_time says.  This prevents
@@ -367,7 +466,7 @@ class StrategyExecutor:
                             eod_str,
                         )
                         self._execute_exit("exit_all")
-                        self._log_event("EXIT", reason=f"eod_exit_time:{eod_str}")
+                        self._log_event("EXIT", reason=f"eod_exit_time:{eod_str}", details={"trigger": "eod_hard_exit", "eod_time": eod_str})
                         self._save_state()
                         return
                 except ValueError:
@@ -403,14 +502,39 @@ class StrategyExecutor:
         if exit_action and exit_action != "profit_step_adj":
             logger.info(f"Exit triggered: {exit_action}")
             self._execute_exit(exit_action)
-            self._log_event("EXIT", reason=exit_action)
+            exit_reason = self.exit_engine.last_exit_reason or exit_action
+            # Map to specific event_type for frontend colour-coding
+            if "stop_loss" in exit_reason or "trailing_stop" in exit_reason:
+                ev_type = "SL_HIT"
+            elif "time_exit" in exit_reason or "eod_exit" in exit_reason:
+                ev_type = "EXIT"
+            elif "profit_target" in exit_reason:
+                ev_type = "EXIT"
+            else:
+                ev_type = "EXIT"
+            exit_details = {
+                "trigger": exit_reason,
+                "action": exit_action,
+                "leg_tags": list(self.state.legs.keys()),
+            }
+            self._log_event(ev_type, reason=exit_reason, details=exit_details)
             self._save_state()  # Save immediately on significant event
             return
 
         # Check if we should enter today
         if self._should_enter(now):
             self._execute_entry()
-            self._log_event("ENTRY", reason=f"{len(self.state.legs)} legs entered")
+            entry_details = {
+                "legs": [
+                    {"tag": t, "strike": l.strike, "option_type": getattr(l.option_type, 'value', str(l.option_type)), "side": getattr(l.side, 'value', str(l.side)), "entry_price": l.entry_price}
+                    for t, l in self.state.legs.items() if l.is_active
+                ],
+            }
+            self._log_event(
+                "ENTRY",
+                reason=f"{sum(1 for l in self.state.legs.values() if l.is_active)} legs entered",
+                details=entry_details,
+            )
             self._save_state()  # ✅ BUG-022 FIX: Save immediately after entry
         elif (self.state.entered_today
               and len(self.state.legs) == 0
@@ -425,12 +549,63 @@ class StrategyExecutor:
                 self.state.total_trades_today -= 1
 
         # Check adjustments
-        actions = self.adjustment_engine.check_and_apply(now)
-        for a in actions:
-            logger.info(f"Adjustment: {a}")
-        if actions:
-            self._log_event("ADJUSTMENT", reason="; ".join(str(a) for a in actions))
-            self._save_state()  # ✅ BUG-022 FIX: Save immediately after any adjustment
+        # ✅ BUG-ADJ FIX: Track pre-adjustment legs so we can dispatch OMS orders
+        # for any newly created legs and exit orders for any newly closed legs.
+        # Guard: do not run adjustment engine while any PENDING leg is still
+        # awaiting fill — prevents double-adjustment storms.
+        pending_adj_legs = [
+            leg for leg in self.state.legs.values()
+            if leg.order_status == "PENDING" and not leg.is_active
+        ]
+        if pending_adj_legs and self.state.any_leg_active:
+            logger.info(
+                "ADJUSTMENT_HOLD | waiting for %d pending leg(s) to fill: %s",
+                len(pending_adj_legs), [l.tag for l in pending_adj_legs],
+            )
+        else:
+            before_adj_tags = set(self.state.legs.keys())
+            before_adj_active = {
+                tag: leg.is_active
+                for tag, leg in self.state.legs.items()
+            }
+            actions = self.adjustment_engine.check_and_apply(now)
+            for a in actions:
+                logger.info(f"Adjustment: {a}")
+            if actions:
+                # Dispatch exit orders for legs that were active before but now closed
+                for tag, was_active in before_adj_active.items():
+                    leg = self.state.legs.get(tag)
+                    if was_active and leg and not leg.is_active:
+                        logger.info(
+                            "ADJUSTMENT_EXIT | placing exit order for closed leg %s strike=%s",
+                            tag, leg.strike,
+                        )
+                        self._place_exit_order_adj(leg)
+                # Dispatch entry orders for newly created PENDING legs
+                for tag, leg in list(self.state.legs.items()):
+                    if tag not in before_adj_tags and leg.order_status == "PENDING" and not leg.is_active:
+                        logger.info(
+                            "ADJUSTMENT_ENTRY | placing entry order for new leg %s strike=%s",
+                            tag, leg.strike,
+                        )
+                        self._place_entry_order(leg)
+                # Subscribe any new leg symbols to LiveTickService
+                self.subscribe_leg_symbols()
+                # Build detailed event context for monitor columns
+                new_leg_tags = [t for t in self.state.legs if t not in before_adj_tags]
+                closed_leg_tags = [t for t, was in before_adj_active.items() if was and not self.state.legs.get(t, type('_', (), {'is_active': False})()).is_active]
+                adj_details = {
+                    "rule": self.adjustment_engine._last_triggered_rule_name,
+                    "new_legs": new_leg_tags,
+                    "closed_legs": closed_leg_tags,
+                    "actions": actions,
+                }
+                self._log_event(
+                    "ADJUSTMENT",
+                    reason="; ".join(str(a) for a in actions),
+                    details=adj_details,
+                )
+                self._save_state()  # ✅ BUG-022 FIX: Save immediately after any adjustment
 
         # Periodic save + PnL snapshot (every minute) as a safety net
         if now.second == 0:
@@ -842,21 +1017,67 @@ class StrategyExecutor:
 
     def _log_event(self, event_type: str, reason: str = "",
                    leg_tag: str = None, details: dict = None):
-        """Log a strategy decision event to the DB."""
+        """Log a strategy decision event to the DB and broadcast via WebSocket."""
         db = getattr(self, "_db_persistence", None)
+        pnl = self.state.combined_pnl + getattr(self.state, 'cumulative_daily_pnl', 0)
+        spot = self.state.spot_price
+        # Enrich details with live market context for the monitor columns
+        enriched = dict(details or {})
+        enriched.setdefault("net_delta", round(getattr(self.state, 'net_delta', 0), 4))
+        enriched.setdefault("atm_strike", getattr(self.state, 'atm_strike', 0))
+        enriched.setdefault("adjustments_today", getattr(self.state, 'adjustments_today', 0))
+        enriched.setdefault("strategy_id", self._strategy_id)
         if db:
             try:
-                pnl = self.state.combined_pnl + getattr(self.state, 'cumulative_daily_pnl', 0)
                 db.log_event(
                     event_type=event_type,
                     reason=reason,
                     leg_tag=leg_tag,
                     pnl=pnl,
-                    spot=self.state.spot_price,
-                    details=details,
+                    spot=spot,
+                    details=enriched,
                 )
             except Exception as e:
                 logger.warning("DB event log failed: %s", e)
+        # Broadcast to WebSocket so frontend receives instant push notifications
+        self._broadcast_strategy_event(event_type, reason, leg_tag, pnl, spot, enriched)
+
+    def _broadcast_strategy_event(self, event_type: str, reason: str,
+                                   leg_tag: Optional[str], pnl: float,
+                                   spot: float, details: dict) -> None:
+        """Push strategy event to all connected WebSocket clients (fire-and-forget)."""
+        try:
+            from routers.websocket import manager
+            import asyncio
+            db = getattr(self, "_db_persistence", None)
+            run_id = db.run_id if db else ""
+            payload = {
+                "type": "strategy_event",
+                "run_id": run_id,
+                "strategy": self._strategy_id,
+                "event": {
+                    "event_type": event_type,
+                    "reason": reason,
+                    "leg_tag": leg_tag,
+                    "pnl_at_event": round(pnl, 2),
+                    "spot_at_event": round(spot, 2),
+                    "details": details,
+                    "created_at": datetime.now().isoformat(),
+                },
+            }
+            # The executor runs in a background thread; schedule coroutine on
+            # the FastAPI event loop.
+            loop = getattr(self, "_event_loop", None)
+            if loop is None:
+                # Try to grab the running loop stored by the router at strategy start
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = None
+            if loop and not loop.is_closed():
+                asyncio.run_coroutine_threadsafe(manager.broadcast(payload), loop)
+        except Exception:
+            pass  # Never let WS broadcast failure disrupt the strategy thread
 
     def _snapshot_pnl(self):
         """Snapshot PnL for charting (called every minute)."""

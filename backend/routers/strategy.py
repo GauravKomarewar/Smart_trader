@@ -847,6 +847,13 @@ def _strategy_thread(
             if run_id in _running:
                 _running[run_id]["executor"] = executor
 
+        # Inject the FastAPI event loop so executor can broadcast WS events from its thread
+        try:
+            import asyncio
+            executor._event_loop = asyncio.get_event_loop()
+        except Exception:
+            pass
+
         # ── COMPREHENSIVE STARTUP LOG ──────────────────────────────────
         _identity = cfg.get("identity", {})
         _timing = cfg.get("timing", {})

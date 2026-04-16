@@ -2098,9 +2098,13 @@ class PerStrategyExecutor:
                     continue
                 opt_data = self.market.get_option_at_strike(leg.strike, leg.option_type, leg.expiry)
                 if opt_data:
-                    # Update fields only if present in opt_data
-                    if "ltp" in opt_data:
-                        leg.ltp = opt_data["ltp"]
+                    # Update LTP only when the new value is a valid positive price.
+                    # SQLite stores NULL for zero prices (_opt_float returns None for 0.0);
+                    # overwriting a valid LTP with None/0 would cause leg.pnl to fall back
+                    # to entry_price (PnL = 0), creating a false "spike" on the next update.
+                    _sq_ltp = opt_data.get("ltp")
+                    if _sq_ltp is not None and float(_sq_ltp) > 0:
+                        leg.ltp = float(_sq_ltp)
                     if "delta" in opt_data and opt_data["delta"] is not None:
                         leg.delta = opt_data["delta"]
                     if "gamma" in opt_data and opt_data["gamma"] is not None:

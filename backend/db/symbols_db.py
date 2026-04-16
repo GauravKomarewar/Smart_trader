@@ -21,12 +21,41 @@ Usage:
 from __future__ import annotations
 
 import logging
+import re
 import time
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
 import psycopg2.extras
+
+# Regex that strips broker-specific expiry/strike/contract suffixes from the
+# `symbol` column so we can recover the clean underlying base name.
+# Handles Shoonya-style long-form names across ALL FNO exchanges:
+#   "GOLDPETAL FUT 30 APR 26"        → "GOLDPETAL"
+#   "360ONE 1000 CE 26 MAY 26"       → "360ONE"
+#   "JPYINR 62.25 CE 25 JUN 26"      → "JPYINR"
+#   "GOLDPETAL26APR" / "GOLDPETAL26APRFUT" → "GOLDPETAL"
+# NOTE: the dated-suffix alternative uses explicit month abbreviations instead
+# of [A-Z]{3,} to avoid eating valid trailing letters in names like "360ONE".
+_MONTHS = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC"
+_BROKER_SUFFIX_RE = re.compile(
+    r"(?:"
+    r"\s+(?:FUT|OPT)\s+\d+\s+[A-Z]{3}\s+\d+"         # " FUT 30 APR 26"
+    r"|\s+[\d]+(?:\.\d+)?\s+(?:CE|PE)\s+\d+\s+[A-Z]{3}\s+\d+"  # " 1000 CE 26 MAY 26"
+    r"|\d{2}(?:" + _MONTHS + r")[A-Z0-9]*"             # "26APR", "26APRFUT"
+    r")$",
+    re.IGNORECASE,
+)
+
+# Symbols whose base name contains 5+ consecutive digits are likely mis-stored
+# option trading_symbols (e.g. "NIFTY2642123600"), not real underlyings.
+_STRIKE_LIKE_RE = re.compile(r"\d{5,}")
+
+
+def _extract_base_symbol(symbol: str) -> str:
+    """Strip broker-specific expiry/strike suffix to get the underlying base name."""
+    return _BROKER_SUFFIX_RE.sub("", symbol).strip()
 from core.daily_refresh import IST, current_refresh_cycle_start, next_refresh_time
 from db.trading_db import get_trading_conn
 
@@ -1323,9 +1352,11 @@ def search_symbols(
 
         cur.execute(
             f"SELECT * FROM symbols WHERE {where} "
-            f"ORDER BY CASE WHEN symbol = %s THEN 0 "
-            f"WHEN symbol LIKE %s THEN 1 ELSE 2 END, "
-            f"broker_coverage DESC, instrument_type, symbol LIMIT %s",
+            f"ORDER BY CASE WHEN UPPER(symbol) = %s THEN 0 "
+            f"WHEN UPPER(symbol) LIKE %s THEN 1 ELSE 2 END, "
+            f"CASE instrument_type WHEN 'EQ' THEN 0 WHEN 'IDX' THEN 1 ELSE 2 END, "
+            f"expiry ASC NULLS LAST, "
+            f"broker_coverage DESC, symbol LIMIT %s",
             params + [q, q + "%", limit],
         )
         return [dict(r) for r in cur.fetchall()]
@@ -1408,23 +1439,52 @@ def get_options(
 
 
 def get_expiry_list(symbol: str, exchange: str = "NFO", instrument_type: str = "OPT") -> List[str]:
-    """Return sorted ISO expiries for a symbol and instrument type."""
+    """Return sorted ISO expiries (nearest first) for a symbol and instrument type.
+
+    For MCX/CDS the ``symbol`` column stores full contract names such as
+    "GOLDPETAL FUT 30 APR 26" so we also match via a regex pattern on the
+    base symbol name in addition to an exact-equals check.
+    """
     conn = get_trading_conn()
     try:
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT DISTINCT expiry
-            FROM symbols
-            WHERE exchange = %s
-              AND instrument_type = %s
-              AND UPPER(symbol) = %s
-              AND expiry IS NOT NULL
-              AND expiry >= CURRENT_DATE
-            ORDER BY expiry
-            """,
-            (exchange.upper(), instrument_type.upper().strip(), symbol.upper().strip()),
-        )
+        sym_upper = symbol.upper().strip()
+        exch_upper = exchange.upper()
+        itype_upper = instrument_type.upper().strip()
+
+        if exch_upper in ("MCX", "CDS"):
+            # Broker ScriptMaster stores full contract names in symbol column,
+            # e.g. "GOLDPETAL FUT 30 APR 26" or "GOLDPETAL26APR".  Use a
+            # case-insensitive regex anchor so "GOLDPETAL" matches both without
+            # accidentally matching "GOLDPETALCOM".
+            base_pattern = f"^{re.escape(sym_upper)}(\\s|\\d)"
+            cur.execute(
+                """
+                SELECT DISTINCT expiry
+                FROM symbols
+                WHERE exchange = %s
+                  AND (instrument_type = %s OR instrument_type LIKE %s)
+                  AND (UPPER(symbol) = %s OR UPPER(symbol) ~* %s)
+                  AND expiry IS NOT NULL
+                  AND expiry >= CURRENT_DATE
+                ORDER BY expiry
+                """,
+                (exch_upper, itype_upper, itype_upper + "%", sym_upper, base_pattern),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT DISTINCT expiry
+                FROM symbols
+                WHERE exchange = %s
+                  AND instrument_type = %s
+                  AND UPPER(symbol) = %s
+                  AND expiry IS NOT NULL
+                  AND expiry >= CURRENT_DATE
+                ORDER BY expiry
+                """,
+                (exch_upper, itype_upper, sym_upper),
+            )
         return [row[0].strftime("%Y-%m-%d") for row in cur.fetchall() if row and row[0]]
     finally:
         conn.close()
@@ -1469,6 +1529,11 @@ def get_fno_underlyings() -> List[Dict[str, Any]]:
     Returns a list of dicts:
         {"symbol": "NIFTY", "exchange": "NFO", "instrument_types": ["OPT", "FUT"]}
     Sorted by exchange priority (NFO first) then symbol alphabetically.
+
+    Broker ScriptMasters store contract-specific names in the `symbol` column
+    (e.g. "GOLDPETAL FUT 30 APR 26", "360ONE 1000 CE 26 MAY 26").  We strip
+    those suffixes in Python to recover the clean underlying base name and then
+    deduplicate.
     """
     conn = get_trading_conn()
     try:
@@ -1491,19 +1556,37 @@ def get_fno_underlyings() -> List[Dict[str, Any]]:
               AND symbol IS NOT NULL
               AND symbol != ''
             GROUP BY symbol, exchange
-            ORDER BY
-                CASE exchange
-                    WHEN 'NFO' THEN 1
-                    WHEN 'BFO' THEN 2
-                    WHEN 'MCX' THEN 3
-                    WHEN 'CDS' THEN 4
-                    ELSE 5
-                END,
-                symbol
             """
         )
         rows = cur.fetchall()
-        return [dict(r) for r in rows] if rows else []
+        if not rows:
+            return []
+
+        # Normalise: strip broker-specific expiry/strike suffixes and deduplicate
+        # by (base_symbol, exchange).  This collapses entries like
+        # "GOLDPETAL FUT 30 APR 26" / "GOLDPETAL26APR" → "GOLDPETAL" (MCX)
+        # and "360ONE FUT 26 MAY 26" / "360ONE 1000 CE 26 MAY 26" → "360ONE" (NFO).
+        groups: Dict[tuple, set] = {}
+        for r in rows:
+            base = _extract_base_symbol(r["symbol"])
+            # Skip empty, single-char, or strike-price-like symbols
+            # (e.g. "NIFTY2642123600" stored in symbol col by some brokers)
+            if not base or len(base) < 2 or _STRIKE_LIKE_RE.search(base):
+                continue
+            key = (base, r["exchange"])
+            if key not in groups:
+                groups[key] = set()
+            for it in (r["instrument_types"] or []):
+                if it:
+                    groups[key].add(it)
+
+        _exchange_priority = {"NFO": 1, "BFO": 2, "MCX": 3, "CDS": 4}
+        result = [
+            {"symbol": sym, "exchange": exch, "instrument_types": sorted(itypes)}
+            for (sym, exch), itypes in groups.items()
+        ]
+        result.sort(key=lambda x: (_exchange_priority.get(x["exchange"], 5), x["symbol"]))
+        return result
     except Exception as exc:
         logger.warning("get_fno_underlyings failed: %s", exc)
         return []

@@ -315,7 +315,18 @@ class LiveTickService:
         with self._lock:
             self._subscribed.update(new_syms)
             for s in new_syms:
-                self._sym_alias[_normalize_sym(s)] = s
+                norm = _normalize_sym(s)
+                self._sym_alias[norm] = s
+                # Also map the Fyers-clean-sym back to the subscribed symbol so that
+                # index ticks (stored under the clean Fyers key, e.g. "NIFTYBANK")
+                # can be retrieved via get_latest("BANKNIFTY").
+                try:
+                    fyers_sym = self._to_fyers_sym(s)
+                    fyers_clean = _normalize_sym(fyers_sym)
+                    if fyers_clean and fyers_clean != norm:
+                        self._sym_alias.setdefault(fyers_clean, s)
+                except Exception:
+                    pass
         logger.info("Subscribing %d new symbols: %s", len(new_syms), new_syms[:5])
         self._subscribe_fyers(new_syms)
         self._subscribe_shoonya(new_syms)
@@ -397,12 +408,23 @@ class LiveTickService:
             self._init_fyers_ws()
             if self._fyers_ws is None:
                 return
-            # Symbols must be in Fyers format e.g. "NSE:RELIANCE-EQ"
-            fyers_syms = [self._to_fyers_sym(s) for s in symbols]
-            fyers_syms = [s for s in fyers_syms if s]
+            # Always send ALL currently-subscribed symbols in one batch.
+            # Reason: Fyers WS assigns topic_ids sequentially per subscribe() call.
+            # Subscribing indices first (topic_id=0) then options later also gets
+            # topic_id=0, causing the library to misroute index tick updates into
+            # the option's resp-dict → index LTP (e.g. 24142) stored under the
+            # option symbol key.  Passing everything together forces the server to
+            # assign unique, non-colliding topic_ids for indices AND options.
+            with self._lock:
+                all_subscribed = list(self._subscribed)
+            fyers_syms = [self._to_fyers_sym(s) for s in all_subscribed]
+            fyers_syms = list(dict.fromkeys(s for s in fyers_syms if s))  # dedup, preserve order
             if fyers_syms:
                 self._fyers_ws.subscribe(symbols=fyers_syms, data_type="SymbolUpdate")
-                logger.info("Fyers WS subscribed: %s", fyers_syms[:5])
+                logger.info(
+                    "Fyers WS subscribed: %d total (%d new): %s",
+                    len(fyers_syms), len(symbols), fyers_syms[:5],
+                )
         except Exception as e:
             logger.warning("Fyers WS subscribe error: %s", e)
 
@@ -525,6 +547,16 @@ class LiveTickService:
             # Map back to the user-subscribed symbol (e.g. "NIFTY50" → "NIFTY 50")
             norm = _normalize_sym(clean_sym)
             subscribed_sym = self._sym_alias.get(norm, clean_sym)
+
+            # Sanity guard: option symbols (CE/PE suffix) should never have an LTP
+            # in the index-price range (~10000+).  If topic_id collision caused an
+            # index tick to be mislabelled as an option, reject it here.
+            if _re.search(r'\d{3,}(CE|PE)$', clean_sym.upper()) and ltp > 10000:
+                logger.debug(
+                    "Rejected contaminated tick: sym=%s ltp=%.2f (likely index value)",
+                    subscribed_sym, ltp,
+                )
+                return
             tick = _norm_tick(
                 subscribed_sym,
                 ltp,
@@ -578,17 +610,21 @@ class LiveTickService:
         if upper_orig in {"FIN NIFTY"}: return "NSE:FINNIFTY-INDEX"
 
         # symbols DB-first resolution: canonical symbol -> broker format
-        try:
-            from broker.symbol_normalizer import resolve_symbol_for_broker
-            _, _, resolved = resolve_symbol_for_broker(
-                symbol,
-                exchange_hint or "NSE",
-                "fyers",
-            )
-            if resolved and ":" in resolved:
-                return resolved
-        except Exception:
-            pass
+        # Skip DB lookup when caller already provided a valid exchange prefix (NSE/BSE/NFO/BFO).
+        # The DB may store NIFTY/BANKNIFTY options under exchange="NFO" but Fyers WS requires "NSE:".
+        # Trusting exchange_hint avoids the mismatch.
+        if exchange_hint not in ("NSE", "BSE", "NFO", "BFO"):
+            try:
+                from broker.symbol_normalizer import resolve_symbol_for_broker
+                _, _, resolved = resolve_symbol_for_broker(
+                    symbol,
+                    exchange_hint or "NSE",
+                    "fyers",
+                )
+                if resolved and ":" in resolved:
+                    return resolved
+            except Exception:
+                pass
 
         # MCX commodities (plain name without CE/PE/FUT) — subscribe as MCX
         for kw in _MCX_KEYWORDS:
@@ -602,13 +638,19 @@ class LiveTickService:
             for kw in _MCX_KEYWORDS:
                 if upper.startswith(kw):
                     return f"MCX:{upper}"
-            return f"NFO:{upper}"
+            # Preserve the caller-supplied exchange hint (e.g. "NSE" from trading_symbol
+            # "NSE:NIFTY2642124600CE").  Fyers WS requires NSE: for NIFTY/BANKNIFTY options;
+            # falling back unconditionally to NFO: causes "invalid_symbols" WS errors and
+            # breaks live-tick delivery for option legs (PnL only updates every 30 s from SQLite).
+            ex = exchange_hint if exchange_hint in ("NSE", "BSE", "NFO", "BFO") else "NFO"
+            return f"{ex}:{upper}"
         # Futures: end with FUT and contain digits (e.g. NIFTY24APRFUT)
         if re.search(r'\d+FUT$', upper):
             for kw in _MCX_KEYWORDS:
                 if upper.startswith(kw):
                     return f"MCX:{upper}"
-            return f"NFO:{upper}"
+            ex = exchange_hint if exchange_hint in ("NSE", "BSE", "NFO", "BFO") else "NFO"
+            return f"{ex}:{upper}"
         # Dated derivatives without explicit FUT suffix (e.g. GOLDPETAL30APR26)
         if re.search(r'\d{1,2}[A-Z]{3}\d{2}$', upper) and not re.search(r'(CE|PE)$', upper):
             for kw in _MCX_KEYWORDS:

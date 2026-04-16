@@ -188,7 +188,8 @@ export interface MarketTick {
 }
 
 type TickHandler = (tick: MarketTick) => void
-type MarketMsgType = 'connected' | 'subscribed' | 'unsubscribed' | 'tick' | 'heartbeat' | 'pong' | 'error'
+type StrategyEventHandler = (payload: { run_id: string; strategy: string; event: any }) => void
+type MarketMsgType = 'connected' | 'subscribed' | 'unsubscribed' | 'tick' | 'heartbeat' | 'pong' | 'error' | 'strategy_event'
 
 class MarketWebSocket {
   private ws: WebSocket | null = null
@@ -199,6 +200,7 @@ class MarketWebSocket {
   private pendingSubscribe: Set<string> = new Set()
   private subscribed: Set<string> = new Set()
   private tickHandlers: Set<TickHandler> = new Set()
+  private strategyEventHandlers: Set<StrategyEventHandler> = new Set()
 
   connect() {
     if (this.ws && this.ws.readyState <= WebSocket.OPEN) return
@@ -218,7 +220,7 @@ class MarketWebSocket {
 
     this.ws.onmessage = (ev) => {
       try {
-        const msg = JSON.parse(ev.data) as { type: MarketMsgType; data?: any; symbols?: string[] }
+        const msg = JSON.parse(ev.data) as { type: MarketMsgType; data?: any; symbols?: string[]; run_id?: string; strategy?: string; event?: any }
         if (msg.type === 'tick' && msg.data) {
           this.reconnectDelay = 2000  // reset on real data
           const tick = msg.data as MarketTick
@@ -227,6 +229,12 @@ class MarketWebSocket {
           this.reconnectDelay = 1000
           this.subscribed = new Set(msg.symbols ?? [])
           this.pendingSubscribe.clear()
+        } else if (msg.type === 'strategy_event') {
+          this.strategyEventHandlers.forEach(h => {
+            try {
+              h({ run_id: msg.run_id ?? '', strategy: msg.strategy ?? '', event: msg.event ?? {} })
+            } catch {}
+          })
         }
       } catch { /* ignore malformed */ }
     }
@@ -266,6 +274,11 @@ class MarketWebSocket {
   onTick(handler: TickHandler): () => void {
     this.tickHandlers.add(handler)
     return () => { this.tickHandlers.delete(handler) }
+  }
+
+  onStrategyEvent(handler: StrategyEventHandler): () => void {
+    this.strategyEventHandlers.add(handler)
+    return () => { this.strategyEventHandlers.delete(handler) }
   }
 
   private _send(payload: unknown) {
