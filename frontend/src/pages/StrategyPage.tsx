@@ -811,9 +811,9 @@ function LiveMonitorPanel() {
     if (!container.querySelector('[data-mid]')) {
       // First render — build HTML
       container.innerHTML = cols.map(([label, val, type]) => `
-        <div class="bg-bg-card border border-border rounded-lg px-3 py-2.5">
-          <div class="text-[9px] text-text-muted uppercase tracking-wider font-semibold">${esc(label)}</div>
-          <div class="text-[17px] font-bold font-mono tabular-nums whitespace-nowrap mt-1" data-mid="${esc(label)}"
+        <div class="bg-bg-card border border-border rounded-lg px-3 py-2.5 overflow-hidden min-w-0">
+          <div class="text-[9px] text-text-muted uppercase tracking-wider font-semibold truncate">${esc(label)}</div>
+          <div class="text-[14px] font-bold font-mono tabular-nums truncate mt-1" data-mid="${esc(label)}"
                style="${type === 'pnl' ? `color:${pCol(val)}` : 'color:rgb(var(--c-text-bright))'}">${fmtSummaryValue(val, type)}</div>
         </div>`).join('')
       return
@@ -1082,9 +1082,9 @@ function LiveMonitorPanel() {
             ['Adj', String(s.adjustments_today ?? 0), 'adj'],
             ['Exit In', s.minutes_to_exit != null ? `${s.minutes_to_exit}m` : '—', 'exitin'],
           ].map(([label, val, field]) => `
-            <div class="px-3 py-2 text-center" style="border-right:1px solid rgba(255,255,255,0.04)">
-              <div class="text-[9px] text-text-muted uppercase tracking-wider">${label}</div>
-                <div class="text-[12px] font-bold font-mono tabular-nums whitespace-nowrap mt-0.5 text-text-bright" data-field="${field}"
+            <div class="px-3 py-2 text-center overflow-hidden min-w-0" style="border-right:1px solid rgba(255,255,255,0.04)">
+              <div class="text-[9px] text-text-muted uppercase tracking-wider truncate">${label}</div>
+                <div class="text-[12px] font-bold font-mono tabular-nums truncate mt-0.5 text-text-bright" data-field="${field}"
                    ${field === 'pnl' || field === 'pnlpct' ? `style="color:${pCol(totalPnl)}"` : ''}>${val}</div>
             </div>`).join('')}
         </div>
