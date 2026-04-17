@@ -54,17 +54,22 @@ class TestShoonyaPlaceOrder:
             "price": 0.0,
         }
 
+    def _patch_db(self):
+        """Patch DB lookup to return None (symbol unchanged, no DB resolution)."""
+        return patch("db.symbols_db.lookup_by_trading_symbol", return_value=None)
+
     def test_no_client_returns_success_false(self):
         session = MagicMock()
         session._client = None
         adapter = ShoonyaAdapter(session, account_id="CFG", client_id="CL")
-        result = adapter.place_order(self._order())
+        with self._patch_db():
+            result = adapter.place_order(self._order())
         assert result["success"] is False
         assert "not connected" in result["message"].lower()
 
     def test_ok_response_returns_success_true_with_order_id(self):
         adapter = _adapter()
-        with patch("broker.symbol_normalizer.lookup_by_trading_symbol", return_value=None):
+        with self._patch_db():
             with patch.object(adapter, "_raw_place_order", return_value={"stat": "Ok", "norenordno": "12345"}):
                 result = adapter.place_order(self._order())
         assert result["success"] is True
@@ -72,7 +77,7 @@ class TestShoonyaPlaceOrder:
 
     def test_emsg_returns_success_false(self):
         adapter = _adapter()
-        with patch("broker.symbol_normalizer.lookup_by_trading_symbol", return_value=None):
+        with self._patch_db():
             with patch.object(adapter, "_raw_place_order", return_value={"stat": "Not_Ok", "emsg": "RMS:Blocked"}):
                 result = adapter.place_order(self._order())
         assert result["success"] is False
@@ -81,14 +86,14 @@ class TestShoonyaPlaceOrder:
     def test_none_response_returns_success_false(self):
         """_raw_place_order raises an exception → caught → success=False."""
         adapter = _adapter()
-        with patch("broker.symbol_normalizer.lookup_by_trading_symbol", return_value=None):
+        with self._patch_db():
             with patch.object(adapter, "_raw_place_order", side_effect=RuntimeError("Connection error")):
                 result = adapter.place_order(self._order())
         assert result["success"] is False
 
     def test_exception_returns_success_false(self):
         adapter = _adapter()
-        with patch("broker.symbol_normalizer.lookup_by_trading_symbol", return_value=None):
+        with self._patch_db():
             with patch.object(adapter, "_raw_place_order", side_effect=RuntimeError("Timeout")):
                 result = adapter.place_order(self._order())
         assert result["success"] is False
@@ -96,17 +101,63 @@ class TestShoonyaPlaceOrder:
 
     def test_result_always_has_required_keys(self):
         """Every response must include success, order_id, message."""
-        for raw_resp, should_succeed in [
-            ({"stat": "Ok", "norenordno": "ABC"}, True),
-            ({"stat": "Not_Ok", "emsg": "err"}, False),
+        for raw_resp in [
+            {"stat": "Ok", "norenordno": "ABC"},
+            {"stat": "Not_Ok", "emsg": "err"},
         ]:
             adapter = _adapter()
-            with patch("broker.symbol_normalizer.lookup_by_trading_symbol", return_value=None):
+            with self._patch_db():
                 with patch.object(adapter, "_raw_place_order", return_value=raw_resp):
                     result = adapter.place_order(self._order())
             assert "success" in result
             assert "order_id" in result
             assert "message" in result
+
+    def test_shoonya_tsym_resolved_from_db(self):
+        """When DB returns a shoonya_tsym, it should override the raw symbol."""
+        adapter = _adapter()
+        db_rec = {
+            "trading_symbol": "NIFTY-APR2026-24500-CE",
+            "shoonya_tsym": "NIFTY21APR26C24500",
+            "exchange": "NFO",
+            "tick_size": 0.05,
+            "expiry": "2026-04-21",
+            "strike": 24500.0,
+            "option_type": "CE",
+        }
+        with patch("db.symbols_db.lookup_by_trading_symbol", return_value=db_rec):
+            with patch.object(adapter, "_raw_place_order", return_value={"stat": "Ok", "norenordno": "XYZ"}) as mock_raw:
+                result = adapter.place_order(self._order())
+        # Verify _raw_place_order was called with the Shoonya-resolved symbol
+        call_params = mock_raw.call_args[0][1]  # second positional arg = params dict
+        assert call_params["tradingsymbol"] == "NIFTY21APR26C24500"
+        assert result["success"] is True
+
+    def test_shoonya_tsym_partner_lookup_when_empty(self):
+        """When shoonya_tsym empty on primary row, fall back to partner-row query."""
+        adapter = _adapter()
+        db_rec = {
+            "trading_symbol": "NIFTY2642124500CE",
+            "shoonya_tsym": "",   # empty — partner lookup required
+            "exchange": "NFO",
+            "tick_size": 0.05,
+            "expiry": "2026-04-21",
+            "strike": 24500.0,
+            "option_type": "CE",
+        }
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = ("NIFTY21APR26C24500",)
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch("db.symbols_db.lookup_by_trading_symbol", return_value=db_rec):
+            with patch("db.trading_db.get_trading_conn", return_value=mock_conn):
+                with patch.object(adapter, "_raw_place_order", return_value={"stat": "Ok", "norenordno": "XYZ"}) as mock_raw:
+                    result = adapter.place_order(self._order())
+
+        call_params = mock_raw.call_args[0][1]
+        assert call_params["tradingsymbol"] == "NIFTY21APR26C24500"
+        assert result["success"] is True
 
 
 # ── _map_order status normalisation ──────────────────────────────────────────
