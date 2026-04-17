@@ -792,38 +792,15 @@ async def get_ohlcv(
 
     candles: list = []
 
-    # 1) Try local DB first
-    try:
-        from db.trading_db import trading_cursor
-        with trading_cursor() as cur:
-            if tf_min == 1:
-                cur.execute("""
-                    SELECT bar_time, open, high, low, close, volume, oi
-                    FROM market_ohlcv
-                    WHERE symbol = %s AND exchange = %s AND timeframe = '1m'
-                    ORDER BY bar_time DESC
-                    LIMIT %s
-                """, (sym, exchange, limit))
-            else:
-                cur.execute("""
-                    SELECT
-                        date_trunc('minute', bar_time -
-                            (EXTRACT(MINUTE FROM bar_time)::int %% %s) * interval '1 minute')
-                            AS bar_time,
-                        (array_agg(open  ORDER BY bar_time))[1] AS open,
-                        MAX(high)     AS high,
-                        MIN(low)      AS low,
-                        (array_agg(close ORDER BY bar_time DESC))[1] AS close,
-                        SUM(volume)   AS volume,
-                        (array_agg(oi   ORDER BY bar_time DESC))[1] AS oi
-                    FROM market_ohlcv
-                    WHERE symbol = %s AND exchange = %s AND timeframe = '1m'
-                    GROUP BY 1
-                    ORDER BY 1 DESC
-                    LIMIT %s
-                """, (tf_min, sym, exchange, limit))
-            rows = cur.fetchall()
-        candles = [
+    # Normalize well-known index aliases so "NIFTY50" also matches DB rows stored as "NIFTY"
+    _SYM_ALIASES: dict = {
+        "NIFTY50": "NIFTY", "NIFTY 50": "NIFTY",
+        "NIFTYBANK": "NIFTYBANK", "BANKNIFTY": "NIFTYBANK",
+    }
+    db_sym = _SYM_ALIASES.get(sym, sym)
+
+    def _rows_to_candles(rows):
+        return [
             {
                 "time":   int(row["bar_time"].timestamp()),
                 "open":   row["open"],
@@ -835,6 +812,80 @@ async def get_ohlcv(
             }
             for row in reversed(rows)
         ]
+
+    # 1) Try local DB first
+    try:
+        from db.trading_db import trading_cursor
+        with trading_cursor() as cur:
+            # Try all symbol variants to search — original sym and any alias
+            sym_variants = list(dict.fromkeys([db_sym, sym]))  # deduplicated, alias first
+            rows = []
+            for s in sym_variants:
+                if tf_min == 1:
+                    cur.execute("""
+                        SELECT bar_time, open, high, low, close, volume, oi
+                        FROM market_ohlcv
+                        WHERE symbol = %s AND exchange = %s AND timeframe = '1m'
+                        ORDER BY bar_time DESC
+                        LIMIT %s
+                    """, (s, exchange, limit))
+                else:
+                    cur.execute("""
+                        SELECT
+                            date_trunc('minute', bar_time -
+                                (EXTRACT(MINUTE FROM bar_time)::int %% %s) * interval '1 minute')
+                                AS bar_time,
+                            (array_agg(open  ORDER BY bar_time))[1] AS open,
+                            MAX(high)     AS high,
+                            MIN(low)      AS low,
+                            (array_agg(close ORDER BY bar_time DESC))[1] AS close,
+                            SUM(volume)   AS volume,
+                            (array_agg(oi   ORDER BY bar_time DESC))[1] AS oi
+                        FROM market_ohlcv
+                        WHERE symbol = %s AND exchange = %s AND timeframe = '1m'
+                        GROUP BY 1
+                        ORDER BY 1 DESC
+                        LIMIT %s
+                    """, (tf_min, s, exchange, limit))
+                rows = cur.fetchall()
+                if rows:
+                    break
+
+            # Fallback: drop exchange constraint — handles indices stored under a
+            # different exchange code (e.g. NIFTY50 stored as CDS vs queried as NSE)
+            if not rows:
+                for s in sym_variants:
+                    if tf_min == 1:
+                        cur.execute("""
+                            SELECT bar_time, open, high, low, close, volume, oi
+                            FROM market_ohlcv
+                            WHERE symbol = %s AND timeframe = '1m'
+                            ORDER BY bar_time DESC
+                            LIMIT %s
+                        """, (s, limit))
+                    else:
+                        cur.execute("""
+                            SELECT
+                                date_trunc('minute', bar_time -
+                                    (EXTRACT(MINUTE FROM bar_time)::int %% %s) * interval '1 minute')
+                                    AS bar_time,
+                                (array_agg(open  ORDER BY bar_time))[1] AS open,
+                                MAX(high)     AS high,
+                                MIN(low)      AS low,
+                                (array_agg(close ORDER BY bar_time DESC))[1] AS close,
+                                SUM(volume)   AS volume,
+                                (array_agg(oi   ORDER BY bar_time DESC))[1] AS oi
+                            FROM market_ohlcv
+                            WHERE symbol = %s AND timeframe = '1m'
+                            GROUP BY 1
+                            ORDER BY 1 DESC
+                            LIMIT %s
+                        """, (tf_min, s, limit))
+                    rows = cur.fetchall()
+                    if rows:
+                        break
+
+        candles = _rows_to_candles(rows)
     except Exception as e:
         logger.debug("OHLCV DB fetch error for %s: %s", sym, e)
 
