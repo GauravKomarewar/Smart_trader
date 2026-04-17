@@ -346,7 +346,7 @@ class ShoonyaAdapter(BrokerAdapter):
         try:
             result = client.place_order(**shoonya_params)
             if result is None:
-                return {"success": False, "message": "Broker returned no response — market may be closed or session expired"}
+                return {"success": False, "order_id": "", "message": "Broker returned no response — market may be closed or session expired"}
             if isinstance(result, dict):
                 oid = result.get("norenordno") or result.get("order_id") or ""
                 ok = bool(oid) or result.get("stat") == "Ok"

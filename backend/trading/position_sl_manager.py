@@ -27,6 +27,11 @@ _TRAIL_BUF_PCT   = 0.001  # trail_stop updated only when price moves >0.1% beyon
 class PositionSLManager:
     """Singleton background engine for per-position SL/TG/trailing."""
 
+    # Backoff schedule: after N consecutive failures use this cooldown (seconds).
+    # Index = failure_count - 1 (capped at last entry).
+    _BACKOFF_SECS = [5, 10, 30, 60, 120, 300]  # 5s → 5min max between retries
+    _MAX_FAILURES  = 10  # after this many consecutive failures, deactivate SL
+
     def __init__(self):
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -35,6 +40,9 @@ class PositionSLManager:
         self._missing_counts: dict[tuple[str, str, str], int] = {}
         self._in_flight: set[tuple[str, str, str]] = set()  # keys currently firing exit
         self._check_count: int = 0  # throttle "OK" log to every Nth check
+        # ── Exit retry tracking ────────────────────────────────────────────
+        self._exit_fail_counts: dict[tuple[str, str, str], int] = {}
+        self._exit_cooldown_until: dict[tuple[str, str, str], float] = {}
 
     def start(self):
         if self._running:
@@ -193,6 +201,17 @@ class PositionSLManager:
             )
 
         if exit_reason:
+            # ── Cooldown check (backoff after repeated broker failures) ────
+            with self._lock:
+                cooldown_until = self._exit_cooldown_until.get(state_key, 0.0)
+            if time.monotonic() < cooldown_until:
+                logger.debug(
+                    "EXIT-BACKOFF %s/%s — retrying in %.0fs",
+                    config_id[:8], pos_key,
+                    cooldown_until - time.monotonic(),
+                )
+                return
+
             # Mark in-flight to prevent duplicate exit orders from concurrent polls
             with self._lock:
                 if state_key in self._in_flight:
@@ -202,9 +221,31 @@ class PositionSLManager:
                 logger.info("EXIT TRIGGERED: %s/%s %s — %s", config_id[:8], pos_key, side, exit_reason)
                 ok = self._fire_exit(user_id, config_id, pos_key, exchange, product, side, qty, exit_reason, ltp)
                 if ok:
+                    with self._lock:
+                        self._exit_fail_counts.pop(state_key, None)
+                        self._exit_cooldown_until.pop(state_key, None)
                     self._deactivate(user_id, config_id, pos_key)
                 else:
-                    logger.error("Exit order FAILED — keeping SL active for %s %s", config_id[:8], pos_key)
+                    with self._lock:
+                        fails = self._exit_fail_counts.get(state_key, 0) + 1
+                        self._exit_fail_counts[state_key] = fails
+                        # Exponential backoff: index capped at last backoff value
+                        backoff = self._BACKOFF_SECS[min(fails - 1, len(self._BACKOFF_SECS) - 1)]
+                        self._exit_cooldown_until[state_key] = time.monotonic() + backoff
+
+                    if fails >= self._MAX_FAILURES:
+                        logger.critical(
+                            "EXIT_RETRY_EXHAUSTED | %s/%s — %d consecutive failures, "
+                            "deactivating SL to stop retry loop. "
+                            "MANUAL RECONCILIATION REQUIRED — broker position may still be open.",
+                            config_id[:8], pos_key, fails,
+                        )
+                        self._deactivate(user_id, config_id, pos_key)
+                    else:
+                        logger.error(
+                            "Exit order FAILED (%d/%d) — backing off %.0fs for %s %s",
+                            fails, self._MAX_FAILURES, backoff, config_id[:8], pos_key,
+                        )
             finally:
                 with self._lock:
                     self._in_flight.discard(state_key)
@@ -311,6 +352,8 @@ class PositionSLManager:
         with self._lock:
             self._missing_counts.pop((user_id, config_id, pos_key), None)
             self._in_flight.discard((user_id, config_id, pos_key))
+            self._exit_fail_counts.pop((user_id, config_id, pos_key), None)
+            self._exit_cooldown_until.pop((user_id, config_id, pos_key), None)
         try:
             conn = get_trading_conn()
             try:

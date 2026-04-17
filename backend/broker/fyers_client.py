@@ -502,7 +502,7 @@ class FyersDataClient:
             try:
                 resp = f.optionchain({
                     "symbol":      fyers_sym,
-                    "strikecount": 10,
+                    "strikecount": 20,
                     "timestamp":   expiry_ts,
                 })
                 if resp.get("code") == 200 and resp.get("data", {}).get("optionsChain"):

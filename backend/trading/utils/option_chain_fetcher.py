@@ -139,6 +139,22 @@ def create_or_update_chain_db(
                 str(row.get("trading_symbol", "")),
             ))
 
+        # Delete stale rows whose (strike, option_type) is no longer in the
+        # current fetch window.  Without this, rows from previous sessions /
+        # wider strikecount runs persist indefinitely and the strategy can pick
+        # strikes with completely stale delta / LTP values.
+        if chain_rows:
+            fresh_keys = [
+                (float(r.get("strike", 0)), str(r.get("option_type", "CE")))
+                for r in chain_rows
+            ]
+            placeholders = ", ".join("(?, ?)" for _ in fresh_keys)
+            params = [v for pair in fresh_keys for v in pair]
+            conn.execute(
+                f"DELETE FROM option_chain WHERE (strike, option_type) NOT IN ({placeholders})",
+                params,
+            )
+
         conn.commit()
         logger.info(
             "Option chain DB updated: %s | rows=%d | spot=%.2f | atm=%s",

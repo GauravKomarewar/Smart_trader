@@ -24,7 +24,7 @@ import uuid
 import threading
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
@@ -235,10 +235,18 @@ class OrderManagementSystem:
                     "trigger_price": req.trigger_price,
                     "remarks":       req.remarks,
                 })
-                order.broker_order_id = broker_resp.get("order_id") or broker_resp.get("norenordno")
-                order.status = OrderStatus.OPEN
-                logger.info("OMS placed: %s %s %d | broker_id=%s",
-                            order.side, order.symbol, order.quantity, order.broker_order_id)
+                # ✅ L3-FIX: Check success flag — Fyers returns {"success": False, ...} on
+                # rejection WITHOUT raising an exception. Treat that as REJECTED.
+                if not broker_resp.get("success", True):
+                    order.status = OrderStatus.REJECTED
+                    order.error_msg = broker_resp.get("message", "Broker rejected order")
+                    logger.error("OMS broker rejected: %s %s | %s",
+                                 order.side, order.symbol, order.error_msg)
+                else:
+                    order.broker_order_id = broker_resp.get("order_id") or broker_resp.get("norenordno")
+                    order.status = OrderStatus.OPEN
+                    logger.info("OMS placed: %s %s %d | broker_id=%s",
+                                order.side, order.symbol, order.quantity, order.broker_order_id)
             except Exception as e:
                 order.status = OrderStatus.REJECTED
                 order.error_msg = str(e)
@@ -271,6 +279,22 @@ class OrderManagementSystem:
 
     def get_order(self, order_id: str) -> Optional[Order]:
         return self._orders.get(order_id)
+
+    def fetch_broker_order_book(self) -> list:
+        """Fetch the broker's current order book for fill polling (live mode only).
+
+        Returns a list of broker Order objects (from the adapter).  Returns [] if
+        there is no live broker configured, or if the broker API call fails.
+        Used by StrategyExecutor._confirm_pending_fills() to avoid direct broker
+        access from outside the OMS layer.
+        """
+        if not self.broker:
+            return []
+        try:
+            return self.broker.get_order_book() or []
+        except Exception as e:
+            logger.warning("OMS: fetch_broker_order_book failed: %s", e)
+            return []
 
     def get_all_orders(self, strategy_id: Optional[str] = None) -> List[dict]:
         with self._lock:
@@ -352,6 +376,7 @@ class OrderManagementSystem:
             if new_qty == 0:
                 pos.realised_pnl += (price - pos.avg_price) * pos.quantity
                 pos.avg_price = 0.0
+                pos.quantity = 0
             elif pos.quantity < 0:
                 # covering a short
                 cover = min(qty, abs(pos.quantity))

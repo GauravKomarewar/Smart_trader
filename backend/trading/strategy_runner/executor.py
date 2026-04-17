@@ -1,7 +1,7 @@
 import time
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, List, Any
 
 from .state import StrategyState, LegState
@@ -229,14 +229,35 @@ class StrategyExecutor:
             raw_status = order.status.value if hasattr(order.status, 'value') else str(order.status)
             norm_status = str(raw_status or "").upper()
             if norm_status in ("COMPLETE", "EXECUTED", "FILLED"):
+                # Paper mode / instant fill
                 leg.order_status = "FILLED"
                 leg.is_active = True
                 leg.filled_qty = int(leg.order_qty)
+                if order.avg_price and order.avg_price > 0:
+                    leg.entry_price = order.avg_price
+            elif norm_status in ("REJECTED", "CANCELLED", "BLOCKED"):
+                # \u2705 L1-FIX: Broker rejected immediately \u2014 mark FAILED so entered_today
+                # is not set and entry can be retried.
+                leg.order_status = "FAILED"
+                logger.error(
+                    "ORDER_REJECTED | ENTRY %s %s strike=%s \u2014 broker status=%s",
+                    leg.tag, tsym, leg.strike, raw_status,
+                )
+            elif norm_status == "OPEN":
+                # \u2705 L1-FIX: Live async fill \u2014 broker accepted the order but execution is
+                # pending.  Do NOT set is_active yet.  _confirm_pending_fills() polls
+                # get_order_book() each tick and promotes to FILLED once COMPLETE.
+                leg.order_status = "AWAITING_FILL"
+                if order.avg_price and order.avg_price > 0:
+                    leg.entry_price = order.avg_price
+                logger.info(
+                    "ORDER_AWAITING_FILL | ENTRY %s %s strike=%s broker_id=%s",
+                    leg.tag, tsym, leg.strike, order.broker_order_id,
+                )
             else:
                 leg.order_status = str(raw_status)
-
-            if order.avg_price and order.avg_price > 0:
-                leg.entry_price = order.avg_price
+                if order.avg_price and order.avg_price > 0:
+                    leg.entry_price = order.avg_price
 
             logger.info(
                 "ORDER_PLACED | ENTRY %s %s %s strike=%s qty=%d | order_id=%s status=%s",
@@ -249,15 +270,21 @@ class StrategyExecutor:
             leg.order_status = "FAILED"
             logger.error("ORDER_FAILED | ENTRY %s: %s", leg.tag, exc)
 
-    def _place_exit_order(self, leg: LegState) -> None:
-        """Place an exit order for an active leg via OMS."""
+    def _place_exit_order(self, leg: LegState) -> bool:
+        """Place an exit order for an active leg via OMS.
+
+        ✅ L2-FIX: Returns True if the order was accepted (placed or simulated),
+        False if the broker rejected it.  Callers MUST only call leg.close() when
+        this returns True — a rejected exit must not silently mark a live broker
+        position as closed.
+        """
         if not self._oms:
             leg.order_status = "SIM_CLOSED"
             logger.info(
                 "ORDER_SIM | EXIT %s %s strike=%s pnl=%.2f",
                 leg.tag, leg.symbol, leg.strike, leg.pnl,
             )
-            return
+            return True
 
         try:
             from trading.oms import OrderRequest, OrderSide, OrderType, ProductType
@@ -280,13 +307,24 @@ class StrategyExecutor:
                 remarks=f"strat={self._strategy_id} leg={leg.tag}",
             )
             order = self._oms.place_order(req)
+            raw_status = order.status.value if hasattr(order.status, 'value') else str(order.status)
+            norm_status = str(raw_status or "").upper()
+            if norm_status in ("REJECTED", "CANCELLED", "BLOCKED"):
+                logger.critical(
+                    "EXIT_ORDER_REJECTED | %s %s strike=%s pnl=%.2f | "
+                    "broker status=%s \u2014 leg stays ACTIVE, will retry next tick",
+                    leg.tag, tsym, leg.strike, leg.pnl, raw_status,
+                )
+                return False
             leg.order_status = "CLOSED"
             logger.info(
                 "ORDER_PLACED | EXIT %s %s | order_id=%s pnl=%.2f",
                 leg.tag, tsym, order.id[:8], leg.pnl,
             )
+            return True
         except Exception as exc:
             logger.error("ORDER_FAILED | EXIT %s: %s", leg.tag, exc)
+            return False
 
     def _recover_pending_legs(self, now: datetime) -> None:
         """Dispatch entry orders for any PENDING legs that never received an order_id.
@@ -337,6 +375,89 @@ class StrategyExecutor:
                     details={"age_sec": age, "strike": leg.strike},
                 )
 
+    def _confirm_pending_fills(self, now: datetime) -> None:
+        """✅ L3-FIX: Poll broker once per tick for fill confirmations.
+
+        Legs in AWAITING_FILL state were placed with the live broker but not yet
+        confirmed as executed.  A single get_order_book() call covers all pending
+        legs to avoid multiple API requests per tick.
+
+        On COMPLETE → leg.is_active = True, entry_price updated from avg fill.
+        On REJECTED/CANCELLED/EXPIRED → leg.order_status = FAILED.
+        Still OPEN → leave as AWAITING_FILL, check again next tick.
+        Skipped in paper mode (orders fill instantly in OMS test path).
+        """
+        if self._paper_mode or not self._oms:
+            return
+
+        pending = [
+            (tag, leg) for tag, leg in self.state.legs.items()
+            if leg.order_status == "AWAITING_FILL" and leg.order_id
+        ]
+        if not pending:
+            return
+
+        # Single broker poll covers all pending legs
+        broker_orders = self._oms.fetch_broker_order_book()
+
+        # Index by broker order_id for O(1) lookup
+        bo_index: dict = {}
+        for bo in broker_orders:
+            bid = getattr(bo, "order_id", None)
+            if bid is None and isinstance(bo, dict):
+                bid = bo.get("order_id") or bo.get("norenordno")
+            if bid:
+                bo_index[str(bid)] = bo
+
+        any_newly_filled = False
+        for tag, leg in pending:
+            internal = self._oms.get_order(leg.order_id)
+            if not internal or not internal.broker_order_id:
+                continue
+            bo = bo_index.get(str(internal.broker_order_id))
+            if bo is None:
+                # Order very recently placed — not in book yet, check next tick
+                continue
+
+            bo_status = getattr(bo, "status", None)
+            if bo_status is None and isinstance(bo, dict):
+                bo_status = bo.get("status", "")
+            bo_status = str(bo_status or "").upper()
+
+            bo_avg = getattr(bo, "avg_price", None)
+            if bo_avg is None and isinstance(bo, dict):
+                bo_avg = bo.get("avg_price", 0)
+            bo_avg = float(bo_avg or 0)
+
+            if bo_status == "COMPLETE":
+                leg.order_status = "FILLED"
+                leg.is_active = True
+                leg.filled_qty = int(leg.order_qty)
+                if bo_avg > 0:
+                    leg.entry_price = bo_avg
+                logger.info(
+                    "FILL_CONFIRMED | %s %s strike=%s entry_price=%.2f",
+                    tag,
+                    leg.trading_symbol or leg.symbol,
+                    leg.strike,
+                    leg.entry_price,
+                )
+                any_newly_filled = True
+            elif bo_status in ("REJECTED", "CANCELLED", "EXPIRED"):
+                leg.order_status = "FAILED"
+                logger.error(
+                    "ORDER_REJECTED_BY_BROKER | ENTRY %s %s strike=%s broker_status=%s",
+                    tag,
+                    leg.trading_symbol or leg.symbol,
+                    leg.strike,
+                    bo_status,
+                )
+            # else OPEN/TRIGGER_PENDING — still waiting, check next tick
+
+        if any_newly_filled:
+            self.subscribe_leg_symbols()
+            self._save_state()
+
     def _place_exit_order_adj(self, leg: LegState) -> None:
         """Place an exit order for a leg that was closed by the adjustment engine.
 
@@ -373,11 +494,23 @@ class StrategyExecutor:
                 remarks=f"strat={self._strategy_id} leg={leg.tag} adj_close",
             )
             order = self._oms.place_order(req)
-            leg.order_status = "CLOSED"
-            logger.info(
-                "ORDER_PLACED | ADJ_EXIT %s %s | order_id=%s exit_price=%.2f pnl=%.2f",
-                leg.tag, tsym, order.id[:8], fill_price, leg.pnl,
-            )
+            raw_status = order.status.value if hasattr(order.status, 'value') else str(order.status)
+            norm_status = str(raw_status or "").upper()
+            if norm_status in ("REJECTED", "CANCELLED", "BLOCKED"):
+                # ✅ L2-FIX: Broker rejected the adjustment exit.  The leg state was
+                # already closed by adjustment_engine, but the broker position is still
+                # open.  Log CRITICAL so the operator can manually reconcile.
+                logger.critical(
+                    "ADJ_EXIT_ORDER_REJECTED | %s %s strike=%s | broker status=%s "
+                    "— broker position may be open; manual reconciliation required",
+                    leg.tag, tsym, leg.strike, raw_status,
+                )
+            else:
+                leg.order_status = "CLOSED"
+                logger.info(
+                    "ORDER_PLACED | ADJ_EXIT %s %s | order_id=%s exit_price=%.2f pnl=%.2f",
+                    leg.tag, tsym, order.id[:8], fill_price, leg.pnl,
+                )
         except Exception as exc:
             logger.error("ORDER_FAILED | ADJ_EXIT %s: %s", leg.tag, exc)
 
@@ -450,6 +583,10 @@ class StrategyExecutor:
         # Legs older than 5 minutes with no order_id are timed out as FAILED.
         self._recover_pending_legs(now)
 
+        # ✅ L3-FIX: Poll broker for fill confirmations on any live orders that
+        # were placed last tick but not yet confirmed as COMPLETE.
+        self._confirm_pending_fills(now)
+
         # ── Hard EOD safety cutoff ──────────────────────────────────────────────
         # If timing.eod_exit_time is set and we are past it, force an exit
         # regardless of what exit.time.strategy_exit_time says.  This prevents
@@ -488,7 +625,7 @@ class StrategyExecutor:
         else:
             self.state.minutes_to_exit = 0
 
-        # Reconciliation with broker (simulate)
+        # Reconciliation with broker (live: real positions; paper: OMS/state snapshot)
         broker_positions = self._fetch_broker_positions()
         warnings = self.reconciliation.reconcile(broker_positions)
         for w in warnings:
@@ -532,7 +669,7 @@ class StrategyExecutor:
             }
             self._log_event(
                 "ENTRY",
-                reason=f"{sum(1 for l in self.state.legs.values() if l.is_active)} legs entered",
+                reason=f"{sum(1 for leg_ in self.state.legs.values() if leg_.is_active)} legs entered",
                 details=entry_details,
             )
             self._save_state()  # ✅ BUG-022 FIX: Save immediately after entry
@@ -551,16 +688,16 @@ class StrategyExecutor:
         # Check adjustments
         # ✅ BUG-ADJ FIX: Track pre-adjustment legs so we can dispatch OMS orders
         # for any newly created legs and exit orders for any newly closed legs.
-        # Guard: do not run adjustment engine while any PENDING leg is still
-        # awaiting fill — prevents double-adjustment storms.
+        # Guard: do not run adjustment engine while any PENDING or AWAITING_FILL
+        # leg is still waiting for fill — prevents double-adjustment storms.
         pending_adj_legs = [
             leg for leg in self.state.legs.values()
-            if leg.order_status == "PENDING" and not leg.is_active
+            if leg.order_status in ("PENDING", "AWAITING_FILL") and not leg.is_active
         ]
         if pending_adj_legs and self.state.any_leg_active:
             logger.info(
                 "ADJUSTMENT_HOLD | waiting for %d pending leg(s) to fill: %s",
-                len(pending_adj_legs), [l.tag for l in pending_adj_legs],
+                len(pending_adj_legs), [leg_.tag for leg_ in pending_adj_legs],
             )
         else:
             before_adj_tags = set(self.state.legs.keys())
@@ -724,20 +861,42 @@ class StrategyExecutor:
             logger.debug(f"Could not fetch index data: {e}")
 
     def _fetch_broker_positions(self) -> list:
-        # If OMS is available, pull positions from it
+        # In live mode: fetch real broker positions and map to tagged legs
+        if self._oms and self._oms.broker and not self._paper_mode:
+            try:
+                raw_pos = self._oms.broker.get_positions() or []
+                if raw_pos:
+                    # Build symbol → leg mapping for tag injection
+                    sym_to_leg = {}
+                    for leg in self.state.legs.values():
+                        if leg.is_active:
+                            sym = (getattr(leg, "trading_symbol", None) or leg.symbol or "").split(":", 1)[-1]
+                            if sym:
+                                sym_to_leg[sym] = leg
+
+                    positions = []
+                    for pos in raw_pos:
+                        p = pos if isinstance(pos, dict) else pos.__dict__ if hasattr(pos, '__dict__') else vars(pos)
+                        sym_raw = str(p.get("symbol") or p.get("tsym") or "").split(":", 1)[-1]
+                        leg = sym_to_leg.get(sym_raw)
+                        if leg:
+                            p = dict(p)  # copy to avoid mutating adapter object
+                            p["tag"] = leg.tag
+                        positions.append(p)
+                    return positions
+            except Exception as e:
+                logger.warning("RECONCILE | live broker get_positions failed: %s", e)
+
+        # Paper mode / no broker: pull from OMS internal positions
         if self._oms:
             try:
                 oms_positions = self._oms.get_positions()
                 if oms_positions:
-                    positions = []
-                    for pos in oms_positions:
-                        p = pos if isinstance(pos, dict) else pos.to_dict()
-                        positions.append(p)
-                    return positions
+                    return oms_positions
             except Exception as e:
                 logger.debug("OMS position fetch failed, falling back to state: %s", e)
 
-        # Fallback: return current legs as positions (paper / no OMS)
+        # Final fallback: return current legs as positions
         positions = []
         for leg in self.state.legs.values():
             if leg.is_active:
@@ -830,12 +989,31 @@ class StrategyExecutor:
             self.state.legs[leg.tag] = leg
             self._place_entry_order(leg)
         if new_legs:
-            self.state.entered_today = True
-            self.state.total_trades_today += 1
-            self.state.entry_time = datetime.now()
-            logger.info(f"Entered {len(new_legs)} legs")
-            # Subscribe entered leg symbols to LiveTickService for real-time LTP
-            self.subscribe_leg_symbols()
+            # ✅ L4-FIX: Only mark entered_today when at least one order was
+            # accepted (FILLED / AWAITING_FILL).  If ALL orders are FAILED the
+            # strategy has no position \u2014 do NOT block re-entry for the rest of the
+            # day; instead remove the failed legs and let the engine retry at the
+            # next entry window.
+            accepted_legs = [leg_ for leg_ in new_legs if leg_.order_status != "FAILED"]
+            if accepted_legs:
+                self.state.entered_today = True
+                self.state.total_trades_today += 1
+                self.state.entry_time = datetime.now()
+                logger.info(
+                    "Entered %d leg(s) (%d accepted, %d rejected)",
+                    len(new_legs), len(accepted_legs), len(new_legs) - len(accepted_legs),
+                )
+                # Subscribe entered leg symbols to LiveTickService for real-time LTP
+                self.subscribe_leg_symbols()
+            else:
+                logger.error(
+                    "ALL_ENTRIES_REJECTED | All %d entry order(s) rejected by broker \u2014 "
+                    "entered_today NOT set; will retry at next entry window",
+                    len(new_legs),
+                )
+                # Remove failed legs so they don't pollute state on next tick
+                for leg in new_legs:
+                    self.state.legs.pop(leg.tag, None)
         else:
             logger.warning("Entry produced 0 legs — NOT marking as entered")
 
@@ -876,18 +1054,29 @@ class StrategyExecutor:
                 logger.info("Profit step closed 25% of position")
 
         elif action.startswith("exit_all") or action in ("combined_conditions", "time_exit"):
-            pnl_snapshot = self.state.combined_pnl
-            # Place exit orders for all active legs
+            # ✅ L2-FIX: Only call leg.close() when the broker accepted the exit order.
+            # Capture PnL per-leg before close() freezes exit_price.
+            accepted_pnl = 0.0
             for leg in self.state.legs.values():
                 if leg.is_active:
-                    self._place_exit_order(leg)
-                    leg.close()
-            self.state.cumulative_daily_pnl += pnl_snapshot
-            sl_cfg = self.exit_engine.exit_config.get("stop_loss", {})
-            if sl_cfg.get("allow_reentry"):
-                self.state.entered_today = False
+                    leg_pnl = leg.pnl  # snapshot before close() changes pnl computation
+                    accepted = self._place_exit_order(leg)
+                    if accepted:
+                        leg.close()
+                        accepted_pnl += leg_pnl
+            self.state.cumulative_daily_pnl += accepted_pnl
+            # Block re-entry only if ALL legs were successfully closed
+            if not any(leg.is_active for leg in self.state.legs.values()):
+                sl_cfg = self.exit_engine.exit_config.get("stop_loss", {})
+                if sl_cfg.get("allow_reentry"):
+                    self.state.entered_today = False
+                else:
+                    self.state.entered_today = True
             else:
-                self.state.entered_today = True
+                logger.critical(
+                    "PARTIAL_EXIT | One or more exit orders rejected by broker \u2014 "
+                    "remaining active legs will retry on next tick"
+                )
 
         # NEW: Handle trail/lock_trail profit target actions
         elif action == "profit_target_trail":
@@ -905,16 +1094,19 @@ class StrategyExecutor:
                 if leg_action == "close_leg":
                     targets = self._resolve_exit_targets(ref, group)
                     for leg in targets:
-                        self._place_exit_order(leg)
-                        self.state.cumulative_daily_pnl += leg.pnl
-                        leg.close()
+                        leg_pnl = leg.pnl
+                        if self._place_exit_order(leg):
+                            leg.close()
+                            self.state.cumulative_daily_pnl += leg_pnl
                 elif leg_action == "close_all":
-                    pnl_snapshot = self.state.combined_pnl
+                    accepted_pnl = 0.0
                     for leg in self.state.legs.values():
                         if leg.is_active:
-                            self._place_exit_order(leg)
-                            leg.close()
-                    self.state.cumulative_daily_pnl += pnl_snapshot
+                            leg_pnl = leg.pnl
+                            if self._place_exit_order(leg):
+                                leg.close()
+                                accepted_pnl += leg_pnl
+                    self.state.cumulative_daily_pnl += accepted_pnl
                 else:
                     logger.warning(f"Unhandled leg_rule action: {leg_action}")
             else:
@@ -1085,9 +1277,9 @@ class StrategyExecutor:
         if db:
             try:
                 pnl = self.state.combined_pnl + getattr(self.state, 'cumulative_daily_pnl', 0)
-                active = sum(1 for l in self.state.legs.values() if l.is_active)
-                delta = sum(l.delta * (1 if l.side.value == 'BUY' else -1)
-                            for l in self.state.legs.values() if l.is_active)
+                active = sum(1 for leg_ in self.state.legs.values() if leg_.is_active)
+                delta = sum(leg_.delta * (1 if leg_.side.value == 'BUY' else -1)
+                            for leg_ in self.state.legs.values() if leg_.is_active)
                 db.snapshot_pnl(pnl, self.state.spot_price, active, delta)
             except Exception as e:
                 logger.warning("DB pnl snapshot failed: %s", e)

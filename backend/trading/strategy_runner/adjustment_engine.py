@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 import logging
 from .state import StrategyState, LegState
 from .condition_engine import ConditionEngine
@@ -550,7 +550,7 @@ class AdjustmentEngine:
                     ref_name = new_leg_cfg.get("match_leg")
                     resolved_ref_tag = self._resolve_close_tag(ref_name) if ref_name else None
                     ref_leg = self.state.legs.get(resolved_ref_tag) if resolved_ref_tag else None
-                    active_legs = [l for l in self.state.legs.values() if l.is_active]
+                    active_legs = [leg_ for leg_ in self.state.legs.values() if leg_.is_active]
                     # Only one active leg AND it is both the close_tag and the match reference
                     same_tag = close_tag and resolved_ref_tag and (close_tag == resolved_ref_tag)
                     if ref_leg is None or not ref_leg.is_active:
@@ -594,10 +594,14 @@ class AdjustmentEngine:
                             new_tag, new_leg.strike, new_leg.option_type,
                             new_leg.expiry, closing_leg.tag,
                         )
-                        # Remove new leg, reactivate closing leg
+                        # Remove new leg, reactivate closing leg and clear
+                        # any partial-close fields set by leg.close()
                         self.state.legs.pop(new_tag, None)
                         if close_tag and close_tag in self.state.legs:
-                            self.state.legs[close_tag].is_active = True
+                            leg_to_restore = self.state.legs[close_tag]
+                            leg_to_restore.is_active = True
+                            leg_to_restore.exit_timestamp = None
+                            leg_to_restore.exit_price = None
                             self.state.cumulative_daily_pnl -= closing_pnl
 
     def _open_new_leg(self, leg_cfg: Dict[str, Any], closing_leg: Optional[LegState] = None) -> Optional[str]:
@@ -708,7 +712,7 @@ class AdjustmentEngine:
                 if inactive_candidates:
                     reference_leg = max(
                         inactive_candidates,
-                        key=lambda l: l.order_placed_at or datetime.min,
+                        key=lambda leg_: leg_.order_placed_at or datetime.min,
                     )
                     logger.warning(
                         "MATCH_LEG reference '%s' not active; using most recent "
