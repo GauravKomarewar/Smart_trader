@@ -416,37 +416,83 @@ class ShoonyaAdapter(BrokerAdapter):
         """Fetch last traded price via Shoonya get_quotes API.
 
         Shoonya's get_quotes expects a numeric exchange token, NOT a trading symbol.
-        We resolve the token from the symbols DB.
+        We resolve shoonya_token from the symbols DB (high-coverage row).
+        Falls back to option chain SQLite if get_quotes fails.
         """
         client = getattr(self._session, "_client", None)
         if client is None:
             return None
         try:
-            # Resolve numeric exchange token from symbol DB
-            token = symbol  # fallback: caller may have passed a token directly
+            # Strip embedded exchange prefix  (e.g. "NSE:NIFTY2642124500CE" → "NIFTY2642124500CE")
+            raw_symbol = symbol
+            if ":" in symbol:
+                symbol = symbol.split(":", 1)[1]
+
+            # Resolve shoonya_token via resolve_broker_symbol (uses high-coverage DB row)
+            token = symbol  # fallback (usually wrong, but harmless attempt)
             if not symbol.isdigit():
                 try:
-                    from broker.symbol_normalizer import lookup_by_trading_symbol
-                    inst = lookup_by_trading_symbol(symbol, exchange)
-                    if inst:
-                        # Prefer shoonya-specific token, then generic exchange token
-                        resolved = (getattr(inst, 'token', None) or "").strip()
-                        if resolved:
-                            token = resolved
-                            logger.debug("Shoonya LTP: %s → token %s", symbol, token)
-                        else:
-                            logger.warning("Shoonya LTP: no token in DB for %s", symbol)
+                    from db.symbols_db import resolve_broker_symbol
+                    resolved = resolve_broker_symbol(symbol, "shoonya", exchange)
+                    t = resolved.get("token", "").strip()
+                    if t:
+                        token = t
+                        logger.debug("Shoonya LTP: %s → token %s", symbol, token)
+                    else:
+                        logger.warning("Shoonya LTP: no shoonya_token in DB for %s", symbol)
                 except Exception as e:
                     logger.warning("Shoonya LTP: symbol lookup failed for %s: %s", symbol, e)
+
             resp = client.get_quotes(exchange=exchange, token=token)
             if resp and isinstance(resp, dict):
                 lp = resp.get("lp")
                 if lp is not None:
                     return float(lp)
-            return None
+
+            # Fallback: read LTP from the live option chain SQLite
+            ltp = self._ltp_from_option_chain(raw_symbol, exchange)
+            if ltp:
+                logger.debug("Shoonya LTP fallback (oc sqlite): %s → %.2f", symbol, ltp)
+            return ltp
         except Exception as e:
             logger.warning("get_ltp error for %s:%s — %s", exchange, symbol, e)
             return None
+
+    @staticmethod
+    def _ltp_from_option_chain(symbol: str, exchange: str) -> Optional[float]:
+        """Read LTP from the live option chain SQLite file (refreshed every ~5s)."""
+        import glob
+        import sqlite3
+        from pathlib import Path
+        try:
+            # Strip exchange prefix for the Fyers-style trading_symbol used in the SQLite
+            clean = symbol.split(":", 1)[1] if ":" in symbol else symbol
+            fyers_sym = f"NSE:{clean}"  # option_chain table stores NSE:NIFTY2642124500CE
+            data_dir = Path(__file__).parent.parent.parent / "data" / "option_chain"
+            # Search for files matching this exchange (NFO/MCX)
+            files = sorted(
+                glob.glob(str(data_dir / f"{exchange.upper()}_*.sqlite")),
+                key=lambda p: Path(p).stat().st_mtime,
+                reverse=True,
+            )
+            for path in files[:10]:
+                try:
+                    db = sqlite3.connect(path, timeout=2)
+                    db.row_factory = sqlite3.Row
+                    cur = db.cursor()
+                    cur.execute(
+                        "SELECT ltp FROM option_chain WHERE trading_symbol=? AND ltp>0 LIMIT 1",
+                        (fyers_sym,),
+                    )
+                    row = cur.fetchone()
+                    db.close()
+                    if row:
+                        return float(row["ltp"])
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         client = getattr(self._session, "_client", None)

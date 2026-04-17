@@ -1262,10 +1262,11 @@ _BROKER_FIELD: Dict[str, str] = {
     "upstox":   "upstox_ikey",
     "groww":    "groww_token",
 }
-# Secondary field returned alongside the primary (e.g. token for AngelOne/Dhan)
+# Secondary field returned alongside the primary (e.g. token for AngelOne/Dhan/Shoonya)
 _BROKER_TOKEN_FIELD: Dict[str, str] = {
     "angelone": "angelone_token",
     "angel":    "angelone_token",
+    "shoonya":  "shoonya_token",   # numeric exchange token for get_quotes
 }
 
 
