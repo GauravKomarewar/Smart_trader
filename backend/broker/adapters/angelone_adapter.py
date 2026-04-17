@@ -295,6 +295,23 @@ class AngelOneAdapter(BrokerAdapter):
         try:
             sym = order.get("symbol", "")
             exch = order.get("exchange", "NSE")
+            if ":" in sym:
+                sym = sym.split(":", 1)[1]
+
+            # Resolve AngelOne-specific tradingsymbol and token from symbols DB
+            symbol_token = str(order.get("token") or order.get("symboltoken") or "0")
+            try:
+                from db.symbols_db import resolve_broker_symbol as _gbs
+                resolved = _gbs(sym, "angelone", exch)
+                if resolved["symbol"]:
+                    sym = resolved["symbol"]
+                    logger.debug("AngelOne symbol resolved: %s → %s", order.get("symbol"), sym)
+                if resolved["token"]:
+                    symbol_token = resolved["token"]
+                if resolved["exchange"]:
+                    exch = resolved["exchange"]
+            except Exception as e:
+                logger.warning("AngelOne symbol lookup failed for %s: %s", sym, e)
 
             side_str = str(order.get("side", "BUY")).upper()
             txn_type = "BUY" if side_str in ("BUY", "B") else "SELL"
@@ -304,9 +321,6 @@ class AngelOneAdapter(BrokerAdapter):
 
             prd_raw = str(order.get("product", "MIS")).upper()
             otype_raw = str(order.get("order_type", "MARKET")).upper()
-
-            # symboltoken: use from order dict or default to "0" (Angel may resolve)
-            symbol_token = str(order.get("token") or order.get("symboltoken") or "0")
 
             angel_order = {
                 "variety": "NORMAL",

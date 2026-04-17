@@ -55,8 +55,8 @@ class TestShoonyaPlaceOrder:
         }
 
     def _patch_db(self):
-        """Patch DB lookup to return None (symbol unchanged, no DB resolution)."""
-        return patch("db.symbols_db.lookup_by_trading_symbol", return_value=None)
+        """Patch DB lookup to return empty (symbol unchanged, no DB resolution)."""
+        return patch("db.symbols_db.resolve_broker_symbol", return_value={"symbol": "", "token": "", "exchange": "", "tick_size": "0.05", "lot_size": "1"})
 
     def test_no_client_returns_success_false(self):
         session = MagicMock()
@@ -116,16 +116,8 @@ class TestShoonyaPlaceOrder:
     def test_shoonya_tsym_resolved_from_db(self):
         """When DB returns a shoonya_tsym, it should override the raw symbol."""
         adapter = _adapter()
-        db_rec = {
-            "trading_symbol": "NIFTY-APR2026-24500-CE",
-            "shoonya_tsym": "NIFTY21APR26C24500",
-            "exchange": "NFO",
-            "tick_size": 0.05,
-            "expiry": "2026-04-21",
-            "strike": 24500.0,
-            "option_type": "CE",
-        }
-        with patch("db.symbols_db.lookup_by_trading_symbol", return_value=db_rec):
+        db_result = {"symbol": "NIFTY21APR26C24500", "token": "", "exchange": "NFO", "tick_size": "0.05", "lot_size": "65"}
+        with patch("db.symbols_db.resolve_broker_symbol", return_value=db_result):
             with patch.object(adapter, "_raw_place_order", return_value={"stat": "Ok", "norenordno": "XYZ"}) as mock_raw:
                 result = adapter.place_order(self._order())
         # Verify _raw_place_order was called with the Shoonya-resolved symbol
@@ -134,29 +126,15 @@ class TestShoonyaPlaceOrder:
         assert result["success"] is True
 
     def test_shoonya_tsym_partner_lookup_when_empty(self):
-        """When shoonya_tsym empty on primary row, fall back to partner-row query."""
+        """When get_broker_symbol returns empty symbol, raw sym is used unchanged."""
         adapter = _adapter()
-        db_rec = {
-            "trading_symbol": "NIFTY2642124500CE",
-            "shoonya_tsym": "",   # empty — partner lookup required
-            "exchange": "NFO",
-            "tick_size": 0.05,
-            "expiry": "2026-04-21",
-            "strike": 24500.0,
-            "option_type": "CE",
-        }
-        mock_cursor = MagicMock()
-        mock_cursor.fetchone.return_value = ("NIFTY21APR26C24500",)
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-
-        with patch("db.symbols_db.lookup_by_trading_symbol", return_value=db_rec):
-            with patch("db.trading_db.get_trading_conn", return_value=mock_conn):
-                with patch.object(adapter, "_raw_place_order", return_value={"stat": "Ok", "norenordno": "XYZ"}) as mock_raw:
-                    result = adapter.place_order(self._order())
-
+        db_result = {"symbol": "", "token": "", "exchange": "", "tick_size": "0.05", "lot_size": "1"}
+        with patch("db.symbols_db.resolve_broker_symbol", return_value=db_result):
+            with patch.object(adapter, "_raw_place_order", return_value={"stat": "Ok", "norenordno": "XYZ"}) as mock_raw:
+                result = adapter.place_order(self._order())
+        # Symbol unchanged from order
         call_params = mock_raw.call_args[0][1]
-        assert call_params["tradingsymbol"] == "NIFTY21APR26C24500"
+        assert call_params["tradingsymbol"] == "NIFTY24APR24000CE"
         assert result["success"] is True
 
 

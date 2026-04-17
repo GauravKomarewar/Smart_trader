@@ -292,47 +292,16 @@ class ShoonyaAdapter(BrokerAdapter):
         if ":" in sym:
             sym = sym.split(":", 1)[1]
         exch = order.get("exchange", "NSE")
-        # Look up Shoonya-specific trading symbol from symbol DB
-        inst = None
+        tick_size = 0.05
         try:
-            import types as _types
-            from db.symbols_db import lookup_by_trading_symbol as _db_lookup
-            from db.trading_db import get_trading_conn as _get_conn
-            rec = _db_lookup(sym, exch)
-            if rec:
-                shoonya_tsym_val = (rec.get("shoonya_tsym") or "").strip()
-                if not shoonya_tsym_val:
-                    # Some rows (e.g. Fyers-format NIFTY2642124500CE) have empty
-                    # shoonya_tsym. Find the partner row with same expiry/strike/
-                    # option_type that has a valid Shoonya symbol.
-                    db_expiry  = rec.get("expiry")
-                    db_strike  = rec.get("strike")
-                    db_opttype = rec.get("option_type")
-                    db_exch_v  = (rec.get("exchange") or exch).upper()
-                    if db_expiry and db_strike is not None and db_opttype:
-                        _conn = _get_conn()
-                        _cur  = _conn.cursor()
-                        _cur.execute(
-                            "SELECT shoonya_tsym FROM symbols "
-                            "WHERE expiry=%s AND strike=%s AND option_type=%s "
-                            "  AND exchange=%s AND shoonya_tsym != '' LIMIT 1",
-                            (str(db_expiry), float(db_strike), db_opttype, db_exch_v),
-                        )
-                        _partner = _cur.fetchone()
-                        if _partner:
-                            shoonya_tsym_val = _partner[0]
-                            logger.debug("Shoonya symbol via partner lookup: %s → %s",
-                                         sym, shoonya_tsym_val)
-                if shoonya_tsym_val:
-                    sym = shoonya_tsym_val
-                    logger.debug("Shoonya symbol resolved: %s → %s", order.get("symbol"), sym)
-                db_exch = (rec.get("exchange") or "").upper()
-                if db_exch:
-                    exch = db_exch
-                # Minimal inst-like object just for tick_size
-                inst = _types.SimpleNamespace(
-                    tick_size=float(rec.get("tick_size") or 0.05) or 0.05
-                )
+            from db.symbols_db import resolve_broker_symbol as _gbs
+            resolved = _gbs(sym, "shoonya", exch)
+            if resolved["symbol"]:
+                logger.debug("Shoonya symbol resolved: %s → %s", sym, resolved["symbol"])
+                sym = resolved["symbol"]
+            if resolved["exchange"]:
+                exch = resolved["exchange"]
+            tick_size = float(resolved.get("tick_size") or 0.05) or 0.05
         except Exception as e:
             logger.warning("Shoonya symbol lookup failed for %s: %s", sym, e)
 
@@ -351,12 +320,6 @@ class ShoonyaAdapter(BrokerAdapter):
         }
 
         # Round price and trigger_price to instrument's tick_size to avoid broker rejection
-        tick_size = 0.05  # default
-        try:
-            if inst and getattr(inst, 'tick_size', None) and inst.tick_size > 0:
-                tick_size = inst.tick_size
-        except Exception:
-            pass
         if shoonya_params["price"] > 0:
             shoonya_params["price"] = round(
                 round(shoonya_params["price"] / tick_size) * tick_size, 2

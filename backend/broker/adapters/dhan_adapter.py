@@ -310,6 +310,21 @@ class DhanAdapter(BrokerAdapter):
         try:
             sym = order.get("symbol", "")
             exch = order.get("exchange", "NSE")
+            if ":" in sym:
+                sym = sym.split(":", 1)[1]
+
+            # Resolve Dhan-specific securityId (exchange token) from symbols DB
+            security_id = str(order.get("token") or order.get("securityId") or order.get("security_id") or "0")
+            try:
+                from db.symbols_db import resolve_broker_symbol as _gbs
+                resolved = _gbs(sym, "dhan", exch)
+                if resolved["symbol"]:
+                    security_id = resolved["symbol"]
+                    logger.debug("Dhan security_id resolved: %s → %s", sym, security_id)
+                if resolved["exchange"]:
+                    exch = resolved["exchange"]
+            except Exception as e:
+                logger.warning("Dhan symbol lookup failed for %s: %s", sym, e)
 
             side_str = str(order.get("side", "BUY")).upper()
             txn_type = "BUY" if side_str in ("BUY", "B") else "SELL"
@@ -319,9 +334,6 @@ class DhanAdapter(BrokerAdapter):
 
             prd_raw = str(order.get("product", "MIS")).upper()
             otype_raw = str(order.get("order_type", "MARKET")).upper()
-
-            # Dhan uses securityId (exchange token) — use from order dict
-            security_id = str(order.get("token") or order.get("securityId") or order.get("security_id") or "0")
 
             dhan_order = {
                 "dhanClientId": self._dhan_client_id,

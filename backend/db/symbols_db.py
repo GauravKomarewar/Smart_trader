@@ -1250,6 +1250,122 @@ def lookup_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Optiona
         conn.close()
 
 
+# ── Broker-field mapping ──────────────────────────────────────────────────────
+_BROKER_FIELD: Dict[str, str] = {
+    "shoonya":  "shoonya_tsym",
+    "fyers":    "fyers_symbol",
+    "angelone": "angelone_tsym",
+    "angel":    "angelone_tsym",
+    "dhan":     "dhan_security_id",
+    "kite":     "kite_instrument_token",
+    "zerodha":  "kite_instrument_token",
+    "upstox":   "upstox_ikey",
+    "groww":    "groww_token",
+}
+# Secondary field returned alongside the primary (e.g. token for AngelOne/Dhan)
+_BROKER_TOKEN_FIELD: Dict[str, str] = {
+    "angelone": "angelone_token",
+    "angel":    "angelone_token",
+}
+
+
+def resolve_broker_symbol(
+    trading_symbol: str,
+    broker_id: str,
+    exchange: str = "",
+) -> Dict[str, str]:
+    """
+    Resolve the broker-specific symbol for a given canonical/any-format trading_symbol.
+
+    Design:
+      The symbols DB may have multiple rows for the same instrument imported from
+      different broker scriptmasters. Only the high-coverage row (typically the
+      'UNDERLYING-MMMYYYY-STRIKE-TYPE' format) has all broker-specific fields
+      populated. A low-coverage row (e.g. Fyers/Kite format 'NIFTY2642124500CE')
+      may have an empty shoonya_tsym/angelone_tsym/etc.
+
+      This function:
+        1. Looks up the primary row for the input symbol.
+        2. Returns the broker field if non-empty.
+        3. If empty (or no row), falls back to a secondary query by
+           expiry + strike + option_type + exchange (picks highest-coverage row
+           with the requested broker field non-empty).
+
+    Returns dict with keys (all may be empty string if not found):
+      - 'symbol'        : broker-specific trading symbol
+      - 'token'         : broker-specific token/security_id (where applicable)
+      - 'exchange'      : exchange from the resolved row
+      - 'tick_size'     : float as string
+      - 'lot_size'      : int as string
+    """
+    field = _BROKER_FIELD.get(broker_id.lower(), "")
+    token_field = _BROKER_TOKEN_FIELD.get(broker_id.lower(), "")
+    empty = {"symbol": "", "token": "", "exchange": exchange, "tick_size": "0.05", "lot_size": "1"}
+
+    if not field:
+        return empty
+
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # ── Step 1: primary lookup ────────────────────────────────────────────
+        rec = lookup_by_trading_symbol(trading_symbol, exchange)
+        if rec:
+            broker_sym = (rec.get(field) or "").strip()
+            if broker_sym:
+                return {
+                    "symbol":    broker_sym,
+                    "token":     (rec.get(token_field) or "").strip() if token_field else "",
+                    "exchange":  (rec.get("exchange") or exchange or "").upper(),
+                    "tick_size": str(rec.get("tick_size") or 0.05),
+                    "lot_size":  str(rec.get("lot_size") or 1),
+                }
+            # Primary row exists but broker field is empty — use its components for fallback
+            db_expiry  = rec.get("expiry")
+            db_strike  = rec.get("strike")
+            db_opttype = rec.get("option_type")
+            db_exch    = (rec.get("exchange") or exchange or "").upper()
+        else:
+            # No primary row found — try to parse components from the symbol string itself
+            db_expiry = db_strike = db_opttype = None
+            db_exch   = (exchange or "").upper()
+
+        # ── Step 2: partner-row fallback (same expiry/strike/option_type) ─────
+        if db_expiry and db_strike is not None and db_opttype and db_exch:
+            cur.execute(
+                f"""
+                SELECT {field}, {token_field + ',' if token_field else ''}
+                       exchange, tick_size, lot_size
+                FROM symbols
+                WHERE expiry     = %s
+                  AND ABS(strike - %s) < 0.001
+                  AND option_type = %s
+                  AND exchange    = %s
+                  AND {field} != ''
+                ORDER BY broker_coverage DESC
+                LIMIT 1
+                """,
+                (str(db_expiry), float(db_strike), db_opttype, db_exch),
+            )
+            row = cur.fetchone()
+            if row:
+                return {
+                    "symbol":    (row[field] or "").strip(),
+                    "token":     (row[token_field] or "").strip() if token_field else "",
+                    "exchange":  (row["exchange"] or db_exch).upper(),
+                    "tick_size": str(row.get("tick_size") or 0.05),
+                    "lot_size":  str(row.get("lot_size") or 1),
+                }
+
+        return empty
+    except Exception as exc:
+        logger.warning("resolve_broker_symbol(%s, %s) failed: %s", trading_symbol, broker_id, exc)
+        return empty
+    finally:
+        conn.close()
+
+
 def lookup_by_fyers_symbol(fyers_symbol: str) -> Optional[Dict[str, Any]]:
     """Lookup by Fyers symbol (e.g. 'NSE:RELIANCE-EQ')."""
     conn = get_trading_conn()

@@ -482,12 +482,14 @@ class FyersAdapter(BrokerAdapter):
             # Resolve Fyers-specific symbol from instruments DB
             # e.g. GOLDPETAL30APR26 → MCX:GOLDPETAL26APRFUT
             fyers_sym = ""
+            tick_size_resolved = 0.05
             if ":" not in sym:
                 try:
-                    from broker.symbol_normalizer import lookup_by_trading_symbol
-                    inst = lookup_by_trading_symbol(sym, exch)
-                    if inst and getattr(inst, 'fyers_symbol', None):
-                        fyers_sym = inst.fyers_symbol
+                    from db.symbols_db import resolve_broker_symbol as _gbs
+                    resolved = _gbs(sym, "fyers", exch)
+                    if resolved["symbol"]:
+                        fyers_sym = resolved["symbol"]
+                        tick_size_resolved = float(resolved.get("tick_size") or 0.05) or 0.05
                         logger.info("Fyers symbol resolved: %s → %s", sym, fyers_sym)
                 except Exception as e:
                     logger.warning("Fyers symbol lookup failed for %s: %s", sym, e)
@@ -522,13 +524,7 @@ class FyersAdapter(BrokerAdapter):
             if fyers_order["type"] == 2 and fyers_order["limitPrice"] == 0:
                 ltp_fallback = float(order.get("ltp") or 0)
                 if ltp_fallback > 0:
-                    # Resolve tick_size from symbol DB
-                    tick_size = 1.0  # default for MCX
-                    try:
-                        if inst and getattr(inst, 'tick_size', None) and inst.tick_size > 0:
-                            tick_size = inst.tick_size
-                    except Exception:
-                        pass
+                    tick_size = max(tick_size_resolved, 0.01)
                     buffer = max(tick_size, ltp_fallback * 0.01)  # 1% buffer
                     raw_buy = ltp_fallback + buffer
                     raw_sell = max(tick_size, ltp_fallback - buffer)
@@ -563,10 +559,10 @@ class FyersAdapter(BrokerAdapter):
             fyers_sym = ""
             if ":" not in symbol:
                 try:
-                    from broker.symbol_normalizer import lookup_by_trading_symbol
-                    inst = lookup_by_trading_symbol(symbol, exchange)
-                    if inst and getattr(inst, 'fyers_symbol', None):
-                        fyers_sym = inst.fyers_symbol
+                    from db.symbols_db import resolve_broker_symbol as _gbs
+                    resolved = _gbs(symbol, "fyers", exchange)
+                    if resolved["symbol"]:
+                        fyers_sym = resolved["symbol"]
                 except Exception:
                     pass
             if not fyers_sym:
