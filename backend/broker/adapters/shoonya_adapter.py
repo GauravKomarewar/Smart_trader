@@ -344,22 +344,81 @@ class ShoonyaAdapter(BrokerAdapter):
                      shoonya_params["exchange"], shoonya_params["quantity"],
                      shoonya_params["price"], shoonya_params["price_type"])
         try:
-            result = client.place_order(**shoonya_params)
-            if result is None:
-                return {"success": False, "order_id": "", "message": "Broker returned no response — market may be closed or session expired"}
+            result = self._raw_place_order(client, shoonya_params)
             if isinstance(result, dict):
-                oid = result.get("norenordno") or result.get("order_id") or ""
-                ok = bool(oid) or result.get("stat") == "Ok"
-                return {
-                    "success": ok,
-                    "order_id": oid,
-                    "message": "Order placed" if ok else (result.get("emsg") or "Order failed"),
-                    "raw": result,
-                }
-            return {"success": False, "message": str(result)}
+                if result.get("stat") == "Ok":
+                    oid = result.get("norenordno") or result.get("order_id") or ""
+                    return {
+                        "success": True,
+                        "order_id": oid,
+                        "message": "Order placed",
+                        "raw": result,
+                    }
+                else:
+                    emsg = result.get("emsg") or "Order rejected by broker"
+                    logger.error(
+                        "Shoonya order rejected: %s %s | emsg=%s",
+                        shoonya_params["tradingsymbol"], shoonya_params["exchange"], emsg,
+                    )
+                    return {
+                        "success": False,
+                        "order_id": "",
+                        "message": emsg,
+                        "raw": result,
+                    }
+            return {"success": False, "order_id": "", "message": "No response from broker"}
         except Exception as e:
             logger.exception("Shoonya place_order error: %s", e)
-            return {"success": False, "message": str(e)}
+            return {"success": False, "order_id": "", "message": str(e)}
+
+    def _raw_place_order(self, client, params: dict) -> dict:
+        """
+        POST to Shoonya PlaceOrder directly instead of using NorenApi.place_order(),
+        which silently returns None for ANY error (session/symbol/RMS/etc.), making
+        it impossible to distinguish the cause.  This returns the full response dict
+        so callers can inspect the actual 'emsg'.
+        """
+        import json as _json
+        import urllib.parse as _up
+        import requests as _req
+
+        susertoken = getattr(client, "_NorenApi__susertoken", None) or ""
+        username   = getattr(client, "_NorenApi__username",   None) or ""
+        accountid  = getattr(client, "_NorenApi__accountid",  None) or username
+
+        # Get host from the NorenApi class-level service config (set in __init__)
+        try:
+            from NorenRestApiPy.NorenApi import NorenApi as _NA
+            _cfg   = _NA._NorenApi__service_config
+            _host  = _cfg.get("host", "https://api.shoonya.com/NorenWClientAPI")
+            _route = (_cfg.get("routes") or {}).get("placeorder", "/PlaceOrder")
+            url    = f"{_host}{_route}"
+        except Exception:
+            url = "https://api.shoonya.com/NorenWClientAPI/PlaceOrder"
+
+        trgprc = params.get("trigger_price") or 0
+        values = {
+            "ordersource": "API",
+            "uid":         username,
+            "actid":       accountid,
+            "trantype":    params["buy_or_sell"],
+            "prd":         params["product_type"],
+            "exch":        params["exchange"],
+            "tsym":        _up.quote_plus(params["tradingsymbol"]),
+            "qty":         str(params["quantity"]),
+            "dscqty":      str(params["discloseqty"]),
+            "prctyp":      params["price_type"],
+            "prc":         str(params["price"]),
+            "trgprc":      str(trgprc),
+            "ret":         params.get("retention", "DAY"),
+            "remarks":     params.get("remarks") or "smart_trader",
+            "amo":         "NO",
+        }
+        payload = "jData=" + _json.dumps(values) + f"&jKey={susertoken}"
+        resp    = _req.post(url, data=payload, timeout=10)
+        result  = _json.loads(resp.text)
+        logger.debug("Shoonya PlaceOrder raw response: %s", result)
+        return result
 
     # ── Market data ──────────────────────────────────────────────────────────
 

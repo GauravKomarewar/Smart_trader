@@ -63,52 +63,47 @@ class TestShoonyaPlaceOrder:
         assert "not connected" in result["message"].lower()
 
     def test_ok_response_returns_success_true_with_order_id(self):
-        client = MagicMock()
-        client.place_order.return_value = {"stat": "Ok", "norenordno": "12345"}
-        adapter = _adapter(client=client)
+        adapter = _adapter()
         with patch("broker.symbol_normalizer.lookup_by_trading_symbol", return_value=None):
-            result = adapter.place_order(self._order())
+            with patch.object(adapter, "_raw_place_order", return_value={"stat": "Ok", "norenordno": "12345"}):
+                result = adapter.place_order(self._order())
         assert result["success"] is True
         assert result["order_id"] == "12345"
 
     def test_emsg_returns_success_false(self):
-        client = MagicMock()
-        client.place_order.return_value = {"stat": "Not_Ok", "emsg": "RMS:Blocked"}
-        adapter = _adapter(client=client)
+        adapter = _adapter()
         with patch("broker.symbol_normalizer.lookup_by_trading_symbol", return_value=None):
-            result = adapter.place_order(self._order())
+            with patch.object(adapter, "_raw_place_order", return_value={"stat": "Not_Ok", "emsg": "RMS:Blocked"}):
+                result = adapter.place_order(self._order())
         assert result["success"] is False
         assert "RMS:Blocked" in result["message"]
 
     def test_none_response_returns_success_false(self):
-        client = MagicMock()
-        client.place_order.return_value = None
-        adapter = _adapter(client=client)
+        """_raw_place_order raises an exception → caught → success=False."""
+        adapter = _adapter()
         with patch("broker.symbol_normalizer.lookup_by_trading_symbol", return_value=None):
-            result = adapter.place_order(self._order())
+            with patch.object(adapter, "_raw_place_order", side_effect=RuntimeError("Connection error")):
+                result = adapter.place_order(self._order())
         assert result["success"] is False
 
     def test_exception_returns_success_false(self):
-        client = MagicMock()
-        client.place_order.side_effect = RuntimeError("Timeout")
-        adapter = _adapter(client=client)
+        adapter = _adapter()
         with patch("broker.symbol_normalizer.lookup_by_trading_symbol", return_value=None):
-            result = adapter.place_order(self._order())
+            with patch.object(adapter, "_raw_place_order", side_effect=RuntimeError("Timeout")):
+                result = adapter.place_order(self._order())
         assert result["success"] is False
         assert "Timeout" in result["message"]
 
     def test_result_always_has_required_keys(self):
         """Every response must include success, order_id, message."""
-        for mock_return in [
-            {"stat": "Ok", "norenordno": "ABC"},
-            {"stat": "Not_Ok", "emsg": "err"},
-            None,
+        for raw_resp, should_succeed in [
+            ({"stat": "Ok", "norenordno": "ABC"}, True),
+            ({"stat": "Not_Ok", "emsg": "err"}, False),
         ]:
-            client = MagicMock()
-            client.place_order.return_value = mock_return
-            adapter = _adapter(client=client)
+            adapter = _adapter()
             with patch("broker.symbol_normalizer.lookup_by_trading_symbol", return_value=None):
-                result = adapter.place_order(self._order())
+                with patch.object(adapter, "_raw_place_order", return_value=raw_resp):
+                    result = adapter.place_order(self._order())
             assert "success" in result
             assert "order_id" in result
             assert "message" in result

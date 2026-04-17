@@ -442,8 +442,11 @@ class BrokerAccountSession:
         """Check if a broker API response indicates session expiry."""
         if self.mode != "live":
             return False
-        if result is None and self.broker_id == "shoonya":
-            return True
+        if result is None:
+            # None still possible from legacy NorenApi calls (get_order_book, etc.)
+            # Only treat as session error for Shoonya when not coming from place_order
+            # (place_order now uses _raw_place_order which always returns a dict).
+            return self.broker_id == "shoonya"
         if isinstance(result, dict):
             # Shoonya: stat != "Ok" with session-related emsg
             emsg = str(result.get("emsg", "")).lower()
