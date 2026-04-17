@@ -1647,11 +1647,70 @@ def get_fno_underlyings() -> List[Dict[str, Any]]:
         {"symbol": "NIFTY", "exchange": "NFO", "instrument_types": ["OPT", "FUT"]}
     Sorted by exchange priority (NFO first) then symbol alphabetically.
 
-    Broker ScriptMasters store contract-specific names in the `symbol` column
-    (e.g. "GOLDPETAL FUT 30 APR 26", "360ONE 1000 CE 26 MAY 26").  We strip
-    those suffixes in Python to recover the clean underlying base name and then
-    deduplicate.
+    Broker ScriptMasters may store contract-specific names in `symbol` while the
+    canonical base can often be inferred from normalized trading symbol columns.
+    We prefer row-level normalized/base extraction when available, then fallback
+    to suffix stripping from `symbol`.
     """
+
+    def _sanitize_base_symbol(value: str) -> str:
+        s = _clean_text(value)
+        if not s:
+            return ""
+        # Common BFO artifact forms: BANKBARODA7. / BANDHANBNK2.
+        s = re.sub(r"^([A-Z0-9&-]+)[0-9]\.$", r"\1", s)
+        # Single trailing dot artifact: INOXWIND.
+        s = re.sub(r"^([A-Z0-9&-]+)\.$", r"\1", s)
+        return s
+
+    def _is_valid_base_symbol(value: str) -> bool:
+        s = _sanitize_base_symbol(value)
+        if not s or len(s) < 2:
+            return False
+        if _STRIKE_LIKE_RE.search(s):
+            return False
+        return True
+
+    def _base_from_normalized_trading_symbol(tsym: str) -> str:
+        t = _clean_text(tsym)
+        if not t:
+            return ""
+
+        # Canonical hyphenated form: GOLD-30APR2026-121100-PE -> GOLD
+        if "-" in t:
+            first = t.split("-", 1)[0].strip()
+            if _is_valid_base_symbol(first):
+                return first
+
+        # Compact contract form: NIFTY26APR24500CE / BANKNIFTY26MAYFUT -> NIFTY/BANKNIFTY
+        compact = re.match(r"^([A-Z0-9&-]+?)\d{2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}.*$", t)
+        if compact:
+            base = compact.group(1).strip()
+            if _is_valid_base_symbol(base):
+                return base
+
+        # Space form: GOLD 121100 PE 30 APR 26 -> GOLD
+        spaced = re.match(r"^([A-Z0-9&]+)\s+\d+(?:\.\d+)?\s+(?:CE|PE|FUT)\s+\d{1,2}\s+[A-Z]{3}\s+\d{2}$", t)
+        if spaced:
+            base = spaced.group(1).strip()
+            if _is_valid_base_symbol(base):
+                return base
+
+        return ""
+
+    def _row_base_symbol(row: Dict[str, Any]) -> str:
+        # Prefer row-level normalized signals before generic stripping.
+        for candidate in (
+            _base_from_normalized_trading_symbol(row.get("normalized_trading_symbol", "")),
+            _base_from_normalized_trading_symbol(row.get("trading_symbol", "")),
+            row.get("normalized_underlying", ""),
+            _extract_base_symbol(row.get("symbol", "")),
+        ):
+            c = _sanitize_base_symbol(_extract_base_symbol(str(candidate or "")))
+            if _is_valid_base_symbol(c):
+                return c
+        return ""
+
     conn = get_trading_conn()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -1659,6 +1718,9 @@ def get_fno_underlyings() -> List[Dict[str, Any]]:
             """
             SELECT
                 symbol,
+                normalized_underlying,
+                normalized_trading_symbol,
+                trading_symbol,
                 exchange,
                 array_agg(DISTINCT
                     CASE
@@ -1668,27 +1730,24 @@ def get_fno_underlyings() -> List[Dict[str, Any]]:
                     END
                 ) AS instrument_types
             FROM symbols
-            WHERE exchange IN ('NFO', 'BFO', 'MCX', 'CDS')
+                        WHERE exchange IN ('NFO', 'BFO', 'MCX')
               AND (instrument_type LIKE 'OPT%' OR instrument_type LIKE 'FUT%')
               AND symbol IS NOT NULL
               AND symbol != ''
-            GROUP BY symbol, exchange
+                            AND broker_coverage >= 5
+                            AND UPPER(symbol) NOT LIKE '%TEST%'
+            GROUP BY symbol, normalized_underlying, normalized_trading_symbol, trading_symbol, exchange
             """
         )
         rows = cur.fetchall()
         if not rows:
             return []
 
-        # Normalise: strip broker-specific expiry/strike suffixes and deduplicate
-        # by (base_symbol, exchange).  This collapses entries like
-        # "GOLDPETAL FUT 30 APR 26" / "GOLDPETAL26APR" → "GOLDPETAL" (MCX)
-        # and "360ONE FUT 26 MAY 26" / "360ONE 1000 CE 26 MAY 26" → "360ONE" (NFO).
+        # Deduplicate by (base_symbol, exchange) using row-level normalized base.
         groups: Dict[tuple, set] = {}
         for r in rows:
-            base = _extract_base_symbol(r["symbol"])
-            # Skip empty, single-char, or strike-price-like symbols
-            # (e.g. "NIFTY2642123600" stored in symbol col by some brokers)
-            if not base or len(base) < 2 or _STRIKE_LIKE_RE.search(base):
+            base = _row_base_symbol(r)
+            if not base:
                 continue
             key = (base, r["exchange"])
             if key not in groups:
@@ -1706,6 +1765,88 @@ def get_fno_underlyings() -> List[Dict[str, Any]]:
         return result
     except Exception as exc:
         logger.warning("get_fno_underlyings failed: %s", exc)
+        return []
+    finally:
+        conn.close()
+
+
+def get_option_contract_tokens(
+    symbol: str,
+    exchange: str = "NFO",
+    expiry: Optional[str] = None,
+    limit: int = 2000,
+) -> List[Dict[str, Any]]:
+    """
+    Return option-contract rows + per-broker tokens for one underlying.
+
+    Designed for intraday token subscription preparation.
+    """
+    base = _clean_text(symbol)
+    exch = _clean_text(exchange)
+    lim = max(1, min(int(limit or 2000), 20000))
+    expiry_iso = _parse_expiry(expiry) if expiry else None
+
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        params: List[Any] = [exch, base, base, f"{base}-%"]
+        where_parts = [
+            "exchange = %s",
+            "instrument_type = 'OPT'",
+            """(
+                UPPER(COALESCE(normalized_underlying, '')) = %s
+                OR UPPER(COALESCE(symbol, '')) = %s
+                OR UPPER(COALESCE(normalized_trading_symbol, '')) LIKE %s
+            )""",
+        ]
+        if expiry_iso:
+            where_parts.append("expiry = %s")
+            params.append(expiry_iso)
+
+        params.append(lim)
+        cur.execute(
+            f"""
+            SELECT
+                exchange,
+                exchange_token,
+                symbol,
+                trading_symbol,
+                normalized_underlying,
+                normalized_trading_symbol,
+                expiry,
+                strike,
+                option_type,
+                lot_size,
+                tick_size,
+                broker_coverage,
+                fyers_symbol,
+                fyers_token,
+                shoonya_tsym,
+                shoonya_token,
+                angelone_tsym,
+                angelone_token,
+                dhan_security_id,
+                kite_instrument_token,
+                kite_exchange_token,
+                upstox_ikey,
+                groww_token
+            FROM symbols
+            WHERE {' AND '.join(where_parts)}
+            ORDER BY expiry ASC NULLS LAST, strike ASC, option_type ASC, broker_coverage DESC
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        logger.warning(
+            "get_option_contract_tokens(%s, %s, %s) failed: %s",
+            symbol,
+            exchange,
+            expiry,
+            exc,
+        )
         return []
     finally:
         conn.close()
