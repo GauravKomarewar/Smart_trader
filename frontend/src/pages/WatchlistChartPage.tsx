@@ -319,7 +319,7 @@ function WatchlistPanel({ selectedId, onSelect }: {
                     <button
                       key={i}
                       onMouseDown={() => {
-                        const tsym = r.trading_symbol || r.tradingsymbol || r.symbol
+                        const tsym = r.normalized_trading_symbol || r.trading_symbol || r.tradingsymbol || r.symbol
                         const watchSymbol = isDerivativeType(r.type) ? tsym : (r.symbol || tsym)
                         addItem(activeId, { symbol: watchSymbol, tradingsymbol: tsym, exchange: r.exchange, type: r.type })
                         setSearch('')
@@ -327,7 +327,7 @@ function WatchlistPanel({ selectedId, onSelect }: {
                       className="w-full flex items-center gap-3 px-3 py-2 hover:bg-bg-hover text-left transition-colors"
                     >
                       <div className="flex-1">
-                        <div className="text-[12px] font-medium text-text-bright">{r.trading_symbol || r.tradingsymbol || r.symbol}</div>
+                        <div className="text-[12px] font-medium text-text-bright">{r.normalized_trading_symbol || r.trading_symbol || r.tradingsymbol || r.symbol}</div>
                         <div className="text-[10px] text-text-muted">{r.exchange} · {r.type}</div>
                       </div>
                       <Plus className="w-3.5 h-3.5 text-brand" />

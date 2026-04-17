@@ -1,0 +1,14 @@
+[Unit]
+Description=Smart Trader — Daily Scriptmaster Refresh Timer
+After=network-online.target
+
+[Timer]
+# 08:45 IST = 03:15 UTC
+OnCalendar=*-*-* 03:15:00
+# If the system was offline at 03:15, run immediately on next boot
+Persistent=true
+# Small random jitter to avoid thundering-herd if multiple services fire at once
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

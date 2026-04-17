@@ -1,0 +1,16 @@
+[Unit]
+Description=Smart Trader — Daily Scriptmaster Refresh
+Documentation=https://github.com/smarttrader
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Smart_trader/backend
+Environment=PYTHONPATH=/home/ubuntu/Smart_trader/backend
+ExecStart=/home/ubuntu/.venv/bin/python3 /home/ubuntu/Smart_trader/backend/scripts/refresh_scriptmaster.py
+StandardOutput=journal
+StandardError=journal
+# Allow up to 10 minutes for all broker downloads
+TimeoutStartSec=600

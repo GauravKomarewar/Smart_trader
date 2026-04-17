@@ -159,14 +159,14 @@ const defaultWatchlist: Watchlist = {
   id: 'wl-default',
   name: 'My Watchlist',
   items: [
-    { id: uid(), symbol: 'NIFTY 50',   tradingsymbol: 'NIFTY 50',   exchange: 'NSE', type: 'IDX', addedAt: Date.now() },
-    { id: uid(), symbol: 'NIFTY BANK', tradingsymbol: 'BANKNIFTY',  exchange: 'NSE', type: 'IDX', addedAt: Date.now() },
-    { id: uid(), symbol: 'RELIANCE',   tradingsymbol: 'RELIANCE',   exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
-    { id: uid(), symbol: 'TCS',        tradingsymbol: 'TCS',        exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
-    { id: uid(), symbol: 'HDFCBANK',   tradingsymbol: 'HDFCBANK',   exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
-    { id: uid(), symbol: 'INFY',       tradingsymbol: 'INFY',       exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
-    { id: uid(), symbol: 'ICICIBANK',  tradingsymbol: 'ICICIBANK',  exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
-    { id: uid(), symbol: 'LT',         tradingsymbol: 'LT',         exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
+    { id: uid(), symbol: 'NIFTY',     tradingsymbol: 'NIFTY',     exchange: 'NSE', type: 'IDX', addedAt: Date.now() },
+    { id: uid(), symbol: 'BANKNIFTY', tradingsymbol: 'BANKNIFTY', exchange: 'NSE', type: 'IDX', addedAt: Date.now() },
+    { id: uid(), symbol: 'RELIANCE',  tradingsymbol: 'RELIANCE',  exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
+    { id: uid(), symbol: 'TCS',       tradingsymbol: 'TCS',       exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
+    { id: uid(), symbol: 'HDFCBANK',  tradingsymbol: 'HDFCBANK',  exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
+    { id: uid(), symbol: 'INFY',      tradingsymbol: 'INFY',      exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
+    { id: uid(), symbol: 'ICICIBANK', tradingsymbol: 'ICICIBANK', exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
+    { id: uid(), symbol: 'LT',        tradingsymbol: 'LT',        exchange: 'NSE', type: 'EQ',  addedAt: Date.now() },
   ],
 }
 

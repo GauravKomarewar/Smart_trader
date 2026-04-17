@@ -1959,6 +1959,13 @@ def _daily_refresh_loop():
                 logger.info("Symbols DB daily refresh complete: %s", result)
             except Exception as exc:
                 logger.warning("Symbols DB daily refresh failed: %s", exc)
+
+            # 3) Clear normalizer LRU cache so fresh data is picked up immediately
+            try:
+                from broker.symbol_normalizer import get_normalizer
+                get_normalizer().invalidate_cache()
+            except Exception:
+                pass  # normalizer not critical to the refresh cycle
         except Exception as exc:
             logger.exception("Symbols DB scheduler loop error: %s", exc)
             time.sleep(60)  # back off on unexpected error

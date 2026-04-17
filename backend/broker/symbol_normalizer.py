@@ -2,63 +2,123 @@
 Smart Trader — Universal Symbol Normalizer
 ============================================
 
-Central abstraction layer that:
-  1. Defines a canonical instrument format used everywhere in the app
-  2. Converts canonical ↔ broker-specific symbol formats
-  3. Provides ScriptMaster-powered instrument search / lookup
-  4. Normalizes broker responses (positions, orders) to canonical format
+Single gateway for ALL symbol/instrument resolution across the app.
 
-Every UI page — place order, search, option chain, watchlist — goes through
-this module so instrument data is consistent regardless of connected broker.
+Architecture
+------------
+  Every broker adapter, strategy runner, and API endpoint imports ONLY from
+  this module for any symbol ↔ broker conversion.  The symbols PostgreSQL
+  table is the authoritative source of truth; this module provides a
+  LRU-cached in-process view on top of it.
 
 Canonical Symbol Format
 -----------------------
-  trading_symbol : str   — compact human-readable, NO exchange prefix
-                           e.g. "NIFTY26APR24500CE", "RELIANCE-EQ"
-  symbol         : str   — underlying name ("NIFTY", "RELIANCE")
-  exchange       : str   — "NSE", "NFO", "BSE", "BFO", "MCX", "CDS"
-  instrument_type: str   — "EQ", "FUT", "OPT", "IDX"
-  expiry         : str   — ISO date "YYYY-MM-DD" or "" for EQ/IDX
-  strike         : float — 0.0 for non-options
-  option_type    : str   — "CE", "PE", or "" for non-options
-  lot_size       : int   — contract lot size (1 for equity)
-  tick_size      : float — minimum price movement
-  token          : str   — exchange numeric token
+  trading_symbol           : str   — compact human-readable, NO exchange prefix
+                                     e.g. "NIFTY26APR24500CE", "RELIANCE-EQ"
+  normalized_trading_symbol: str   — DB-normalised form (strips -EQ/-INDEX)
+  symbol                   : str   — underlying name ("NIFTY", "RELIANCE")
+  exchange                 : str   — "NSE", "NFO", "BSE", "BFO", "MCX", "CDS"
+  instrument_type          : str   — "EQ", "FUT", "OPT", "IDX"
+  expiry                   : str   — ISO date "YYYY-MM-DD" or "" for EQ/IDX
+  strike                   : float — 0.0 for non-options
+  option_type              : str   — "CE", "PE", or "" for non-options
+  lot_size                 : int   — contract lot size (1 for equity)
+  tick_size                : float — minimum price movement
+  token                    : str   — exchange numeric token
+
+  Broker-specific fields (populated from symbols table when available):
+  fyers_symbol             : str   — "NSE:NIFTY26APR24500CE"
+  shoonya_tsym             : str   — Shoonya TradingSymbol
+  shoonya_token            : str   — Shoonya numeric token
+  angelone_tsym            : str   — Angel One TradingSymbol
+  angelone_token           : str   — Angel One numeric token
+  dhan_security_id         : str   — Dhan SecurityId
+  kite_instrument_token    : str   — Kite/Zerodha instrument token
+  upstox_ikey              : str   — Upstox instrument_key
+  groww_token              : str   — Groww token
 
 Broker Symbol Formats
 ---------------------
-  Fyers:   "EXCHANGE:SYMBOL"  → "NSE:NIFTY26APR24500CE"
+  Fyers:   "EXCHANGE:SYMBOL"  → "NFO:NIFTY26APR24500CE"
   Shoonya: plain "SYMBOL"     → "NIFTY26APR24500CE"  + separate exchange
   Paper:   same as canonical  → "NIFTY26APR24500CE"
+
+Primary entry-points
+--------------------
+  get_normalizer()           → SymbolNormalizer singleton (LRU-cached)
+  SymbolNormalizer.get()     → NormalizedInstrument for any trading_symbol
+  SymbolNormalizer.to_broker() → broker-specific symbol string
+  SymbolNormalizer.get_token() → broker-specific numeric token
+  SymbolNormalizer.all_formats() → dict of {broker: {symbol, token}}
+  SymbolNormalizer.ltp()     → float|None from latest market_ticks row
 """
 from __future__ import annotations
 
+import functools
 import re
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("smart_trader.symbol_normalizer")
+
+# ── Broker field maps (mirrors symbols_db._BROKER_FIELD) ─────────────────────
+_BROKER_SYM_FIELD: Dict[str, str] = {
+    "fyers":    "fyers_symbol",
+    "shoonya":  "shoonya_tsym",
+    "angelone": "angelone_tsym",
+    "dhan":     "dhan_security_id",
+    "kite":     "kite_instrument_token",
+    "upstox":   "upstox_ikey",
+    "groww":    "groww_token",
+    "paper":    "trading_symbol",
+}
+
+_BROKER_TOKEN_FIELD: Dict[str, str] = {
+    "shoonya":  "shoonya_token",
+    "angelone": "angelone_token",
+    "fyers":    "fyers_token",
+}
 
 
 # ── Canonical Data Model ─────────────────────────────────────────────────────
 
 @dataclass
 class NormalizedInstrument:
-    """Canonical instrument representation used across the entire app."""
-    symbol:          str            # Underlying: "NIFTY", "RELIANCE"
-    trading_symbol:  str            # Compact: "NIFTY26APR24500CE" (no exchange prefix)
-    exchange:        str            # "NSE", "NFO", "BSE", "BFO", "MCX"
-    instrument_type: str            # "EQ", "FUT", "OPT", "IDX"
-    expiry:          str = ""       # ISO "YYYY-MM-DD" or ""
-    strike:          float = 0.0    # 0 for non-options
-    option_type:     str = ""       # "CE", "PE", or ""
-    lot_size:        int = 1
-    tick_size:       float = 0.05
-    token:           str = ""       # Exchange numeric token
-    fyers_symbol:    str = ""       # Full Fyers key: "NSE:NIFTY26APR24500CE"
-    description:     str = ""       # Human-readable description
+    """Canonical instrument representation used across the entire app.
+
+    Core fields are always populated.  Broker-specific fields (shoonya_tsym,
+    fyers_symbol, …) are populated when the instrument has a row in the
+    symbols table with that broker's data.
+    """
+    # ── Core / always present ─────────────────────────────────────────────
+    symbol:                   str            # Underlying: "NIFTY", "RELIANCE"
+    trading_symbol:           str            # Compact: "NIFTY26APR24500CE" (no exchange prefix)
+    exchange:                 str            # "NSE", "NFO", "BSE", "BFO", "MCX"
+    instrument_type:          str            # "EQ", "FUT", "OPT", "IDX"
+    expiry:                   str = ""       # ISO "YYYY-MM-DD" or ""
+    strike:                   float = 0.0   # 0 for non-options
+    option_type:              str = ""       # "CE", "PE", or ""
+    lot_size:                 int = 1
+    tick_size:                float = 0.05
+    token:                    str = ""       # Exchange numeric token
+    description:              str = ""       # Human-readable description
+
+    # ── Normalised DB form ────────────────────────────────────────────────
+    normalized_trading_symbol: str = ""      # DB-normalised, e.g. strips -EQ/-INDEX
+
+    # ── Broker-specific fields ────────────────────────────────────────────
+    fyers_symbol:             str = ""       # "NSE:NIFTY26APR24500CE"
+    fyers_token:              str = ""       # Fyers FyToken
+    shoonya_tsym:             str = ""       # Shoonya TradingSymbol
+    shoonya_token:            str = ""       # Shoonya exchange token
+    angelone_tsym:            str = ""       # Angel One TradingSymbol
+    angelone_token:           str = ""       # Angel One token
+    dhan_security_id:         str = ""       # Dhan SecurityId
+    kite_instrument_token:    str = ""       # Kite/Zerodha instrument token
+    upstox_ikey:              str = ""       # Upstox instrument_key
+    groww_token:              str = ""       # Groww token
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -66,20 +126,46 @@ class NormalizedInstrument:
     def to_search_result(self) -> Dict[str, Any]:
         """Format for /market/search API response (consumed by frontend)."""
         return {
-            "symbol":          self.symbol,
-            "trading_symbol":  self.trading_symbol,
-            "tradingsymbol":   self.trading_symbol,   # legacy alias
-            "exchange":        self.exchange,
-            "type":            self.instrument_type,
-            "token":           self.token,
-            "name":            self.description or self.symbol,
-            "lot_size":        self.lot_size,
-            "expiry":          self.expiry,
-            "strike":          self.strike,
-            "option_type":     self.option_type,
-            "fyers_symbol":    self.fyers_symbol,
-            "shoonya_symbol":  self.trading_symbol,   # plain symbol = Shoonya format
+            "symbol":                    self.symbol,
+            "trading_symbol":            self.trading_symbol,
+            "tradingsymbol":             self.trading_symbol,   # legacy alias
+            "normalized_trading_symbol": self.normalized_trading_symbol or self.trading_symbol,
+            "exchange":                  self.exchange,
+            "type":                      self.instrument_type,
+            "token":                     self.token,
+            "name":                      self.description or self.symbol,
+            "lot_size":                  self.lot_size,
+            "expiry":                    self.expiry,
+            "strike":                    self.strike,
+            "option_type":               self.option_type,
+            "fyers_symbol":              self.fyers_symbol,
+            "shoonya_symbol":            self.shoonya_tsym or self.trading_symbol,
+            "shoonya_token":             self.shoonya_token,
+            "angelone_symbol":           self.angelone_tsym,
+            "angelone_token":            self.angelone_token,
+            "dhan_security_id":          self.dhan_security_id,
+            "kite_instrument_token":     self.kite_instrument_token,
+            "upstox_ikey":               self.upstox_ikey,
+            "groww_token":               self.groww_token,
         }
+
+    def broker_symbol(self, broker_id: str) -> str:
+        """Return the broker-specific symbol string for *broker_id*."""
+        fld = _BROKER_SYM_FIELD.get(broker_id.lower(), "")
+        if fld:
+            val = getattr(self, fld, "") or ""
+            if val:
+                return val
+        # Fallback: build on-the-fly
+        return to_broker_symbol(self.trading_symbol, self.exchange, broker_id)
+
+    def broker_token(self, broker_id: str) -> str:
+        """Return the broker-specific numeric token for *broker_id*."""
+        fld = _BROKER_TOKEN_FIELD.get(broker_id.lower(), "")
+        if fld:
+            return getattr(self, fld, "") or ""
+        return self.token
+
 
 
 # ── Expiry format helpers ────────────────────────────────────────────────────
@@ -204,7 +290,11 @@ def from_broker_symbol(
 
 
 def _record_to_normalized(rec: Dict[str, Any]) -> NormalizedInstrument:
-    """Convert either a symbols DB row or scriptmaster-style record to NormalizedInstrument."""
+    """Convert a symbols DB row (or scriptmaster-style dict) to NormalizedInstrument.
+
+    DB rows have lower-case snake_case keys.  Legacy scriptmaster dicts may use
+    PascalCase keys (TradingSymbol, FyersSymbol, …).  Both are handled.
+    """
     fyers_sym = rec.get("FyersSymbol") or rec.get("fyers_symbol") or ""
     tsym = (
         rec.get("TradingSymbol")
@@ -225,9 +315,9 @@ def _record_to_normalized(rec: Dict[str, Any]) -> NormalizedInstrument:
         itype = "IDX"
 
     strike = rec.get("StrikePrice") if "StrikePrice" in rec else rec.get("strike")
-    if strike and float(strike) > 0:
-        strike = float(strike)
-    else:
+    try:
+        strike = float(strike) if strike is not None and float(strike) > 0 else 0.0
+    except (TypeError, ValueError):
         strike = 0.0
 
     return NormalizedInstrument(
@@ -241,9 +331,22 @@ def _record_to_normalized(rec: Dict[str, Any]) -> NormalizedInstrument:
         lot_size=int(rec.get("LotSize") or rec.get("lot_size") or 1),
         tick_size=float(rec.get("TickSize") or rec.get("tick_size") or 0.05),
         token=str(rec.get("Token") or rec.get("exchange_token") or ""),
-        fyers_symbol=fyers_sym,
         description=rec.get("Description") or rec.get("description") or rec.get("Name") or "",
+        # ── normalised form from DB ───────────────────────────────────────
+        normalized_trading_symbol=rec.get("normalized_trading_symbol") or "",
+        # ── broker-specific fields ────────────────────────────────────────
+        fyers_symbol=fyers_sym,
+        fyers_token=rec.get("fyers_token") or "",
+        shoonya_tsym=rec.get("shoonya_tsym") or "",
+        shoonya_token=rec.get("shoonya_token") or "",
+        angelone_tsym=rec.get("angelone_tsym") or "",
+        angelone_token=rec.get("angelone_token") or "",
+        dhan_security_id=rec.get("dhan_security_id") or "",
+        kite_instrument_token=rec.get("kite_instrument_token") or "",
+        upstox_ikey=rec.get("upstox_ikey") or "",
+        groww_token=rec.get("groww_token") or "",
     )
+
 
 
 def search_instruments(
@@ -298,6 +401,190 @@ def _fallback_search(query: str, limit: int) -> List[NormalizedInstrument]:
                 fyers_symbol=fyers_sym, description=name,
             ))
     return results[:limit]
+
+
+# ── SymbolNormalizer — the primary public API ─────────────────────────────────
+
+class SymbolNormalizer:
+    """Singleton gateway for all symbol normalization across the app.
+
+    Usage:
+        from broker.symbol_normalizer import get_normalizer
+        norm = get_normalizer()
+
+        inst = norm.get("NIFTY26APR24500CE", "NFO")   # → NormalizedInstrument
+        sym  = norm.to_broker("NIFTY26APR24500CE", "shoonya", "NFO")
+        tok  = norm.get_token("NIFTY26APR24500CE", "shoonya", "NFO")
+        ltp  = norm.ltp("NIFTY26APR24500CE", "NFO")   # from market_ticks
+        fmts = norm.all_formats("NIFTY26APR24500CE", "NFO")
+    """
+
+    # ── LRU-cached DB lookup ──────────────────────────────────────────────────
+
+    @functools.lru_cache(maxsize=8192)
+    def get(
+        self,
+        trading_symbol: str,
+        exchange: str = "",
+    ) -> Optional[NormalizedInstrument]:
+        """Return a fully-populated NormalizedInstrument for *trading_symbol*.
+
+        Accepts any broker format (Fyers 'NFO:SYM', Shoonya plain 'SYM', etc.)
+        or the canonical DB form.  Returns None if not found in the symbols DB.
+        """
+        try:
+            from db.symbols_db import lookup_by_trading_symbol as _db_lookup
+        except Exception:
+            return None
+
+        raw = str(trading_symbol or "").strip()
+        if not raw:
+            return None
+
+        ex = (exchange or "").upper().strip()
+        # Strip exchange prefix (Fyers style "NFO:SYM")
+        clean = raw
+        if ":" in raw:
+            pfx, rest = raw.split(":", 1)
+            clean = rest.strip()
+            if not ex:
+                ex = pfx.upper().strip()
+
+        clean_upper = clean.upper()
+        compact = clean_upper.replace(" ", "")
+
+        for variant in [clean_upper, compact]:
+            for exch in ([ex] if ex else [""]):
+                try:
+                    rec = _db_lookup(variant, exch)
+                    if rec:
+                        return _record_to_normalized(rec)
+                except Exception:
+                    continue
+        return None
+
+    # ── Broker symbol / token accessors ──────────────────────────────────────
+
+    def to_broker(
+        self,
+        trading_symbol: str,
+        broker_id: str,
+        exchange: str = "",
+    ) -> str:
+        """Return the broker-specific symbol string for *trading_symbol*.
+
+        Falls back to a deterministic on-the-fly conversion if the instrument
+        is not in the DB (e.g. very new listings).
+        """
+        inst = self.get(trading_symbol, exchange)
+        if inst:
+            return inst.broker_symbol(broker_id)
+        # Deterministic fallback
+        return to_broker_symbol(trading_symbol, exchange or "NSE", broker_id)
+
+    def get_token(
+        self,
+        trading_symbol: str,
+        broker_id: str,
+        exchange: str = "",
+    ) -> str:
+        """Return the broker-specific numeric token for *trading_symbol*."""
+        inst = self.get(trading_symbol, exchange)
+        if inst:
+            return inst.broker_token(broker_id)
+        return ""
+
+    def from_broker(
+        self,
+        broker_symbol: str,
+        broker_id: str,
+    ) -> Tuple[str, str]:
+        """Parse a broker-specific symbol string to (trading_symbol, exchange).
+
+        Returns:
+            ("NIFTY26APR24500CE", "NFO")
+        """
+        return from_broker_symbol(broker_symbol, broker_id)
+
+    def all_formats(
+        self,
+        trading_symbol: str,
+        exchange: str = "",
+    ) -> Dict[str, Dict[str, str]]:
+        """Return all broker-specific symbols and tokens for *trading_symbol*.
+
+        Returns:
+            {
+              "fyers":    {"symbol": "NFO:NIFTY26APR24500CE", "token": ""},
+              "shoonya":  {"symbol": "NIFTY26APR24500CE",     "token": "12345"},
+              "angelone": {"symbol": "...", "token": "..."},
+              ...
+            }
+        """
+        inst = self.get(trading_symbol, exchange)
+        if not inst:
+            return {}
+
+        result: Dict[str, Dict[str, str]] = {}
+        for broker_id in _BROKER_SYM_FIELD:
+            sym_fld = _BROKER_SYM_FIELD[broker_id]
+            tok_fld = _BROKER_TOKEN_FIELD.get(broker_id, "")
+            sym_val = getattr(inst, sym_fld, "") if hasattr(inst, sym_fld) else ""
+            tok_val = getattr(inst, tok_fld, "") if tok_fld and hasattr(inst, tok_fld) else ""
+            result[broker_id] = {"symbol": sym_val or "", "token": tok_val or ""}
+        return result
+
+    def ltp(
+        self,
+        trading_symbol: str,
+        exchange: str = "",
+    ) -> Optional[float]:
+        """Return the latest LTP from the market_ticks table, or None."""
+        try:
+            from db.trading_db import get_trading_conn  # noqa: PLC0415
+
+            conn = get_trading_conn()
+            try:
+                with conn.cursor() as cur:
+                    sym = trading_symbol.upper().strip()
+                    if exchange:
+                        cur.execute(
+                            "SELECT ltp FROM market_ticks WHERE symbol = %s "
+                            "AND exchange = %s ORDER BY tick_time DESC LIMIT 1",
+                            (sym, exchange.upper()),
+                        )
+                    else:
+                        cur.execute(
+                            "SELECT ltp FROM market_ticks WHERE symbol = %s "
+                            "ORDER BY tick_time DESC LIMIT 1",
+                            (sym,),
+                        )
+                    row = cur.fetchone()
+                    return float(row[0]) if row else None
+            finally:
+                conn.close()
+        except Exception:
+            return None
+
+    def invalidate_cache(self) -> None:
+        """Clear the LRU cache.  Call this after a daily scriptmaster refresh
+        so that the next lookup picks up the freshly-populated symbols table.
+        """
+        self.get.cache_clear()
+        logger.info("SymbolNormalizer LRU cache cleared")
+
+
+# ── Module-level singleton ────────────────────────────────────────────────────
+
+_normalizer: Optional[SymbolNormalizer] = None
+
+
+def get_normalizer() -> SymbolNormalizer:
+    """Return the module-level SymbolNormalizer singleton (created on first call)."""
+    global _normalizer
+    if _normalizer is None:
+        _normalizer = SymbolNormalizer()
+    return _normalizer
 
 
 def lookup_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Optional[NormalizedInstrument]:
