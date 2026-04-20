@@ -94,7 +94,7 @@ class FyersAdapter(BrokerAdapter):
         self._cb_lock = threading.Lock()  # dedicated lock for circuit state
         self._cb_open_until: float = 0.0  # monotonic; 0 = circuit closed
         self._cb_half_open = False         # True = one probe call in flight
-        self._cb_backoff: float = 120.0    # doubles on each failure, max 600s
+        self._cb_backoff: float = 60.0     # doubles on each failure
 
         if token:
             self._build_client(token)
@@ -136,7 +136,7 @@ class FyersAdapter(BrokerAdapter):
             with self._cb_lock:
                 self._cb_open_until = 0.0    # circuit closed
                 self._cb_half_open = False   # no probe in flight
-                self._cb_backoff = 120.0
+                self._cb_backoff = 60.0
             logger.info("Fyers client initialised for client=%s", client_id)
             # Share the valid token with the global FyersDataClient (market data)
             try:
@@ -179,15 +179,19 @@ class FyersAdapter(BrokerAdapter):
         with self._cb_lock:
             self._cb_open_until = 0.0
             self._cb_half_open = False
-            self._cb_backoff = 30.0  # reset for next failure
+            # Decay backoff gradually instead of resetting aggressively;
+            # this avoids 30s/60s oscillation under sustained 429 pressure.
+            self._cb_backoff = max(60.0, self._cb_backoff / 2.0)
 
     def _circuit_trip(self) -> None:
         """Call on -429 to open the circuit with exponential backoff."""
         with self._cb_lock:
             backoff = self._cb_backoff
-            self._cb_open_until = time.monotonic() + backoff
+            now = time.monotonic()
+            # Never shorten an already-open circuit window.
+            self._cb_open_until = max(self._cb_open_until, now + backoff)
             self._cb_half_open = False
-            self._cb_backoff = min(backoff * 2, 120.0)  # cap at 2 min
+            self._cb_backoff = min(backoff * 2, 300.0)  # cap at 5 min
         logger.warning("Fyers rate limit — circuit open for %.0fs (client=%s)",
                        backoff, self.client_id)
 

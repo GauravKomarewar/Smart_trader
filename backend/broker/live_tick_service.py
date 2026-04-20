@@ -50,6 +50,10 @@ _MCX_KEYWORDS = {"GOLD", "SILVER", "CRUDE", "NATURALGAS", "COPPER", "ZINC", "LEA
                  "ALUMINIUM", "NICKEL", "GOLDPETAL", "SILVERMIC", "GOLDGUINEA",
                  "CRUDEOIL", "NGAS", "COTTONCNDY", "MENTHAOIL"}
 
+# Index families where Fyers WS expects NSE:/BSE: prefixed derivatives.
+_FYERS_INDEX_NSE_PREFIXES = ("NIFTY", "BANKNIFTY", "NIFTYBANK", "FINNIFTY", "MIDCPNIFTY")
+_FYERS_INDEX_BSE_PREFIXES = ("SENSEX", "BANKEX")
+
 
 def _detect_exchange_from_symbol(sym: str) -> str:
     """Detect exchange from symbol pattern. Used as fallback when ScriptMaster lookup fails."""
@@ -87,6 +91,27 @@ def _detect_exchange_from_symbol(sym: str) -> str:
     if upper.startswith("SENSEX"):
         return "BFO"
     return "NSE"
+
+
+def _fyers_derivative_exchange_hint(raw_symbol: str, exchange_hint: str) -> str:
+    """Pick the Fyers derivative prefix for options/futures.
+
+    Fyers requires NSE:/BSE: for index derivatives, while commodity derivatives
+    stay on MCX and other derivatives can use NFO/BFO.
+    """
+    up = str(raw_symbol or "").upper().replace(" ", "")
+    hint = (exchange_hint or "").upper().strip()
+
+    for pref in _FYERS_INDEX_NSE_PREFIXES:
+        if up.startswith(pref):
+            return "NSE"
+    for pref in _FYERS_INDEX_BSE_PREFIXES:
+        if up.startswith(pref):
+            return "BSE"
+
+    if hint in ("NSE", "BSE", "NFO", "BFO", "MCX"):
+        return hint
+    return "NFO"
 
 
 # ── Tick schema ────────────────────────────────────────────────────────────────
@@ -276,6 +301,7 @@ class LiveTickService:
         self._fyers_running = False
         self._fyers_ws_fail_time: float = 0   # monotonic time of last WS auth failure
         self._FYERS_WS_RETRY_SECS = 5         # retry WS init quickly for low-latency recovery
+        self._fyers_invalid_symbols: Set[str] = set()  # broker-formatted symbols rejected by WS
 
         # Shoonya WS
         self._shoonya_ws_running = False
@@ -419,14 +445,45 @@ class LiveTickService:
                 all_subscribed = list(self._subscribed)
             fyers_syms = [self._to_fyers_sym(s) for s in all_subscribed]
             fyers_syms = list(dict.fromkeys(s for s in fyers_syms if s))  # dedup, preserve order
+            if self._fyers_invalid_symbols:
+                fyers_syms = [s for s in fyers_syms if s not in self._fyers_invalid_symbols]
             if fyers_syms:
                 self._fyers_ws.subscribe(symbols=fyers_syms, data_type="SymbolUpdate")
                 logger.info(
                     "Fyers WS subscribed: %d total (%d new): %s",
                     len(fyers_syms), len(symbols), fyers_syms[:5],
                 )
+            elif all_subscribed:
+                logger.warning(
+                    "Fyers WS subscribe skipped: all %d symbols are marked invalid",
+                    len(all_subscribed),
+                )
         except Exception as e:
             logger.warning("Fyers WS subscribe error: %s", e)
+
+    def _mark_fyers_invalid_symbols(self, invalid_symbols: List[str]) -> None:
+        """Persist invalid WS symbols and drop matching canonical subscriptions to avoid loops."""
+        cleaned = [str(s).strip().upper() for s in (invalid_symbols or []) if str(s).strip()]
+        if not cleaned:
+            return
+        with self._lock:
+            self._fyers_invalid_symbols.update(cleaned)
+            to_remove: List[str] = []
+            for subscribed in list(self._subscribed):
+                try:
+                    mapped = self._to_fyers_sym(subscribed).upper()
+                except Exception:
+                    mapped = ""
+                if mapped in self._fyers_invalid_symbols:
+                    to_remove.append(subscribed)
+            for sym in to_remove:
+                self._subscribed.discard(sym)
+                self._sym_alias.pop(_normalize_sym(sym), None)
+        if to_remove:
+            logger.warning(
+                "Removed %d canonical subscriptions due to Fyers invalid symbols: %s",
+                len(to_remove), to_remove[:5],
+            )
 
     def _init_fyers_ws(self) -> None:
         if self._fyers_ws is not None:
@@ -485,10 +542,21 @@ class LiveTickService:
             from fyers_apiv3.FyersWebsocket.data_ws import FyersDataSocket
 
             def _on_ws_error(e):
+                err_obj = e if isinstance(e, dict) else {}
                 err_str = str(e).lower()
                 logger.warning("Fyers WS error: %s", e)
-                # Detect auth failures → reset WS so next subscribe re-inits with fresh token
-                if any(kw in err_str for kw in ("token", "expired", "unauthorized", "auth", "invalid")):
+                invalid_symbols = err_obj.get("invalid_symbols", []) if isinstance(err_obj, dict) else []
+                if invalid_symbols:
+                    self._mark_fyers_invalid_symbols(invalid_symbols)
+                    logger.warning(
+                        "Fyers WS rejected invalid symbols (%d): %s",
+                        len(invalid_symbols), invalid_symbols[:5],
+                    )
+
+                # Detect auth failures only. Invalid symbols are data issues, not auth.
+                code = str(err_obj.get("code", "")).strip() if isinstance(err_obj, dict) else ""
+                is_auth_error = self._is_fyers_auth_error(code, err_str, invalid_symbols)
+                if is_auth_error:
                     logger.warning("Fyers WS auth failure detected — resetting for re-init")
                     self._fyers_ws = None
                     self._fyers_ws_fail_time = time.monotonic()
@@ -523,6 +591,33 @@ class LiveTickService:
             logger.warning("Fyers WS init failed: %s", e)
             self._fyers_ws = None
             self._fyers_ws_fail_time = time.monotonic()
+
+    @staticmethod
+    def _is_fyers_auth_error(code: str, err_str: str, invalid_symbols: List[str]) -> bool:
+        """Return True only for genuine auth/session errors.
+
+        WS subscription validation errors (e.g. code -300 invalid symbol) must
+        not trigger auth-reset loops.
+        """
+        if invalid_symbols:
+            return False
+        code_s = str(code or "").strip()
+        if code_s in {"-300", "300"}:
+            return False
+        auth_codes = {"401", "403", "-401", "-403", "1101", "1102"}
+        if code_s in auth_codes:
+            return True
+        auth_keywords = (
+            "token expired",
+            "invalid token",
+            "unauthorized",
+            "authentication failed",
+            "auth failed",
+            "invalid auth",
+            "forbidden",
+        )
+        err_l = (err_str or "").lower()
+        return any(kw in err_l for kw in auth_keywords)
 
     def _on_fyers_message(self, msg: dict) -> None:
         """Handle incoming Fyers tick message."""
@@ -591,6 +686,11 @@ class LiveTickService:
             exchange_hint = parts[0].upper().strip()
             raw_symbol = parts[1]
         upper = raw_symbol.upper().replace(" ", "")
+        looks_derivative = bool(
+            _re.search(r'\d{3,}(CE|PE)', upper)
+            or _re.search(r'\d{1,2}[A-Z]{3}\d{2}(CE|PE)$', upper)
+            or _re.search(r'\d+FUT$', upper)
+        )
         # Indices
         _idx = {
             "NIFTY": "NSE:NIFTY50-INDEX",
@@ -613,7 +713,7 @@ class LiveTickService:
         # Skip DB lookup when caller already provided a valid exchange prefix (NSE/BSE/NFO/BFO).
         # The DB may store NIFTY/BANKNIFTY options under exchange="NFO" but Fyers WS requires "NSE:".
         # Trusting exchange_hint avoids the mismatch.
-        if exchange_hint not in ("NSE", "BSE", "NFO", "BFO"):
+        if exchange_hint not in ("NSE", "BSE", "NFO", "BFO") and not looks_derivative:
             try:
                 from broker.symbol_normalizer import resolve_symbol_for_broker
                 _, _, resolved = resolve_symbol_for_broker(
@@ -622,9 +722,28 @@ class LiveTickService:
                     "fyers",
                 )
                 if resolved and ":" in resolved:
-                    return resolved
+                    # For options/futures without explicit exchange hint, keep going
+                    # if we only got a generic NFO/BFO fallback; a richer partner-row
+                    # lookup may provide the broker-required NSE/BSE prefixed symbol.
+                    generic_deriv_fallback = (
+                        not exchange_hint
+                        and looks_derivative
+                        and resolved.upper().startswith(("NFO:", "BFO:"))
+                    )
+                    if not generic_deriv_fallback:
+                        return resolved
             except Exception:
                 pass
+        # Secondary DB fallback for low-coverage rows where normalized lookup may
+        # return a record with empty fyers_symbol (e.g. compact weekly option tsym).
+        try:
+            from db.symbols_db import resolve_broker_symbol
+            resolved = resolve_broker_symbol(raw_symbol, "fyers", exchange_hint or "NFO")
+            resolved_sym = str((resolved or {}).get("symbol") or "").strip()
+            if resolved_sym and ":" in resolved_sym:
+                return resolved_sym
+        except Exception:
+            pass
 
         # MCX commodities (plain name without CE/PE/FUT) — subscribe as MCX
         for kw in _MCX_KEYWORDS:
@@ -633,7 +752,7 @@ class LiveTickService:
 
         # Option symbols: contain CE or PE preceded by digits (e.g. NIFTY24APR22500CE, NIFTY2290030JUN26CE)
         import re
-        if re.search(r'\d{3,}(CE|PE)', upper):
+        if re.search(r'\d{3,}(CE|PE)', upper) or re.search(r'\d{1,2}[A-Z]{3}\d{2}(CE|PE)$', upper):
             # Detect MCX options by commodity keyword prefix
             for kw in _MCX_KEYWORDS:
                 if upper.startswith(kw):
@@ -642,21 +761,22 @@ class LiveTickService:
             # "NSE:NIFTY2642124600CE").  Fyers WS requires NSE: for NIFTY/BANKNIFTY options;
             # falling back unconditionally to NFO: causes "invalid_symbols" WS errors and
             # breaks live-tick delivery for option legs (PnL only updates every 30 s from SQLite).
-            ex = exchange_hint if exchange_hint in ("NSE", "BSE", "NFO", "BFO") else "NFO"
+            ex = _fyers_derivative_exchange_hint(upper, exchange_hint)
             return f"{ex}:{upper}"
         # Futures: end with FUT and contain digits (e.g. NIFTY24APRFUT)
         if re.search(r'\d+FUT$', upper):
             for kw in _MCX_KEYWORDS:
                 if upper.startswith(kw):
                     return f"MCX:{upper}"
-            ex = exchange_hint if exchange_hint in ("NSE", "BSE", "NFO", "BFO") else "NFO"
+            ex = _fyers_derivative_exchange_hint(upper, exchange_hint)
             return f"{ex}:{upper}"
         # Dated derivatives without explicit FUT suffix (e.g. GOLDPETAL30APR26)
         if re.search(r'\d{1,2}[A-Z]{3}\d{2}$', upper) and not re.search(r'(CE|PE)$', upper):
             for kw in _MCX_KEYWORDS:
                 if upper.startswith(kw):
                     return f"MCX:{upper}FUT"
-            return f"NFO:{upper}FUT"
+            ex = _fyers_derivative_exchange_hint(upper, exchange_hint)
+            return f"{ex}:{upper}FUT"
         if exchange_hint:
             if exchange_hint in ("NFO", "BFO", "MCX"):
                 return f"{exchange_hint}:{upper}"
