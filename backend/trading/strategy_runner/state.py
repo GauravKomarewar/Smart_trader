@@ -105,11 +105,13 @@ class LegState:
         """Broker contract quantity = lots * lot_size."""
         return self.qty * max(1, self.lot_size)
 
-    def close(self, price: Optional[float] = None):
-        """Close this leg, freeze exit_price and mark inactive."""
+    def close(self, price: Optional[float] = None, reason: str = ""):
+        """Close this leg, freeze exit_price, record exit reason, and mark inactive."""
         self.is_active = False
         self.exit_price = price if (price is not None and price > 0) else self.ltp
         self.exit_timestamp = datetime.now()
+        if reason:
+            self.exit_reason = reason
 
     @property
     def pnl(self) -> float:

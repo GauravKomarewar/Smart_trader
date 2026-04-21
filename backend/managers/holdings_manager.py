@@ -12,7 +12,7 @@ logger = logging.getLogger("smart_trader.mgr.holdings")
 
 class HoldingsManager(BaseManager):
     MANAGER_NAME = "holdings_manager"
-    REFRESH_INTERVAL = 1.0  # 1s refresh for fast UI consistency across pages
+    REFRESH_INTERVAL = 30.0  # 30s — holdings change rarely, avoids rate limiting
 
     def refresh_user(self, user_id: str, sessions: list):
         self._refresh_sessions_concurrent(user_id, sessions, self._refresh_session)

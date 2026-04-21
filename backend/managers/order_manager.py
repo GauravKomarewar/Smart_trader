@@ -19,7 +19,7 @@ _NON_TERMINAL = {"PENDING", "OPEN", "TRIGGER_PENDING"}
 
 class OrderManager(BaseManager):
     MANAGER_NAME = "order_manager"
-    REFRESH_INTERVAL = 1.0
+    REFRESH_INTERVAL = 5.0  # 5s refresh — reduces Fyers REST rate-limit pressure
 
     def refresh_user(self, user_id: str, sessions: list):
         self._refresh_sessions_concurrent(user_id, sessions, self._refresh_session)

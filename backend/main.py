@@ -301,6 +301,66 @@ async def on_startup():
     except Exception as exc:
         logger.warning("LiveTickService start failed (non-fatal): %s", exc)
 
+    # ── Background option-chain refresh for priority FNO underlyings ─────────
+    # Ensures BANKNIFTY, MCX, and other common symbols have fresh chains even
+    # when no strategy is running for them.  Uses a slow 5-minute interval to
+    # stay well within Fyers option-chain daily call budget.
+    try:
+        import threading
+        import time as _time
+        from datetime import time as _time_cls
+
+        # Priority symbols refreshed proactively; stocks are on-demand only
+        _BG_CHAIN_SYMBOLS = [
+            ("NFO", "NIFTY"),
+            ("NFO", "BANKNIFTY"),
+            ("NFO", "FINNIFTY"),
+            ("NFO", "MIDCPNIFTY"),
+            ("MCX", "CRUDEOIL"),
+            ("MCX", "GOLD"),
+            ("MCX", "NATURALGAS"),
+        ]
+        _BG_CHAIN_INTERVAL = 300  # 5 minutes between full rotation
+        _BG_CHAIN_STAGGER  = 8   # 8 s between individual symbol fetches
+
+        def _bg_chain_refresh_loop():
+            """Rotate through priority symbols and keep their chains fresh."""
+            # Initial stagger: wait 30 s after startup so broker sessions settle
+            _time.sleep(30)
+            _chain_logger = logger.getChild("bg_chain_refresh")
+            while True:
+                now_h = _time_cls(_time.localtime().tm_hour, _time.localtime().tm_min)
+                market_open  = _time_cls(9, 0)
+                market_close = _time_cls(16, 30)
+                if not (market_open <= now_h <= market_close):
+                    _time.sleep(60)  # outside market hours — sleep 1 min and recheck
+                    continue
+                try:
+                    from trading.utils.option_chain_fetcher import fetch_and_store_from_broker
+                    for exch, sym in _BG_CHAIN_SYMBOLS:
+                        try:
+                            fetch_and_store_from_broker(exch, sym)
+                            _chain_logger.debug("BG chain refreshed: %s:%s", exch, sym)
+                        except Exception as _err:
+                            _chain_logger.debug("BG chain %s:%s failed: %s", exch, sym, _err)
+                        _time.sleep(_BG_CHAIN_STAGGER)
+                except Exception as exc2:
+                    _chain_logger.warning("BG chain refresh error: %s", exc2)
+                _time.sleep(_BG_CHAIN_INTERVAL)
+
+        _bg_chain_thread = threading.Thread(
+            target=_bg_chain_refresh_loop,
+            name="bg-chain-refresh",
+            daemon=True,
+        )
+        _bg_chain_thread.start()
+        logger.info(
+            "Background option-chain refresh started — %d priority symbols, every %ds",
+            len(_BG_CHAIN_SYMBOLS), _BG_CHAIN_INTERVAL,
+        )
+    except Exception as exc:
+        logger.warning("Background option-chain refresh start failed (non-fatal): %s", exc)
+
 def _restore_broker_sessions():
     """
     Restore previously connected broker sessions from DB on startup.

@@ -28,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from db.database import get_db
@@ -516,6 +516,47 @@ async def available_symbols(payload: dict = Depends(current_user)):
     return result
 
 
+@router.get("/strategy/option-token-universe")
+async def option_token_universe(
+    symbol: str = Query(..., min_length=1),
+    exchange: str = Query("NFO"),
+    expiry: str = Query(""),
+    limit: int = Query(2000, ge=1, le=20000),
+    payload: dict = Depends(current_user),
+):
+    """
+    Return option contracts + broker token fields for one underlying.
+
+    This powers token-list preparation for intraday subscriptions.
+    """
+    try:
+        from db.symbols_db import get_option_contract_tokens
+
+        rows = get_option_contract_tokens(
+            symbol=symbol,
+            exchange=exchange,
+            expiry=expiry or None,
+            limit=limit,
+        )
+        return {
+            "symbol": str(symbol).upper(),
+            "exchange": str(exchange).upper(),
+            "expiry": expiry,
+            "count": len(rows),
+            "rows": rows,
+        }
+    except Exception as exc:
+        logger.warning("option_token_universe failed for %s/%s: %s", symbol, exchange, exc)
+        return {
+            "symbol": str(symbol).upper(),
+            "exchange": str(exchange).upper(),
+            "expiry": expiry,
+            "count": 0,
+            "rows": [],
+            "error": str(exc),
+        }
+
+
 @router.get("/strategy/chain-status")
 async def chain_status(
     symbol: str,
@@ -909,7 +950,7 @@ def _strategy_thread(
         _backoff = 1
         tick_count = 0
         _last_chain_refresh = 0.0
-        _CHAIN_REFRESH_INTERVAL = 5.0
+        _CHAIN_REFRESH_INTERVAL = 60.0  # 60s — Fyers OC API has a daily call budget; 5s was exhausting it
         while not stop_evt.is_set():
             try:
                 now_ts = __import__('time').time()
@@ -924,6 +965,14 @@ def _strategy_thread(
                 executor._tick()
                 tick_count += 1
                 _backoff = 1
+
+                if getattr(executor, "_request_stop", False):
+                    logger.info(
+                        "AUTO_STOP | %s | exit cutoff crossed and all legs are closed",
+                        run_id,
+                    )
+                    stop_evt.set()
+                    continue
 
                 if tick_count % 60 == 0:
                     state = executor.state

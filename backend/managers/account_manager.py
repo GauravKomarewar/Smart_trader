@@ -12,7 +12,7 @@ logger = logging.getLogger("smart_trader.mgr.account")
 
 class AccountManager(BaseManager):
     MANAGER_NAME = "account_manager"
-    REFRESH_INTERVAL = 1.0
+    REFRESH_INTERVAL = 30.0  # 30s — funds change rarely, avoids rate limiting
 
     def refresh_user(self, user_id: str, sessions: list):
         self._refresh_sessions_concurrent(user_id, sessions, self._refresh_session)
