@@ -81,12 +81,45 @@ _OAUTH_LOGIN_URL_TPL = (
 )
 _GECKODRIVER_PATH = "/usr/local/bin/geckodriver"
 
-# Firefox binary — prefer standard path, fall back to snap
-_FIREFOX_BINARY = (
-    "/usr/lib/firefox/firefox"
-    if os.path.isfile("/usr/lib/firefox/firefox")
-    else "/snap/firefox/current/usr/lib/firefox/firefox"
-)
+
+def _resolve_firefox_binary() -> str:
+    """Resolve a runnable Firefox binary path for Selenium."""
+    env_path = os.getenv("FIREFOX_BINARY", "").strip()
+    candidates = [
+        env_path,
+        "/usr/lib/firefox/firefox",
+        "/snap/firefox/current/usr/lib/firefox/firefox",
+        "/usr/bin/firefox",
+        shutil.which("firefox") or "",
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+        except Exception:
+            continue
+    raise RuntimeError(
+        "Firefox binary not found. Set FIREFOX_BINARY to a valid executable path."
+    )
+
+
+def _resolve_geckodriver_path() -> str:
+    """Resolve geckodriver path, allowing env override."""
+    env_path = os.getenv("GECKODRIVER_PATH", "").strip()
+    candidates = [env_path, _GECKODRIVER_PATH, shutil.which("geckodriver") or ""]
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+        except Exception:
+            continue
+    raise RuntimeError(
+        "geckodriver not found. Set GECKODRIVER_PATH to a valid executable path."
+    )
 
 
 # ── Credential helpers ───────────────────────────────────────────────────────
@@ -119,16 +152,18 @@ def _build_driver():
     options.add_argument("--headless")
     options.add_argument("--width=1920")
     options.add_argument("--height=1080")
-    options.binary_location = _FIREFOX_BINARY  # type: ignore[attr-defined]
+    firefox_binary = _resolve_firefox_binary()
+    geckodriver_path = _resolve_geckodriver_path()
+    options.binary_location = firefox_binary  # type: ignore[attr-defined]
 
     options.set_preference("browser.download.folderList", 2)
     options.set_preference("profile", profile_dir)
 
-    service = _FirefoxService(executable_path=_GECKODRIVER_PATH)  # type: ignore[call-arg]
+    service = _FirefoxService(executable_path=geckodriver_path)  # type: ignore[call-arg]
     try:
         driver = _webdriver.Firefox(service=service, options=options)  # type: ignore[attr-defined]
         setattr(driver, "_tmp_profile_dir", profile_dir)
-        logger.info("Firefox launched in headless mode")
+        logger.info("Firefox launched in headless mode: binary=%s geckodriver=%s", firefox_binary, geckodriver_path)
         return driver
     except Exception as exc:
         shutil.rmtree(profile_dir, ignore_errors=True)

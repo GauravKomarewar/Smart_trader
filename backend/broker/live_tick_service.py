@@ -602,21 +602,23 @@ class LiveTickService:
         if invalid_symbols:
             return False
         code_s = str(code or "").strip()
-        if code_s in {"-300", "300"}:
+        err_l = (err_str or "").lower()
+        if code_s in {"-300", "300"} and "valid token" not in err_l:
             return False
         auth_codes = {"401", "403", "-401", "-403", "1101", "1102"}
         if code_s in auth_codes:
             return True
         auth_keywords = (
             "token expired",
+            "token is expired",
             "invalid token",
+            "please provide valid token",
             "unauthorized",
             "authentication failed",
             "auth failed",
             "invalid auth",
             "forbidden",
         )
-        err_l = (err_str or "").lower()
         return any(kw in err_l for kw in auth_keywords)
 
     def _on_fyers_message(self, msg: dict) -> None:
