@@ -1109,8 +1109,9 @@ class StrategyExecutor:
         else:
             logger.warning("Entry produced 0 legs — NOT marking as entered")
 
-    def _execute_exit(self, action: str):
-        # NEW: Handle partial_lots exit action
+    def _execute_exit(self, action: str, reason: str = ""):
+        """Execute exit action, closing active legs and recording exit reason."""
+        # Handle partial_lots exit action
         if action.startswith("partial_lots"):
             lots_to_close = self.exit_engine.exit_config.get("profit_target", {}).get("lots", 1)
             active = [leg for leg in self.state.legs.values() if leg.is_active]
@@ -1121,7 +1122,7 @@ class StrategyExecutor:
                 self._place_exit_order(leg)
                 leg.qty -= close_qty
                 if leg.qty == 0:
-                    leg.close()
+                    leg.close(reason=reason or action)
                 self.state.cumulative_daily_pnl += leg.pnl
             else:
                 logger.warning("partial_lots: no active legs to close")
@@ -1142,155 +1143,73 @@ class StrategyExecutor:
                         self._place_exit_order(leg)
                         leg.qty -= close_qty
                         if leg.qty <= 0:
-                            leg.close()
+                            leg.close(reason=reason or action)
                 logger.info("Profit step closed 25% of position")
 
         elif action.startswith("exit_all") or action in ("combined_conditions", "time_exit"):
-            # ✅ L2-FIX: Only call leg.close() when the broker accepted the exit order.
+            # Only call leg.close() when the broker accepted the exit order.
             # Capture PnL per-leg before close() freezes exit_price.
+            exit_reason_str = reason or action
             accepted_pnl = 0.0
             for leg in self.state.legs.values():
                 if leg.is_active:
                     leg_pnl = leg.pnl  # snapshot before close() changes pnl computation
-                    def _execute_exit(self, action: str, reason: str = ""):
-                        """Execute exit action, closing active legs and recording exit reason."""
-                        # NEW: Handle partial_lots exit action
-                        if action.startswith("partial_lots"):
-                            lots_to_close = self.exit_engine.exit_config.get("profit_target", {}).get("lots", 1)
-                            active = [leg for leg in self.state.legs.values() if leg.is_active]
-                            if active:
-                                leg = active[0]
-                                close_qty = min(lots_to_close, leg.qty)
-                                logger.info(f"Partial close: closing {close_qty} lots of {leg.tag}")
-                                self._place_exit_order(leg)
-                                leg.qty -= close_qty
-                                if leg.qty == 0:
-                                    leg.close(reason=reason or action)
-                                self.state.cumulative_daily_pnl += leg.pnl
-                            else:
-                                logger.warning("partial_lots: no active legs to close")
-
-                        elif action.startswith("profit_step_"):
-                            step_action = action.replace("profit_step_", "")
-                            if step_action == "adj":
-                                logger.info("Profit step triggered adjustment (will be handled in next adjustment cycle)")
-                            elif step_action == "trail":
-                                current_trail = self.exit_engine.exit_config.get("trailing", {}).get("trail_amount", 0)
-                                if current_trail > 0:
-                                    self.state.trailing_stop_level = self.state.peak_pnl - current_trail * 0.75
-                                logger.info("Profit step tightened trailing stop")
-                            elif step_action == "partial":
-                                for leg in self.state.legs.values():
-                                    if leg.is_active and leg.qty > 0:
-                                        close_qty = max(1, int(leg.qty * 0.25))
-                                        self._place_exit_order(leg)
-                                        leg.qty -= close_qty
-                                        if leg.qty <= 0:
-                                            leg.close(reason=reason or action)
-                                logger.info("Profit step closed 25% of position")
-
-                        elif action.startswith("exit_all") or action in ("combined_conditions", "time_exit"):
-                            # ✅ L2-FIX: Only call leg.close() when the broker accepted the exit order.
-                            # Capture PnL per-leg before close() freezes exit_price.
-                            exit_reason_str = reason or action
-                            accepted_pnl = 0.0
-                            for leg in self.state.legs.values():
-                                if leg.is_active:
-                                    leg_pnl = leg.pnl  # snapshot before close() changes pnl computation
-                                    accepted = self._place_exit_order(leg)
-                                    if accepted:
-                                        leg.close(reason=exit_reason_str)
-                                        accepted_pnl += leg_pnl
-                            self.state.cumulative_daily_pnl += accepted_pnl
-                            # Block re-entry only if ALL legs were successfully closed
-                            if not any(leg.is_active for leg in self.state.legs.values()):
-                                sl_cfg = self.exit_engine.exit_config.get("stop_loss", {})
-                                if sl_cfg.get("allow_reentry"):
-                                    self.state.entered_today = False
-                                else:
-                                    self.state.entered_today = True
-                            else:
-                                logger.critical(
-                                    "PARTIAL_EXIT | One or more exit orders rejected by broker \u2014 "
-                                    "remaining active legs will retry on next tick"
-                                )
-
-                        # NEW: Handle trail/lock_trail profit target actions
-                        elif action == "profit_target_trail":
-                            self.state.trailing_stop_active = True
-                            trail_amt = self.exit_engine.exit_config.get("trailing", {}).get("trail_amount", 0)
-                            self.state.trailing_stop_level = self.state.peak_pnl - trail_amt
-                            logger.info("Trailing stop activated by profit target")
-
-                        elif action.startswith("leg_rule_"):
-                            rule = self.exit_engine.last_triggered_leg_rule
-                            if rule:
-                                leg_action = rule.get("action", "close_leg")
-                                ref = rule.get("exit_leg_ref")
-                                group = rule.get("group")
-                                leg_exit_reason = reason or action
-                                if leg_action == "close_leg":
-                                    targets = self._resolve_exit_targets(ref, group)
-                                    for leg in targets:
-                                        leg_pnl = leg.pnl
-                                        if self._place_exit_order(leg):
-                                            leg.close(reason=leg_exit_reason)
-                                            self.state.cumulative_daily_pnl += leg_pnl
-                                elif leg_action == "close_all":
-                                    accepted_pnl = 0.0
-                                    for leg in self.state.legs.values():
-                                        if leg.is_active:
-                                            leg_pnl = leg.pnl
-                                            if self._place_exit_order(leg):
-                                                leg.close(reason=leg_exit_reason)
-                                                accepted_pnl += leg_pnl
-                                    self.state.cumulative_daily_pnl += accepted_pnl
-                                else:
-                                    logger.warning(f"Unhandled leg_rule action: {leg_action}")
-                            else:
-                                logger.warning("leg_rule exit triggered but no rule context available")
-
-                        elif action.startswith("partial_"):
-                            # Handle partial exits (simplified) - could update state if needed
-                            logger.info(f"Partial exit triggered: {action}")
-                            # Actual execution with broker should be overridden in subclass
-                        else:
-                            logger.warning(f"Unhandled exit action: {action}")
-                continue
-            # For option legs, strike and option_type must be present
-            assert leg.strike is not None, f"Option leg {leg.tag} has no strike"
-            assert leg.option_type is not None, f"Option leg {leg.tag} has no option_type"
-
-            try:
-                new_expiry = self.market.get_next_expiry(leg.expiry, "weekly_next")
-                opt_data = self.market.get_option_at_strike(leg.strike, leg.option_type, new_expiry)
-                if not opt_data:
-                    logger.warning(f"Cannot roll {leg.tag}: no data for strike {leg.strike} at {new_expiry}")
-                    continue
-                # Create new leg (pending)
-                new_tag = f"{leg.tag}_ROLLED"
-                new_leg = LegState(
-                    tag=new_tag,
-                    symbol=leg.symbol,
-                    instrument=leg.instrument,
-                    option_type=leg.option_type,
-                    strike=leg.strike,
-                    expiry=new_expiry,
-                    side=leg.side,
-                    qty=leg.qty,
-                    entry_price=opt_data["ltp"],
-                    ltp=opt_data["ltp"],
-                    trading_symbol=self._canonical_trading_symbol(opt_data.get("trading_symbol", "")),
+                    accepted = self._place_exit_order(leg)
+                    if accepted:
+                        leg.close(reason=exit_reason_str)
+                        accepted_pnl += leg_pnl
+            self.state.cumulative_daily_pnl += accepted_pnl
+            # Block re-entry only if ALL legs were successfully closed
+            if not any(leg.is_active for leg in self.state.legs.values()):
+                sl_cfg = self.exit_engine.exit_config.get("stop_loss", {})
+                if sl_cfg.get("allow_reentry"):
+                    self.state.entered_today = False
+                else:
+                    self.state.entered_today = True
+            else:
+                logger.critical(
+                    "PARTIAL_EXIT | One or more exit orders rejected by broker — "
+                    "remaining active legs will retry on next tick"
                 )
-                new_leg.order_status = "PENDING"
-                new_leg.order_placed_at = datetime.now()
-                self.state.legs[new_tag] = new_leg
-                new_legs.append(new_leg)
-                # Deactivate old leg
-                leg.close()
-            except Exception as e:
-                logger.error(f"Roll failed for {leg.tag}: {e}")
-        logger.info(f"Rolled {len(new_legs)} legs to next expiry")
+
+        elif action == "profit_target_trail":
+            self.state.trailing_stop_active = True
+            trail_amt = self.exit_engine.exit_config.get("trailing", {}).get("trail_amount", 0)
+            self.state.trailing_stop_level = self.state.peak_pnl - trail_amt
+            logger.info("Trailing stop activated by profit target")
+
+        elif action.startswith("leg_rule_"):
+            rule = self.exit_engine.last_triggered_leg_rule
+            if rule:
+                leg_action = rule.get("action", "close_leg")
+                ref = rule.get("exit_leg_ref")
+                group = rule.get("group")
+                leg_exit_reason = reason or action
+                if leg_action == "close_leg":
+                    targets = self._resolve_exit_targets(ref, group)
+                    for leg in targets:
+                        leg_pnl = leg.pnl
+                        if self._place_exit_order(leg):
+                            leg.close(reason=leg_exit_reason)
+                            self.state.cumulative_daily_pnl += leg_pnl
+                elif leg_action == "close_all":
+                    accepted_pnl = 0.0
+                    for leg in self.state.legs.values():
+                        if leg.is_active:
+                            leg_pnl = leg.pnl
+                            if self._place_exit_order(leg):
+                                leg.close(reason=leg_exit_reason)
+                                accepted_pnl += leg_pnl
+                    self.state.cumulative_daily_pnl += accepted_pnl
+                else:
+                    logger.warning(f"Unhandled leg_rule action: {leg_action}")
+            else:
+                logger.warning("leg_rule exit triggered but no rule context available")
+
+        elif action.startswith("partial_"):
+            logger.info(f"Partial exit triggered: {action}")
+        else:
+            logger.warning(f"Unhandled exit action: {action}")
 
     def _save_state(self):
         StatePersistence.save(self.state, self.state_path)
