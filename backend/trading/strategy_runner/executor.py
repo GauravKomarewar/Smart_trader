@@ -684,7 +684,7 @@ class StrategyExecutor:
                             eod_str,
                         )
                         self._execute_exit("exit_all", reason=eod_reason)
-                            self.state.exit_reason = eod_reason
+                        self.state.exit_reason = eod_reason
                         self._log_event("EXIT", reason=eod_reason, details={"trigger": "eod_hard_exit", "eod_time": eod_str})
                         self._save_state()
                         self._maybe_request_auto_stop(now, eod_reason)
