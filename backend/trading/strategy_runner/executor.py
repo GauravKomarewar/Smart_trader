@@ -1211,6 +1211,68 @@ class StrategyExecutor:
         else:
             logger.warning(f"Unhandled exit action: {action}")
 
+    def _check_expiry_day_action(self, now: datetime):
+        """Handle expiry_day_action from exit config."""
+        exit_cfg = self.config.get("exit", {}).get("time", {})
+        action = exit_cfg.get("expiry_day_action", "none")
+        if action == "none" or not self.state.is_expiry_day:
+            return
+
+        if action == "time":
+            exit_time_str = exit_cfg.get("expiry_day_time")
+            if exit_time_str:
+                try:
+                    exit_t = datetime.strptime(exit_time_str, "%H:%M").time()
+                    if now.time() >= exit_t:
+                        logger.info("Expiry day time exit triggered")
+                        self._execute_exit("exit_all", reason="expiry_day_time")
+                except ValueError:
+                    pass
+        elif action == "open":
+            if self.state.any_leg_active:
+                logger.info("Expiry day open exit triggered")
+                self._execute_exit("exit_all", reason="expiry_day_open")
+        elif action == "roll":
+            self._roll_all_positions_to_next_expiry()
+
+    def _roll_all_positions_to_next_expiry(self):
+        """Roll every active leg to the next expiry (same strike, same side)."""
+        new_legs = []
+        for leg in list(self.state.legs.values()):
+            if not leg.is_active or leg.instrument != InstrumentType.OPT:
+                continue
+            assert leg.strike is not None, f"Option leg {leg.tag} has no strike"
+            assert leg.option_type is not None, f"Option leg {leg.tag} has no option_type"
+
+            try:
+                new_expiry = self.market.get_next_expiry(leg.expiry, "weekly_next")
+                opt_data = self.market.get_option_at_strike(leg.strike, leg.option_type, new_expiry)
+                if not opt_data:
+                    logger.warning(f"Cannot roll {leg.tag}: no data for strike {leg.strike} at {new_expiry}")
+                    continue
+                new_tag = f"{leg.tag}_ROLLED"
+                new_leg = LegState(
+                    tag=new_tag,
+                    symbol=leg.symbol,
+                    instrument=leg.instrument,
+                    option_type=leg.option_type,
+                    strike=leg.strike,
+                    expiry=new_expiry,
+                    side=leg.side,
+                    qty=leg.qty,
+                    entry_price=opt_data["ltp"],
+                    ltp=opt_data["ltp"],
+                    trading_symbol=self._canonical_trading_symbol(opt_data.get("trading_symbol", "")),
+                )
+                new_leg.order_status = "PENDING"
+                new_leg.order_placed_at = datetime.now()
+                self.state.legs[new_tag] = new_leg
+                new_legs.append(new_leg)
+                leg.close()
+            except Exception as e:
+                logger.error(f"Roll failed for {leg.tag}: {e}")
+        logger.info(f"Rolled {len(new_legs)} legs to next expiry")
+
     def _save_state(self):
         StatePersistence.save(self.state, self.state_path)
         # Also persist to DB if available
