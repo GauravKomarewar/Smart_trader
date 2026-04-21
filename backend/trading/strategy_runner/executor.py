@@ -725,7 +725,7 @@ class StrategyExecutor:
                 return
             logger.info(f"Exit triggered: {exit_action}")
             self._execute_exit(exit_action, reason=exit_reason)
-                        self.state.exit_reason = exit_reason
+            self.state.exit_reason = exit_reason
             # Map to specific event_type for frontend colour-coding
             if "stop_loss" in exit_reason or "trailing_stop" in exit_reason:
                 ev_type = "SL_HIT"
