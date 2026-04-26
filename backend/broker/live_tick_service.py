@@ -54,6 +54,18 @@ _MCX_KEYWORDS = {"GOLD", "SILVER", "CRUDE", "NATURALGAS", "COPPER", "ZINC", "LEA
 _FYERS_INDEX_NSE_PREFIXES = ("NIFTY", "BANKNIFTY", "NIFTYBANK", "FINNIFTY", "MIDCPNIFTY")
 _FYERS_INDEX_BSE_PREFIXES = ("SENSEX", "BANKEX")
 
+_KNOWN_DERIVATIVE_UNDERLYINGS = (
+    "MIDCPNIFTY",
+    "NIFTYNXT50",
+    "BANKNIFTY",
+    "FINNIFTY",
+    "SENSEX50",
+    "NIFTYBANK",
+    "SENSEX",
+    "BANKEX",
+    "NIFTY",
+)
+
 
 def _detect_exchange_from_symbol(sym: str) -> str:
     """Detect exchange from symbol pattern. Used as fallback when ScriptMaster lookup fails."""
@@ -112,6 +124,30 @@ def _fyers_derivative_exchange_hint(raw_symbol: str, exchange_hint: str) -> str:
     if hint in ("NSE", "BSE", "NFO", "BFO", "MCX"):
         return hint
     return "NFO"
+
+
+def _derivative_underlying_hint(symbol: str) -> str:
+    """Best-effort underlying extraction from compact derivative symbols."""
+    raw = str(symbol or "").upper().strip()
+    if not raw:
+        return ""
+    if ":" in raw:
+        raw = raw.split(":", 1)[1].strip()
+    compact = raw.replace(" ", "")
+
+    for family in _KNOWN_DERIVATIVE_UNDERLYINGS:
+        if compact.startswith(family):
+            return family
+
+    m = _re.match(r"^([A-Z0-9]+?)(\d{1,2}[A-Z]{3}\d{2}.*)$", compact)
+    if m:
+        return m.group(1)
+
+    m = _re.match(r"^([A-Z0-9]+?)(\d{5,}.*)$", compact)
+    if m:
+        return m.group(1)
+
+    return ""
 
 
 # ── Tick schema ────────────────────────────────────────────────────────────────
@@ -743,7 +779,19 @@ class LiveTickService:
             resolved = resolve_broker_symbol(raw_symbol, "fyers", exchange_hint or "NFO")
             resolved_sym = str((resolved or {}).get("symbol") or "").strip()
             if resolved_sym and ":" in resolved_sym:
-                return resolved_sym
+                if looks_derivative:
+                    src_underlying = _derivative_underlying_hint(raw_symbol)
+                    dst_underlying = _derivative_underlying_hint(resolved_sym)
+                    if src_underlying and dst_underlying and src_underlying != dst_underlying:
+                        logger.warning(
+                            "Ignoring mismatched Fyers fallback symbol: input=%s resolved=%s",
+                            raw_symbol,
+                            resolved_sym,
+                        )
+                    else:
+                        return resolved_sym
+                else:
+                    return resolved_sym
         except Exception:
             pass
 

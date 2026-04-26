@@ -24,6 +24,25 @@ def test_to_fyers_sym_keeps_mcx_for_commodity_option():
     assert sym == "MCX:GOLDPETAL30APR26CE"
 
 
+def test_to_fyers_sym_ignores_cross_underlying_db_fallback(monkeypatch):
+    from db import symbols_db as sdb
+
+    monkeypatch.setattr(
+        sdb,
+        "resolve_broker_symbol",
+        lambda *_args, **_kwargs: {
+            "symbol": "NSE:NIFTYNXT5026APR56300PE",
+            "token": "",
+            "exchange": "NSE",
+            "tick_size": "0.05",
+            "lot_size": "25",
+        },
+    )
+
+    sym = LiveTickService._to_fyers_sym("BANKNIFTY26APR56300PE")
+    assert sym == "NSE:BANKNIFTY26APR56300PE"
+
+
 def test_fyers_auth_error_classifier_rejects_invalid_symbol_error():
     assert not LiveTickService._is_fyers_auth_error(
         code="-300",

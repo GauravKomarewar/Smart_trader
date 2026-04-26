@@ -56,6 +56,54 @@ _STRIKE_LIKE_RE = re.compile(r"\d{5,}")
 def _extract_base_symbol(symbol: str) -> str:
     """Strip broker-specific expiry/strike suffix to get the underlying base name."""
     return _BROKER_SUFFIX_RE.sub("", symbol).strip()
+
+
+_KNOWN_DERIVATIVE_UNDERLYINGS = (
+    "MIDCPNIFTY",
+    "NIFTYNXT50",
+    "BANKNIFTY",
+    "FINNIFTY",
+    "SENSEX50",
+    "NIFTYBANK",
+    "SENSEX",
+    "BANKEX",
+    "NIFTY",
+)
+
+
+def _extract_underlying_hint(trading_symbol: str) -> str:
+    """Best-effort extraction of underlying base from a derivative-like symbol."""
+    raw = _clean_text(trading_symbol)
+    if not raw:
+        return ""
+    if ":" in raw:
+        raw = raw.split(":", 1)[1].strip()
+
+    compact = raw.replace(" ", "")
+
+    # Prefer explicit known families to preserve names that contain digits.
+    for family in _KNOWN_DERIVATIVE_UNDERLYINGS:
+        if compact.startswith(family):
+            return family
+
+    # Hyphenated long form like "NIFTY-APR2026-23900-CE".
+    if "-" in compact:
+        head = compact.split("-", 1)[0].strip()
+        if head:
+            return head
+
+    # Generic compact derivatives like "RELIANCE26APR2500CE".
+    m = re.match(r"^([A-Z0-9]+?)(\d{1,2}[A-Z]{3}\d{2}.*)$", compact)
+    if m:
+        return m.group(1)
+
+    # Weekly/compact style like "NIFTY2642124500CE".
+    m = re.match(r"^([A-Z0-9]+?)(\d{5,}.*)$", compact)
+    if m:
+        return m.group(1)
+
+    # Fallback to broker-style suffix stripping.
+    return _clean_text(_extract_base_symbol(raw))
 from core.daily_refresh import IST, current_refresh_cycle_start, next_refresh_time
 from db.trading_db import get_trading_conn
 
@@ -1312,6 +1360,7 @@ def resolve_broker_symbol(
 
         # ── Step 1: primary lookup ────────────────────────────────────────────
         rec = lookup_by_trading_symbol(trading_symbol, exchange)
+        expected_underlying = ""
         if rec:
             broker_sym = (rec.get(field) or "").strip()
             if broker_sym:
@@ -1327,30 +1376,49 @@ def resolve_broker_symbol(
             db_strike  = rec.get("strike")
             db_opttype = rec.get("option_type")
             db_exch    = (rec.get("exchange") or exchange or "").upper()
+            expected_underlying = _clean_text(
+                rec.get("normalized_underlying")
+                or rec.get("symbol")
+                or ""
+            )
         else:
             # No primary row found — try to parse components from the symbol string itself
             db_expiry = db_strike = db_opttype = None
             db_exch   = (exchange or "").upper()
 
+        if not expected_underlying:
+            expected_underlying = _extract_underlying_hint(trading_symbol)
+
         # ── Step 2: partner-row fallback (same expiry/strike/option_type) ─────
         if db_expiry and db_strike is not None and db_opttype and db_exch:
+            where_clause = (
+                "WHERE expiry = %s "
+                "AND ABS(strike - %s) < 0.001 "
+                "AND option_type = %s "
+                "AND exchange = %s "
+                f"AND {field} != ''"
+            )
+            params = [str(db_expiry), float(db_strike), db_opttype, db_exch]
+            if expected_underlying:
+                where_clause += " AND normalized_underlying = %s"
+                params.append(expected_underlying)
+
             cur.execute(
                 f"""
                 SELECT {field}, {token_field + ',' if token_field else ''}
-                       exchange, tick_size, lot_size
+                       exchange, tick_size, lot_size, normalized_underlying
                 FROM symbols
-                WHERE expiry     = %s
-                  AND ABS(strike - %s) < 0.001
-                  AND option_type = %s
-                  AND exchange    = %s
-                  AND {field} != ''
+                {where_clause}
                 ORDER BY broker_coverage DESC
                 LIMIT 1
                 """,
-                (str(db_expiry), float(db_strike), db_opttype, db_exch),
+                params,
             )
             row = cur.fetchone()
             if row:
+                row_underlying = _clean_text(row.get("normalized_underlying") or "")
+                if expected_underlying and row_underlying and row_underlying != expected_underlying:
+                    return empty
                 return {
                     "symbol":    (row[field] or "").strip(),
                     "token":     (row[token_field] or "").strip() if token_field else "",
