@@ -58,6 +58,29 @@ def _extract_base_symbol(symbol: str) -> str:
     return _BROKER_SUFFIX_RE.sub("", symbol).strip()
 
 
+def _clean_underlying(raw: str) -> str:
+    """Return a clean base symbol: NIFTY, RELIANCE, GOLDPETAL, EURINR, etc.
+
+    Handles MCX / CDS / garbled broker names by:
+    - Stripping broker suffixes like -EQ, -BE, -BZ, -INDEX
+    - Removing trailing digits (CRUDEOIL1 → CRUDEOIL)
+    - Keeping only the first word when spaces appear (MCX long-form names)
+    """
+    if not raw:
+        return ""
+    val = str(raw).strip().upper()
+    # Remove broker suffixes like -EQ, -BE, -BZ, -INDEX, etc.
+    val = re.sub(r"-[A-Z]{2,6}$", "", val)
+    # If the name contains spaces (MCX long-form: "GOLDPETAL FUT 30 APR 26"), keep only the first word
+    if " " in val:
+        val = val.split()[0]
+    # Remove broker contract-month suffix (Shoonya MCX/CDS): ALUMINI26APR → ALUMINI
+    val = re.sub(r"\d{1,2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)$", "", val)
+    # Remove trailing digits that sometimes appear (CRUDEOIL1 → CRUDEOIL)
+    val = re.sub(r"\d+$", "", val)
+    return val
+
+
 _KNOWN_DERIVATIVE_UNDERLYINGS = (
     "MIDCPNIFTY",
     "NIFTYNXT50",
@@ -228,27 +251,48 @@ CREATE TABLE IF NOT EXISTS symbols (
     tick_size           REAL NOT NULL DEFAULT 0.05,
     isin                TEXT NOT NULL DEFAULT '',
     expiry              DATE,                   -- NULL for equity / index
+    expiry_epoch        BIGINT NOT NULL DEFAULT 0, -- Fyers ExpiryEpoch (seconds)
     strike              REAL NOT NULL DEFAULT 0,
     option_type         TEXT NOT NULL DEFAULT '', -- CE, PE, or ''
     description         TEXT NOT NULL DEFAULT '',
+    segment             TEXT NOT NULL DEFAULT '', -- Kite/Upstox/Groww segment (e.g. NFO-FUT)
+    series              TEXT NOT NULL DEFAULT '', -- Dhan/Groww series (EQ, BE, etc.)
+    freeze_quantity     INTEGER NOT NULL DEFAULT 0,
+    buy_allowed         BOOLEAN NOT NULL DEFAULT TRUE,
+    sell_allowed        BOOLEAN NOT NULL DEFAULT TRUE,
+    raw_exchange        TEXT NOT NULL DEFAULT '', -- original exchange label pre-canonical mapping
+    underlying_exchange_token TEXT NOT NULL DEFAULT '', -- Groww underlying exchange token
+
     normalized_underlying TEXT NOT NULL DEFAULT '',
     normalized_trading_symbol TEXT NOT NULL DEFAULT '',
+    smart_trader_name   TEXT NOT NULL DEFAULT '', -- unified display key: EXCHANGE:TRADING_SYMBOL
     identity_key        TEXT NOT NULL DEFAULT '',
+    unique_key          TEXT NOT NULL DEFAULT '',
     row_key             TEXT NOT NULL DEFAULT '',
     broker_coverage     INTEGER NOT NULL DEFAULT 0,
 
     /* ── Broker-specific identifiers ──────────────────────── */
     fyers_symbol        TEXT NOT NULL DEFAULT '',  -- NSE:RELIANCE-EQ
     fyers_token         TEXT NOT NULL DEFAULT '',  -- Fyers FyToken (long unique)
+    fyers_segment_key   TEXT NOT NULL DEFAULT '',  -- Fyers SegmentKey
     shoonya_token       TEXT NOT NULL DEFAULT '',  -- Shoonya exchange token
     shoonya_tsym        TEXT NOT NULL DEFAULT '',  -- Shoonya TradingSymbol
     angelone_token      TEXT NOT NULL DEFAULT '',
-    angelone_tsym       TEXT NOT NULL DEFAULT '',
+    angelone_tsym       TEXT NOT NULL DEFAULT '',  -- AngelOne Symbol/TradingSymbol
+    angelone_exch_seg   TEXT NOT NULL DEFAULT '',  -- AngelOne ExchSeg (NSE, NFO...)
+    angelone_name       TEXT NOT NULL DEFAULT '',  -- AngelOne full instrument name
     dhan_security_id    TEXT NOT NULL DEFAULT '',
+    dhan_display_name   TEXT NOT NULL DEFAULT '',  -- Dhan custom/display symbol
+    dhan_exch_id        TEXT NOT NULL DEFAULT '',  -- Dhan exchange ID (NSE, NFO...)
+    dhan_instrument_name TEXT NOT NULL DEFAULT '', -- Dhan instrument name label
     kite_instrument_token TEXT NOT NULL DEFAULT '',
     kite_exchange_token TEXT NOT NULL DEFAULT '',
+    kite_name           TEXT NOT NULL DEFAULT '',  -- Kite instrument name
     upstox_ikey         TEXT NOT NULL DEFAULT '',  -- Upstox instrument_key
+    upstox_short_name   TEXT NOT NULL DEFAULT '',  -- Upstox ShortName
+    upstox_instrument_type TEXT NOT NULL DEFAULT '', -- Upstox InstrumentType label
     groww_token         TEXT NOT NULL DEFAULT '',
+    groww_symbol        TEXT NOT NULL DEFAULT '',  -- Groww display symbol (groww_symbol column)
 
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -278,14 +322,41 @@ def init_symbols_schema() -> None:
     try:
         cur = conn.cursor()
         cur.execute(_CREATE_SYMBOLS)
+        # Core derived columns
         cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS normalized_underlying TEXT NOT NULL DEFAULT ''")
         cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS normalized_trading_symbol TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS smart_trader_name TEXT NOT NULL DEFAULT ''")
         cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS identity_key TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS unique_key TEXT NOT NULL DEFAULT ''")
         cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS row_key TEXT NOT NULL DEFAULT ''")
         cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS broker_coverage INTEGER NOT NULL DEFAULT 0")
+        # Extended instrument columns
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS expiry_epoch BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS segment TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS series TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS freeze_quantity INTEGER NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS buy_allowed BOOLEAN NOT NULL DEFAULT TRUE")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS sell_allowed BOOLEAN NOT NULL DEFAULT TRUE")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS raw_exchange TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS underlying_exchange_token TEXT NOT NULL DEFAULT ''")
+        # Extended broker-specific columns
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS fyers_segment_key TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS angelone_exch_seg TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS angelone_name TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS dhan_display_name TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS dhan_exch_id TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS dhan_instrument_name TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS kite_name TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS upstox_short_name TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS upstox_instrument_type TEXT NOT NULL DEFAULT ''")
+        cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS groww_symbol TEXT NOT NULL DEFAULT ''")
+        # Indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_norm_trading ON symbols(exchange, normalized_trading_symbol)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_identity_key ON symbols(identity_key)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_unique_key ON symbols(unique_key)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_row_key ON symbols(row_key)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_smart_trader_name ON symbols(smart_trader_name)")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_sym_unique_key_nonempty ON symbols(unique_key) WHERE unique_key <> ''")
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_sym_row_key_nonempty ON symbols(row_key) WHERE row_key <> ''")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_shoonya_tsym ON symbols(shoonya_tsym) WHERE shoonya_tsym <> ''")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sym_angelone_tsym ON symbols(angelone_tsym) WHERE angelone_tsym <> ''")
@@ -442,7 +513,7 @@ def _load_fyers(cur) -> int:
 
         batch.append((
             exchange, token,
-            rec.get("Underlying", "") or rec.get("Symbol", ""),
+            _clean_underlying(rec.get("Underlying") or rec.get("Symbol", "")),
             tsym,
             rec.get("Instrument", "EQ"),
             int(rec.get("LotSize", 1) or 1),
@@ -454,6 +525,8 @@ def _load_fyers(cur) -> int:
             rec.get("Description", "") or "",
             fyers_sym,
             str(rec.get("FyToken", "")),
+            str(rec.get("SegmentKey", "") or ""),
+            int(exp_epoch) if exp_epoch and isinstance(exp_epoch, (int, float)) and exp_epoch > 0 else 0,
         ))
         count += 1
 
@@ -475,12 +548,14 @@ def _insert_fyers_batch(cur, batch):
             exchange, exchange_token, symbol, trading_symbol,
             instrument_type, lot_size, tick_size, isin,
             expiry, strike, option_type, description,
-            fyers_symbol, fyers_token
+            fyers_symbol, fyers_token, fyers_segment_key, expiry_epoch
         ) VALUES %s
         ON CONFLICT (exchange, exchange_token)
         DO UPDATE SET
             fyers_symbol = EXCLUDED.fyers_symbol,
             fyers_token = EXCLUDED.fyers_token,
+            fyers_segment_key = COALESCE(NULLIF(EXCLUDED.fyers_segment_key, ''), _sym_staging.fyers_segment_key),
+            expiry_epoch = CASE WHEN EXCLUDED.expiry_epoch > 0 THEN EXCLUDED.expiry_epoch ELSE _sym_staging.expiry_epoch END,
             description = COALESCE(NULLIF(EXCLUDED.description, ''), _sym_staging.description),
             isin = COALESCE(NULLIF(EXCLUDED.isin, ''), _sym_staging.isin)
     """, batch, page_size=2000)
@@ -515,7 +590,7 @@ def _load_shoonya(cur) -> int:
 
             batch.append((
                 exch, str(token),
-                rec.get("Underlying", "") or rec.get("Symbol", ""),
+                _clean_underlying(rec.get("Underlying") or rec.get("Symbol", "")),
                 rec.get("TradingSymbol", ""),
                 canonical,
                 int(rec.get("LotSize", 1) or 1),
@@ -579,7 +654,7 @@ def _load_angelone(cur) -> int:
 
         batch.append((
             exchange, token,
-            rec.get("Underlying", "") or rec.get("Symbol", ""),
+            _clean_underlying(rec.get("Underlying") or rec.get("Symbol", "")),
             rec.get("TradingSymbol", "") or rec.get("Symbol", ""),
             rec.get("Instrument", "EQ"),
             int(rec.get("LotSize", 1) or 1),
@@ -589,6 +664,8 @@ def _load_angelone(cur) -> int:
             rec.get("OptionType") or "",
             token,
             rec.get("TradingSymbol", "") or rec.get("Symbol", ""),
+            str(rec.get("ExchSeg", "") or ""),
+            str(rec.get("Name", "") or ""),
         ))
         count += 1
 
@@ -609,12 +686,14 @@ def _insert_angelone_batch(cur, batch):
             exchange, exchange_token, symbol, trading_symbol,
             instrument_type, lot_size, tick_size,
             expiry, strike, option_type,
-            angelone_token, angelone_tsym
+            angelone_token, angelone_tsym, angelone_exch_seg, angelone_name
         ) VALUES %s
         ON CONFLICT (exchange, exchange_token)
         DO UPDATE SET
             angelone_token = EXCLUDED.angelone_token,
             angelone_tsym = EXCLUDED.angelone_tsym,
+            angelone_exch_seg = COALESCE(NULLIF(EXCLUDED.angelone_exch_seg, ''), _sym_staging.angelone_exch_seg),
+            angelone_name = COALESCE(NULLIF(EXCLUDED.angelone_name, ''), _sym_staging.angelone_name),
             symbol = CASE
                 WHEN NULLIF(_sym_staging.symbol, '') IS NULL THEN EXCLUDED.symbol
                 WHEN NULLIF(EXCLUDED.symbol, '') IS NULL THEN _sym_staging.symbol
@@ -653,7 +732,7 @@ def _load_dhan(cur) -> int:
 
         batch.append((
             exchange, token,
-            rec.get("Underlying", "") or rec.get("Symbol", ""),
+            _clean_underlying(rec.get("Underlying") or rec.get("Symbol", "")),
             rec.get("TradingSymbol", "") or rec.get("Symbol", ""),
             rec.get("Instrument", "EQ"),
             int(rec.get("LotSize", 1) or 1),
@@ -662,6 +741,10 @@ def _load_dhan(cur) -> int:
             float(rec.get("StrikePrice") or 0),
             rec.get("OptionType") or "",
             security_id,
+            str(rec.get("DisplayName", "") or ""),
+            str(rec.get("ExchId", "") or ""),
+            str(rec.get("InstrumentName", "") or ""),
+            str(rec.get("Series", "") or ""),
         ))
         count += 1
 
@@ -682,11 +765,15 @@ def _insert_dhan_batch(cur, batch):
             exchange, exchange_token, symbol, trading_symbol,
             instrument_type, lot_size, tick_size,
             expiry, strike, option_type,
-            dhan_security_id
+            dhan_security_id, dhan_display_name, dhan_exch_id, dhan_instrument_name, series
         ) VALUES %s
         ON CONFLICT (exchange, exchange_token)
         DO UPDATE SET
             dhan_security_id = EXCLUDED.dhan_security_id,
+            dhan_display_name = COALESCE(NULLIF(EXCLUDED.dhan_display_name, ''), _sym_staging.dhan_display_name),
+            dhan_exch_id = COALESCE(NULLIF(EXCLUDED.dhan_exch_id, ''), _sym_staging.dhan_exch_id),
+            dhan_instrument_name = COALESCE(NULLIF(EXCLUDED.dhan_instrument_name, ''), _sym_staging.dhan_instrument_name),
+            series = COALESCE(NULLIF(EXCLUDED.series, ''), _sym_staging.series),
             symbol = CASE
                 WHEN NULLIF(_sym_staging.symbol, '') IS NULL THEN EXCLUDED.symbol
                 WHEN NULLIF(EXCLUDED.symbol, '') IS NULL THEN _sym_staging.symbol
@@ -725,7 +812,7 @@ def _load_kite(cur) -> int:
 
         batch.append((
             exchange, token,
-            rec.get("Underlying", "") or rec.get("Symbol", ""),
+            _clean_underlying(rec.get("Underlying") or rec.get("Symbol", "")),
             rec.get("TradingSymbol", "") or rec.get("Symbol", ""),
             rec.get("Instrument", "EQ"),
             int(rec.get("LotSize", 1) or 1),
@@ -735,6 +822,8 @@ def _load_kite(cur) -> int:
             rec.get("OptionType") or "",
             instrument_token,
             token,
+            str(rec.get("Name", "") or ""),
+            str(rec.get("Segment", "") or ""),
         ))
         count += 1
 
@@ -755,12 +844,14 @@ def _insert_kite_batch(cur, batch):
             exchange, exchange_token, symbol, trading_symbol,
             instrument_type, lot_size, tick_size,
             expiry, strike, option_type,
-            kite_instrument_token, kite_exchange_token
+            kite_instrument_token, kite_exchange_token, kite_name, segment
         ) VALUES %s
         ON CONFLICT (exchange, exchange_token)
         DO UPDATE SET
             kite_instrument_token = EXCLUDED.kite_instrument_token,
             kite_exchange_token = EXCLUDED.kite_exchange_token,
+            kite_name = COALESCE(NULLIF(EXCLUDED.kite_name, ''), _sym_staging.kite_name),
+            segment = COALESCE(NULLIF(EXCLUDED.segment, ''), _sym_staging.segment),
             symbol = CASE
                 WHEN NULLIF(_sym_staging.symbol, '') IS NULL THEN EXCLUDED.symbol
                 WHEN NULLIF(EXCLUDED.symbol, '') IS NULL THEN _sym_staging.symbol
@@ -798,7 +889,7 @@ def _load_upstox(cur) -> int:
 
         batch.append((
             exchange, token,
-            rec.get("Underlying", "") or rec.get("ShortName", ""),
+            _clean_underlying(rec.get("Underlying") or rec.get("ShortName", "")),
             rec.get("TradingSymbol", ""),
             rec.get("Instrument", "EQ"),
             int(rec.get("LotSize", 1) or 1),
@@ -809,6 +900,10 @@ def _load_upstox(cur) -> int:
             rec.get("OptionType") or "",
             str(rec.get("Name", "") or ""),
             str(key),  # InstrumentKey
+            str(rec.get("ShortName", "") or ""),
+            str(rec.get("InstrumentType", "") or ""),
+            int(rec.get("FreezeQuantity", 0) or 0),
+            str(rec.get("Segment", "") or ""),
         ))
         count += 1
 
@@ -829,11 +924,15 @@ def _insert_upstox_batch(cur, batch):
             exchange, exchange_token, symbol, trading_symbol,
             instrument_type, lot_size, tick_size, isin,
             expiry, strike, option_type, description,
-            upstox_ikey
+            upstox_ikey, upstox_short_name, upstox_instrument_type, freeze_quantity, segment
         ) VALUES %s
         ON CONFLICT (exchange, exchange_token)
         DO UPDATE SET
             upstox_ikey = EXCLUDED.upstox_ikey,
+            upstox_short_name = COALESCE(NULLIF(EXCLUDED.upstox_short_name, ''), _sym_staging.upstox_short_name),
+            upstox_instrument_type = COALESCE(NULLIF(EXCLUDED.upstox_instrument_type, ''), _sym_staging.upstox_instrument_type),
+            freeze_quantity = CASE WHEN EXCLUDED.freeze_quantity > 0 THEN EXCLUDED.freeze_quantity ELSE _sym_staging.freeze_quantity END,
+            segment = COALESCE(NULLIF(EXCLUDED.segment, ''), _sym_staging.segment),
             isin = COALESCE(NULLIF(EXCLUDED.isin, ''), _sym_staging.isin),
             description = COALESCE(NULLIF(EXCLUDED.description, ''), _sym_staging.description),
             symbol = CASE
@@ -869,7 +968,7 @@ def _load_groww(cur) -> int:
 
         batch.append((
             exchange, token,
-            rec.get("Underlying", "") or rec.get("TradingSymbol", ""),
+            _clean_underlying(rec.get("Underlying") or rec.get("TradingSymbol", "")),
             rec.get("TradingSymbol", ""),
             rec.get("Instrument", "EQ"),
             int(rec.get("LotSize", 1) or 1),
@@ -880,6 +979,14 @@ def _load_groww(cur) -> int:
             rec.get("OptionType") or "",
             str(rec.get("Name", "") or ""),
             groww_sym,
+            token,  # groww_token = exchange token for Groww
+            str(rec.get("Segment", "") or ""),
+            str(rec.get("Series", "") or ""),
+            int(rec.get("FreezeQuantity", 0) or 0),
+            bool(rec.get("BuyAllowed", True)),
+            bool(rec.get("SellAllowed", True)),
+            str(rec.get("RawExchange", "") or ""),
+            str(rec.get("UnderlyingExchangeToken", "") or ""),
         ))
         count += 1
 
@@ -900,11 +1007,21 @@ def _insert_groww_batch(cur, batch):
             exchange, exchange_token, symbol, trading_symbol,
             instrument_type, lot_size, tick_size, isin,
             expiry, strike, option_type, description,
-            groww_token
+            groww_symbol, groww_token,
+            segment, series, freeze_quantity, buy_allowed, sell_allowed,
+            raw_exchange, underlying_exchange_token
         ) VALUES %s
         ON CONFLICT (exchange, exchange_token)
         DO UPDATE SET
-            groww_token = EXCLUDED.groww_token,
+            groww_symbol = COALESCE(NULLIF(EXCLUDED.groww_symbol, ''), _sym_staging.groww_symbol),
+            groww_token = COALESCE(NULLIF(EXCLUDED.groww_token, ''), _sym_staging.groww_token),
+            segment = COALESCE(NULLIF(EXCLUDED.segment, ''), _sym_staging.segment),
+            series = COALESCE(NULLIF(EXCLUDED.series, ''), _sym_staging.series),
+            freeze_quantity = CASE WHEN EXCLUDED.freeze_quantity > 0 THEN EXCLUDED.freeze_quantity ELSE _sym_staging.freeze_quantity END,
+            buy_allowed = EXCLUDED.buy_allowed,
+            sell_allowed = EXCLUDED.sell_allowed,
+            raw_exchange = COALESCE(NULLIF(EXCLUDED.raw_exchange, ''), _sym_staging.raw_exchange),
+            underlying_exchange_token = COALESCE(NULLIF(EXCLUDED.underlying_exchange_token, ''), _sym_staging.underlying_exchange_token),
             isin = COALESCE(NULLIF(EXCLUDED.isin, ''), _sym_staging.isin),
             description = COALESCE(NULLIF(EXCLUDED.description, ''), _sym_staging.description),
             symbol = CASE
@@ -945,7 +1062,25 @@ def _finalize_normalized_columns(cur, table_name: str) -> None:
         "COALESCE(TO_CHAR(expiry, 'YYYY-MM-DD'), ''), "
         f"{strike_text}, UPPER(COALESCE(option_type, '')))"
     )
+    unique_key = "CONCAT(exchange, '|', exchange_token)"
     row_key = "CONCAT(exchange, ':', exchange_token)"
+    # New canonical format: {exchange}-{underlying}-{family}-{expiry}-{strike}-{option_type}
+    # Examples: NSE-RELIANCE-EQ | NFO-NIFTY-FUT-28Apr26 | NFO-NIFTY-OPT-28Apr26-24000-CE
+    # CONCAT_WS skips NULL parts automatically.
+    # INITCAP ensures mixed-case month (28Apr26) regardless of DB locale.
+    # Fractional strikes (USDINR 75.25) are preserved; trailing .0 is trimmed (24000.0→24000).
+    smart_trader_name = (
+        f"CONCAT_WS('-', "
+        f"exchange, "
+        f"NULLIF({normalized_underlying}, ''), "
+        f"{family}, "
+        f"(TO_CHAR(expiry, 'DD') || INITCAP(TO_CHAR(expiry, 'Mon')) || TO_CHAR(expiry, 'YY')), "
+        f"CASE WHEN ({family}) = 'OPT' AND COALESCE(strike, 0) > 0 "
+        f"THEN TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM strike::text)) ELSE NULL END, "
+        f"CASE WHEN ({family}) = 'OPT' AND COALESCE(option_type, '') != '' "
+        f"THEN UPPER(option_type) ELSE NULL END"
+        f")"
+    )
     coverage = _broker_coverage_sql()
 
     # Normalize derivative typing before metadata derivation.
@@ -1009,7 +1144,9 @@ def _finalize_normalized_columns(cur, table_name: str) -> None:
         UPDATE {table_name}
         SET normalized_underlying = {normalized_underlying},
             normalized_trading_symbol = {normalized_tsym},
+            smart_trader_name = {smart_trader_name},
             identity_key = {identity_key},
+            unique_key = {unique_key},
             row_key = {row_key},
             broker_coverage = {coverage}
         """
@@ -1049,15 +1186,25 @@ def _enrich_broker_columns_by_identity(cur, table_name: str) -> None:
                 identity_key,
                 MAX(NULLIF(fyers_symbol, '')) AS fyers_symbol,
                 MAX(NULLIF(fyers_token, '')) AS fyers_token,
+                MAX(NULLIF(fyers_segment_key, '')) AS fyers_segment_key,
                 MAX(NULLIF(shoonya_token, '')) AS shoonya_token,
                 MAX(NULLIF(shoonya_tsym, '')) AS shoonya_tsym,
                 MAX(NULLIF(angelone_token, '')) AS angelone_token,
                 MAX(NULLIF(angelone_tsym, '')) AS angelone_tsym,
+                MAX(NULLIF(angelone_exch_seg, '')) AS angelone_exch_seg,
+                MAX(NULLIF(angelone_name, '')) AS angelone_name,
                 MAX(NULLIF(dhan_security_id, '')) AS dhan_security_id,
+                MAX(NULLIF(dhan_display_name, '')) AS dhan_display_name,
+                MAX(NULLIF(dhan_exch_id, '')) AS dhan_exch_id,
+                MAX(NULLIF(dhan_instrument_name, '')) AS dhan_instrument_name,
                 MAX(NULLIF(kite_instrument_token, '')) AS kite_instrument_token,
                 MAX(NULLIF(kite_exchange_token, '')) AS kite_exchange_token,
+                MAX(NULLIF(kite_name, '')) AS kite_name,
                 MAX(NULLIF(upstox_ikey, '')) AS upstox_ikey,
-                MAX(NULLIF(groww_token, '')) AS groww_token
+                MAX(NULLIF(upstox_short_name, '')) AS upstox_short_name,
+                MAX(NULLIF(upstox_instrument_type, '')) AS upstox_instrument_type,
+                MAX(NULLIF(groww_token, '')) AS groww_token,
+                MAX(NULLIF(groww_symbol, '')) AS groww_symbol
             FROM {table_name}
             WHERE identity_key <> ''
             GROUP BY identity_key
@@ -1066,15 +1213,25 @@ def _enrich_broker_columns_by_identity(cur, table_name: str) -> None:
         SET
             fyers_symbol = COALESCE(NULLIF(s.fyers_symbol, ''), agg.fyers_symbol, ''),
             fyers_token = COALESCE(NULLIF(s.fyers_token, ''), agg.fyers_token, ''),
+            fyers_segment_key = COALESCE(NULLIF(s.fyers_segment_key, ''), agg.fyers_segment_key, ''),
             shoonya_token = COALESCE(NULLIF(s.shoonya_token, ''), agg.shoonya_token, ''),
             shoonya_tsym = COALESCE(NULLIF(s.shoonya_tsym, ''), agg.shoonya_tsym, ''),
             angelone_token = COALESCE(NULLIF(s.angelone_token, ''), agg.angelone_token, ''),
             angelone_tsym = COALESCE(NULLIF(s.angelone_tsym, ''), agg.angelone_tsym, ''),
+            angelone_exch_seg = COALESCE(NULLIF(s.angelone_exch_seg, ''), agg.angelone_exch_seg, ''),
+            angelone_name = COALESCE(NULLIF(s.angelone_name, ''), agg.angelone_name, ''),
             dhan_security_id = COALESCE(NULLIF(s.dhan_security_id, ''), agg.dhan_security_id, ''),
+            dhan_display_name = COALESCE(NULLIF(s.dhan_display_name, ''), agg.dhan_display_name, ''),
+            dhan_exch_id = COALESCE(NULLIF(s.dhan_exch_id, ''), agg.dhan_exch_id, ''),
+            dhan_instrument_name = COALESCE(NULLIF(s.dhan_instrument_name, ''), agg.dhan_instrument_name, ''),
             kite_instrument_token = COALESCE(NULLIF(s.kite_instrument_token, ''), agg.kite_instrument_token, ''),
             kite_exchange_token = COALESCE(NULLIF(s.kite_exchange_token, ''), agg.kite_exchange_token, ''),
+            kite_name = COALESCE(NULLIF(s.kite_name, ''), agg.kite_name, ''),
             upstox_ikey = COALESCE(NULLIF(s.upstox_ikey, ''), agg.upstox_ikey, ''),
-            groww_token = COALESCE(NULLIF(s.groww_token, ''), agg.groww_token, '')
+            upstox_short_name = COALESCE(NULLIF(s.upstox_short_name, ''), agg.upstox_short_name, ''),
+            upstox_instrument_type = COALESCE(NULLIF(s.upstox_instrument_type, ''), agg.upstox_instrument_type, ''),
+            groww_token = COALESCE(NULLIF(s.groww_token, ''), agg.groww_token, ''),
+            groww_symbol = COALESCE(NULLIF(s.groww_symbol, ''), agg.groww_symbol, '')
         FROM agg
         WHERE s.identity_key = agg.identity_key
         """
@@ -1120,29 +1277,35 @@ def _merge_staging(cur):
         INSERT INTO symbols (
             exchange, exchange_token, symbol, trading_symbol,
             instrument_type, lot_size, tick_size, isin,
-            expiry, strike, option_type, description,
-            normalized_underlying, normalized_trading_symbol,
-            identity_key, row_key, broker_coverage,
-            fyers_symbol, fyers_token,
+            expiry, expiry_epoch, strike, option_type, description,
+            segment, series, freeze_quantity, buy_allowed, sell_allowed,
+            raw_exchange, underlying_exchange_token,
+            normalized_underlying, normalized_trading_symbol, smart_trader_name,
+            identity_key, unique_key, row_key, broker_coverage,
+            fyers_symbol, fyers_token, fyers_segment_key,
             shoonya_token, shoonya_tsym,
-            angelone_token, angelone_tsym,
-            dhan_security_id,
-            kite_instrument_token, kite_exchange_token,
-            upstox_ikey, groww_token,
+            angelone_token, angelone_tsym, angelone_exch_seg, angelone_name,
+            dhan_security_id, dhan_display_name, dhan_exch_id, dhan_instrument_name,
+            kite_instrument_token, kite_exchange_token, kite_name,
+            upstox_ikey, upstox_short_name, upstox_instrument_type,
+            groww_token, groww_symbol,
             updated_at
         )
         SELECT
             exchange, exchange_token, symbol, trading_symbol,
             instrument_type, lot_size, tick_size, isin,
-            expiry, strike, option_type, description,
-            normalized_underlying, normalized_trading_symbol,
-            identity_key, row_key, broker_coverage,
-            fyers_symbol, fyers_token,
+            expiry, expiry_epoch, strike, option_type, description,
+            segment, series, freeze_quantity, buy_allowed, sell_allowed,
+            raw_exchange, underlying_exchange_token,
+            normalized_underlying, normalized_trading_symbol, smart_trader_name,
+            identity_key, unique_key, row_key, broker_coverage,
+            fyers_symbol, fyers_token, fyers_segment_key,
             shoonya_token, shoonya_tsym,
-            angelone_token, angelone_tsym,
-            dhan_security_id,
-            kite_instrument_token, kite_exchange_token,
-            upstox_ikey, groww_token,
+            angelone_token, angelone_tsym, angelone_exch_seg, angelone_name,
+            dhan_security_id, dhan_display_name, dhan_exch_id, dhan_instrument_name,
+            kite_instrument_token, kite_exchange_token, kite_name,
+            upstox_ikey, upstox_short_name, upstox_instrument_type,
+            groww_token, groww_symbol,
             NOW()
         FROM _sym_staging
     """)
@@ -1153,14 +1316,18 @@ def _merge_staging(cur):
 
 def _create_symbols_fast_lookup_view(cur) -> None:
     """Create compatibility view with fast-lookup columns requested by clients."""
+    cur.execute("DROP VIEW IF EXISTS symbols_fast_lookup CASCADE")
     cur.execute(
         """
         CREATE OR REPLACE VIEW symbols_fast_lookup AS
         SELECT
             id,
             row_key,
+            unique_key,
+            smart_trader_name,
             exchange,
             exchange_token,
+            symbol,
             trading_symbol,
             normalized_trading_symbol,
             instrument_type,
@@ -1168,12 +1335,19 @@ def _create_symbols_fast_lookup_view(cur) -> None:
             tick_size,
             broker_coverage,
             fyers_symbol,
+            fyers_segment_key,
             shoonya_tsym AS shoonya_symbol,
+            shoonya_token,
             angelone_tsym AS angelone_symbol,
+            angelone_name,
             dhan_security_id AS dhan_symbol,
+            dhan_display_name,
             COALESCE(NULLIF(kite_exchange_token, ''), kite_instrument_token, '') AS kite_symbol,
+            kite_name,
             upstox_ikey AS upstox_symbol,
-            groww_token AS grow_symbol
+            upstox_short_name,
+            groww_token,
+            groww_symbol
         FROM symbols
         """
     )
@@ -1200,15 +1374,98 @@ def lookup_by_row_key(row_key: str) -> Optional[Dict[str, Any]]:
     """Fast lookup by row_key (format: EXCHANGE:EXCHANGE_TOKEN)."""
     conn = get_trading_conn()
     try:
+        raw = str(row_key).upper().strip()
+        norm = raw.replace("|", ":")
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
-            "SELECT * FROM symbols_fast_lookup WHERE row_key = %s LIMIT 1",
-            (str(row_key).upper().strip(),),
+            "SELECT * FROM symbols_fast_lookup WHERE row_key = %s OR unique_key = %s LIMIT 1",
+            (norm, raw),
         )
         row = cur.fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
+
+
+def lookup_by_unique_key(unique_key: str) -> Optional[Dict[str, Any]]:
+    """Fast lookup by unique_key (format: EXCHANGE|EXCHANGE_TOKEN)."""
+    conn = get_trading_conn()
+    try:
+        raw = str(unique_key).upper().strip().replace(":", "|")
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT * FROM symbols WHERE unique_key = %s LIMIT 1",
+            (raw,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def lookup_by_smart_trader_name(smart_trader_name: str) -> Optional[Dict[str, Any]]:
+    """Lookup by smart_trader_name (format: EXCHANGE:NORMALIZED_TRADING_SYMBOL e.g. NSE:RELIANCE).
+
+    This is the unified display key used throughout the app.
+    Returns the best-coverage row for the given name.
+    """
+    conn = get_trading_conn()
+    try:
+        name = str(smart_trader_name).upper().strip()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Direct index hit
+        cur.execute(
+            "SELECT * FROM symbols WHERE smart_trader_name = %s ORDER BY broker_coverage DESC LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+        if row:
+            return dict(row)
+        # Fallback: parse EXCHANGE:TSYM and do a normalized lookup
+        if ":" in name:
+            exch, tsym = name.split(":", 1)
+            cur.execute(
+                """
+                SELECT * FROM symbols
+                WHERE exchange = %s
+                  AND (normalized_trading_symbol = %s OR trading_symbol = %s)
+                ORDER BY broker_coverage DESC LIMIT 1
+                """,
+                (exch, tsym, tsym),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+        return None
+    finally:
+        conn.close()
+
+
+def get_broker_mapping_for_smart_name(name: str) -> Dict[str, Dict[str, str]]:
+    """Return per-broker symbol and token mapping for a smart_trader_name.
+
+    Calls lookup_by_smart_trader_name and returns a dict like::
+
+        {
+            "fyers":    {"symbol": "NFO:NIFTY26APR24500CE", "token": ""},
+            "shoonya":  {"symbol": "NIFTY26APR24500CE",     "token": "12345"},
+            "angelone": {"symbol": "...",                   "token": "..."},
+            ...
+        }
+
+    All known brokers are represented; values are empty string when not
+    available.  Returns an empty dict when no row matches *name*.
+    """
+    row = lookup_by_smart_trader_name(name)
+    if not row:
+        return {}
+    result: Dict[str, Dict[str, str]] = {}
+    for broker, field in _BROKER_FIELD.items():
+        token_field = _BROKER_TOKEN_FIELD.get(broker, "")
+        result[broker] = {
+            "symbol": str(row.get(field) or ""),
+            "token":  str(row.get(token_field) or "") if token_field else "",
+        }
+    return result
 
 
 def lookup_by_trading_symbol(trading_symbol: str, exchange: str = "") -> Optional[Dict[str, Any]]:
@@ -1322,9 +1579,13 @@ def resolve_broker_symbol(
     trading_symbol: str,
     broker_id: str,
     exchange: str = "",
+    unique_key: str = "",
 ) -> Dict[str, str]:
     """
     Resolve the broker-specific symbol for a given canonical/any-format trading_symbol.
+
+    If unique_key (EXCHANGE|TOKEN) is provided, strict row lookup is attempted first
+    to avoid ambiguous symbol-text matches.
 
     Design:
       The symbols DB may have multiple rows for the same instrument imported from
@@ -1357,6 +1618,25 @@ def resolve_broker_symbol(
     conn = get_trading_conn()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # ── Step 0: strict lookup by unique key (EXCHANGE|TOKEN) ───────────
+        strict_key = str(unique_key or "").upper().strip().replace(":", "|")
+        if strict_key:
+            cur.execute(
+                "SELECT * FROM symbols WHERE unique_key = %s LIMIT 1",
+                (strict_key,),
+            )
+            strict_row = cur.fetchone()
+            if strict_row:
+                strict_broker_sym = (strict_row.get(field) or "").strip()
+                if strict_broker_sym:
+                    return {
+                        "symbol":    strict_broker_sym,
+                        "token":     (strict_row.get(token_field) or "").strip() if token_field else "",
+                        "exchange":  (strict_row.get("exchange") or exchange or "").upper(),
+                        "tick_size": str(strict_row.get("tick_size") or 0.05),
+                        "lot_size":  str(strict_row.get("lot_size") or 1),
+                    }
 
         # ── Step 1: primary lookup ────────────────────────────────────────────
         rec = lookup_by_trading_symbol(trading_symbol, exchange)
@@ -1517,13 +1797,15 @@ def search_symbols(
         if len(q) >= 3:
             # Use full-text search
             conditions.append(
-                "to_tsvector('simple', symbol || ' ' || trading_symbol || ' ' || description) "
+                "to_tsvector('simple', symbol || ' ' || trading_symbol || ' ' || description || ' ' || smart_trader_name) "
                 "@@ to_tsquery('simple', %s)"
             )
             params.append(q + ":*")
         else:
-            conditions.append("(symbol ILIKE %s OR trading_symbol ILIKE %s)")
-            params.extend([f"%{q}%", f"%{q}%"])
+            conditions.append(
+                "(symbol ILIKE %s OR trading_symbol ILIKE %s OR smart_trader_name ILIKE %s)"
+            )
+            params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
 
         if exchange:
             conditions.append("exchange = %s")

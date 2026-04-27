@@ -573,6 +573,112 @@ class SymbolNormalizer:
         self.get.cache_clear()
         logger.info("SymbolNormalizer LRU cache cleared")
 
+    # ── smart_trader_name-based lookups ───────────────────────────────────────
+
+    def search_by_normalized(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return the full symbols-table row for a *smart_trader_name*, or None.
+
+        Example:
+            norm.search_by_normalized("NFO-NIFTY-OPT-28Apr26-24000-CE")
+        """
+        try:
+            from db.symbols_db import lookup_by_smart_trader_name as _db_lookup
+            return _db_lookup(name)
+        except Exception:
+            return None
+
+    def get_all_broker_symbols(self, name: str) -> Dict[str, Dict[str, str]]:
+        """Return a per-broker symbol/token mapping for *smart_trader_name*.
+
+        Returns::
+
+            {
+                "fyers":    {"symbol": "NFO:NIFTY26APR24500CE", "token": ""},
+                "shoonya":  {"symbol": "NIFTY26APR24500CE",     "token": "12345"},
+                ...
+            }
+
+        All known brokers are included; empty strings when not available.
+        Returns an empty dict when *name* is not found.
+        """
+        try:
+            from db.symbols_db import get_broker_mapping_for_smart_name as _db_mapping
+            return _db_mapping(name)
+        except Exception:
+            return {}
+
+    def search(
+        self,
+        query: str,
+        exchange: Optional[str] = None,
+        instrument_type: Optional[str] = None,
+        limit: int = 30,
+    ) -> List[Dict[str, Any]]:
+        """Search instruments and return lightweight dicts with smart_trader_name.
+
+        Each result dict contains:
+            smart_trader_name, exchange, symbol, instrument_type,
+            lot_size, tick_size
+
+        Args:
+            query:           Search text
+            exchange:        Optional exchange filter ("NSE", "NFO", …)
+            instrument_type: Optional type filter ("EQ", "FUT", "OPT", "IDX")
+            limit:           Max results (default 30)
+        """
+        try:
+            from db.symbols_db import search_symbols as _db_search
+            rows = _db_search(
+                query,
+                exchange or "",
+                instrument_type or "",
+                limit,
+            )
+            return [
+                {
+                    "smart_trader_name": row.get("smart_trader_name", ""),
+                    "exchange":          row.get("exchange", ""),
+                    "symbol":            row.get("symbol", ""),
+                    "instrument_type":   row.get("instrument_type", ""),
+                    "lot_size":          row.get("lot_size", 1),
+                    "tick_size":         row.get("tick_size", 0.05),
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+
+    def refresh_all(self, force: bool = False) -> Dict[str, Any]:
+        """Re-download all broker scriptmasters and repopulate the symbols DB.
+
+        Equivalent to running refresh_scriptmaster.py manually.  Clears the
+        LRU cache after completion.
+
+        Args:
+            force: Pass True to force refresh even if data is current today.
+
+        Returns:
+            Dict with keys 'download' (broker → count) and 'db' (broker → rows).
+        """
+        result: Dict[str, Any] = {}
+
+        try:
+            from scripts.unified_scriptmaster import refresh_all as _refresh_all
+            result["download"] = _refresh_all(force=force) or {}
+        except Exception as exc:
+            logger.error("refresh_all: scriptmaster download failed: %s", exc)
+            result["download"] = {}
+
+        try:
+            from db.symbols_db import populate_symbols_db as _populate
+            result["db"] = _populate(force=force) or {}
+        except Exception as exc:
+            logger.error("refresh_all: symbols DB populate failed: %s", exc)
+            result["db"] = {}
+
+        self.invalidate_cache()
+        return result
+
 
 # ── Module-level singleton ────────────────────────────────────────────────────
 

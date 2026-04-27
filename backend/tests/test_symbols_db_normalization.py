@@ -94,3 +94,127 @@ def test_resolve_broker_symbol_partner_row_requires_same_underlying(monkeypatch)
 
     resolved = sdb.resolve_broker_symbol("BANKNIFTY26APR56300PE", "shoonya", "NFO")
     assert resolved["symbol"] == "BANKNIFTY26APR56300PE"
+
+
+# ── _clean_underlying tests ───────────────────────────────────────────────────
+
+def test_clean_underlying_equity_unchanged():
+    assert sdb._clean_underlying("RELIANCE") == "RELIANCE"
+    assert sdb._clean_underlying("INFY") == "INFY"
+    assert sdb._clean_underlying("360ONE") == "360ONE"
+
+
+def test_clean_underlying_strips_eq_suffix():
+    assert sdb._clean_underlying("RELIANCE-EQ") == "RELIANCE"
+    assert sdb._clean_underlying("SBIN-BE") == "SBIN"
+
+
+def test_clean_underlying_strips_index_suffix():
+    assert sdb._clean_underlying("NIFTY-INDEX") == "NIFTY"
+    assert sdb._clean_underlying("SENSEX-INDEX") == "SENSEX"
+
+
+def test_clean_underlying_removes_trailing_digits():
+    # Some MCX broker feeds append a contract suffix digit
+    assert sdb._clean_underlying("CRUDEOIL1") == "CRUDEOIL"
+    assert sdb._clean_underlying("GOLDPETAL2") == "GOLDPETAL"
+
+
+def test_clean_underlying_strips_broker_month_suffix():
+    # Shoonya MCX/CDS feeds: underlying field contains SYMBOL+YYMON
+    assert sdb._clean_underlying("ALUMINI26APR") == "ALUMINI"
+    assert sdb._clean_underlying("CRUDEOIL26MAY") == "CRUDEOIL"
+    assert sdb._clean_underlying("USDINR26APR") == "USDINR"
+    assert sdb._clean_underlying("EURINR26JUN") == "EURINR"
+
+
+def test_clean_underlying_mcx_long_form_keeps_first_word():
+    assert sdb._clean_underlying("GOLDPETAL FUT 30 APR 26") == "GOLDPETAL"
+    assert sdb._clean_underlying("CRUDEOIL FUT 17 APR 26") == "CRUDEOIL"
+    assert sdb._clean_underlying("NATURALGAS FUT 28 APR 26") == "NATURALGAS"
+
+
+def test_clean_underlying_cds_long_form_keeps_first_word():
+    assert sdb._clean_underlying("EURINR FUT 26 MAY 26") == "EURINR"
+    assert sdb._clean_underlying("USDINR FUT 28 APR 26") == "USDINR"
+
+
+def test_clean_underlying_lowercases_and_strips_whitespace():
+    assert sdb._clean_underlying("  reliance  ") == "RELIANCE"
+    assert sdb._clean_underlying("goldpetal fut 30 apr 26") == "GOLDPETAL"
+
+
+def test_clean_underlying_empty_returns_empty():
+    assert sdb._clean_underlying("") == ""
+    assert sdb._clean_underlying(None) == ""
+
+
+def test_clean_underlying_index_names_preserved():
+    assert sdb._clean_underlying("NIFTY") == "NIFTY"
+    assert sdb._clean_underlying("BANKNIFTY") == "BANKNIFTY"
+    assert sdb._clean_underlying("MIDCPNIFTY") == "MIDCPNIFTY"
+
+
+# ── SymbolNormalizer new methods smoke tests ──────────────────────────────────
+
+def test_normalizer_search_by_normalized_returns_none_when_db_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        sdb, "lookup_by_smart_trader_name", lambda _name: None
+    )
+    from broker.symbol_normalizer import get_normalizer
+    norm = get_normalizer()
+    assert norm.search_by_normalized("NFO-NIFTY-FUT-28Apr26") is None
+
+
+def test_normalizer_get_all_broker_symbols_empty_when_not_found(monkeypatch):
+    monkeypatch.setattr(
+        sdb, "lookup_by_smart_trader_name", lambda _name: None
+    )
+    from broker.symbol_normalizer import get_normalizer
+    norm = get_normalizer()
+    assert norm.get_all_broker_symbols("NFO-NIFTY-FUT-28Apr26") == {}
+
+
+def test_normalizer_get_all_broker_symbols_returns_per_broker_dict(monkeypatch):
+    fake_row = {
+        "fyers_symbol": "NFO:NIFTY26APRFUT",
+        "fyers_token": "abc",
+        "shoonya_tsym": "NIFTY26APRFUT",
+        "shoonya_token": "12345",
+        "angelone_tsym": "NIFTY26APRFUT",
+        "angelone_token": "999",
+        "dhan_security_id": "dhan123",
+        "kite_instrument_token": "kite789",
+        "upstox_ikey": "upstox_key",
+        "groww_token": "groww_tok",
+        "trading_symbol": "NIFTY26APRFUT",
+    }
+    monkeypatch.setattr(sdb, "lookup_by_smart_trader_name", lambda _name: fake_row)
+    from broker.symbol_normalizer import get_normalizer
+    norm = get_normalizer()
+    result = norm.get_all_broker_symbols("NFO-NIFTY-FUT-28Apr26")
+    assert result["fyers"]["symbol"] == "NFO:NIFTY26APRFUT"
+    assert result["shoonya"]["symbol"] == "NIFTY26APRFUT"
+    assert result["shoonya"]["token"] == "12345"
+    assert result["angelone"]["token"] == "999"
+    assert result["dhan"]["symbol"] == "dhan123"
+
+
+def test_normalizer_search_returns_smart_trader_name(monkeypatch):
+    fake_rows = [
+        {
+            "smart_trader_name": "NFO-NIFTY-FUT-28Apr26",
+            "exchange": "NFO",
+            "symbol": "NIFTY",
+            "instrument_type": "FUT",
+            "lot_size": 75,
+            "tick_size": 0.05,
+        }
+    ]
+    monkeypatch.setattr(sdb, "search_symbols", lambda *_a, **_kw: fake_rows)
+    from broker.symbol_normalizer import get_normalizer
+    norm = get_normalizer()
+    results = norm.search("NIFTY", exchange="NFO")
+    assert len(results) == 1
+    assert results[0]["smart_trader_name"] == "NFO-NIFTY-FUT-28Apr26"
+    assert results[0]["lot_size"] == 75
