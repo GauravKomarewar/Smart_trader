@@ -327,6 +327,7 @@ def _normalise_expiry_date(raw: str) -> str:
     """Normalise any date string to ISO YYYY-MM-DD for consistent frontend parsing."""
     if not raw:
         return ""
+    raw = str(raw).strip()
     # Already ISO  "2026-04-07"
     if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
         return raw
@@ -334,6 +335,16 @@ def _normalise_expiry_date(raw: str) -> str:
     if len(raw) == 10 and raw[2] == "-" and raw[5] == "-":
         dd, mm, yyyy = raw.split("-")
         return f"{yyyy}-{mm}-{dd}"
+    # DD-MMM-YYYY / DD-Month-YYYY  "07-Apr-2026" / "07-April-2026"
+    try:
+        from datetime import datetime as _dt
+        for fmt in ("%d-%b-%Y", "%d-%B-%Y"):
+            try:
+                return _dt.strptime(raw, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+    except Exception:
+        pass
     # Epoch seconds
     try:
         ts = int(raw)
@@ -456,6 +467,33 @@ async def get_option_chain(
     oc = None
     cache_key = f"{sym}:{exchange.upper()}:{expiry or ''}:{int(strikes)}"
 
+    def _run_with_timeout(fn, timeout_sec: float = 2.5):
+        import threading as _th
+        state = {"done": False, "value": None}
+
+        def _target():
+            try:
+                state["value"] = fn()
+            finally:
+                state["done"] = True
+
+        t = _th.Thread(target=_target, daemon=True)
+        t.start()
+        t.join(timeout_sec)
+        if state["done"]:
+            return state["value"]
+        return None
+
+    def _fyers_chain_with_timeout(expiry_ts: str = ""):
+        """Bound broker latency so UI expiry switches don't block for long."""
+        try:
+            return _run_with_timeout(
+                lambda: fyers.get_option_chain(sym, expiry_ts, exchange),
+                timeout_sec=2.5,
+            )
+        except Exception:
+            return None
+
     try:
         import time as _t
         cached = _option_chain_cache.get(cache_key)
@@ -467,12 +505,38 @@ async def get_option_chain(
     # 1) Fyers live data — resolve expiry to Fyers timestamp if switching
     if fyers.is_live:
         fyers_ts = ""
+        iso_exp = ""
+        raw = None
         if expiry:
             # Convert ISO date "2026-04-07" or DD-MM-YYYY to Fyers timestamp
             iso_exp = _normalise_expiry_date(expiry)
             ts_map = _fyers_expiry_ts.get(sym, {})
             fyers_ts = ts_map.get(iso_exp, "")
-        raw = fyers.get_option_chain(sym, expiry_ts=fyers_ts)
+
+            # If timestamp map is not warm yet, fetch nearest once to populate expiryData map,
+            # then retry with exact selected expiry timestamp.
+            if not fyers_ts:
+                warm_raw = _fyers_chain_with_timeout("")
+                if warm_raw:
+                    warm_expiry = warm_raw.get("expiryData", [])
+                    warm_map: dict[str, str] = {}
+                    for e in warm_expiry[:24]:
+                        iso = _normalise_expiry_date(str(e.get("date", "")))
+                        ts = str(e.get("expiry") or e.get("timestamp") or "")
+                        if iso and ts:
+                            warm_map[iso] = ts
+                    if warm_map:
+                        _fyers_expiry_ts[sym] = warm_map
+                        fyers_ts = warm_map.get(iso_exp, "")
+
+            if fyers_ts:
+                raw = _fyers_chain_with_timeout(fyers_ts)
+            else:
+                # Expiry not found in broker expiry list; fall back to nearest chain data.
+                raw = _fyers_chain_with_timeout("")
+        else:
+            raw = _fyers_chain_with_timeout("")
+
         if raw:
             oc = _convert_fyers_oc(raw, sym)
 
@@ -480,7 +544,10 @@ async def get_option_chain(
     if not oc:
         session = get_session()
         if not session.is_demo:
-            data = session.get_option_chain(exchange=exchange, symbol=sym, strike_count=strikes)
+            data = _run_with_timeout(
+                lambda: session.get_option_chain(exchange=exchange, symbol=sym, strike_count=strikes),
+                timeout_sec=2.5,
+            )
             if data and data.get("rows"):
                 oc = data
 
@@ -489,13 +556,34 @@ async def get_option_chain(
     _fo_map = {"NSE": "NFO", "NFO": "NFO", "BSE": "BFO", "BFO": "BFO",
                "MCX": "MCX", "CDS": "CDS"}
     oc_exchange = _fo_map.get(exchange, exchange)
+
+    # If user explicitly asked for an expiry but broker returned nearest/current,
+    # rebuild for requested expiry from ScriptMaster immediately so UI does not
+    # remain stuck on old expiry data.
+    if oc and expiry:
+        req_expiry = _normalise_expiry_date(expiry)
+        got_expiry = _normalise_expiry_date(str(oc.get("expiry", "")))
+        if req_expiry and got_expiry and req_expiry != got_expiry:
+            spot_hint = float(oc.get("underlyingLtp", 0) or 0)
+            sm_requested = build_option_chain_from_scriptmaster(
+                sym,
+                exchange=oc_exchange,
+                expiry=req_expiry,
+                strikes_per_side=strikes,
+                spot_price=spot_hint,
+            )
+            if sm_requested and sm_requested.get("rows"):
+                sm_requested["underlyingLtp"] = spot_hint
+                sm_requested["source"] = "scriptmaster"
+                oc = sm_requested
+
     if not oc or not oc.get("rows"):
         # Try to get live spot price for better ATM selection
         spot = 0.0
         if fyers.is_live:
             idx_sym = _INDEX_ALIAS.get(sym) or _INDEX_ALIAS.get(sym.replace(" ", ""))
             if idx_sym:
-                q = fyers.get_quote(idx_sym)
+                q = _run_with_timeout(lambda: fyers.get_quote(idx_sym), timeout_sec=1.5)
                 if q:
                     spot = q.get("ltp", 0)
         sm_chain = build_option_chain_from_scriptmaster(
@@ -532,13 +620,17 @@ async def get_option_chain(
     # ── Subscribe option symbols to live tick service + compute Greeks ────────
     try:
         from broker.option_chain_service import get_oc_service
+        import threading
         oc_svc = get_oc_service()
-        # Subscribe to live ticks for all option symbols in this chain
-        oc_svc.subscribe_chain(oc, sym, oc.get("expiry", ""))
+        # Subscribe in background; this can involve many symbols and network I/O.
+        threading.Thread(
+            target=oc_svc.subscribe_chain,
+            args=(oc, sym, oc.get("expiry", "")),
+            daemon=True,
+        ).start()
         # Enrich with live LTPs from tick store and compute Greeks
         oc = oc_svc.enrich_with_live_greeks(oc)
         # Persist snapshot (non-blocking — runs async in background)
-        import threading
         threading.Thread(
             target=oc_svc.persist_snapshot, args=(oc,), daemon=True
         ).start()

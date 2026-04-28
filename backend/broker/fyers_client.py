@@ -500,10 +500,16 @@ class FyersDataClient:
         candidates = _resolve_oc_symbol(underlying, exchange)
         for fyers_sym in candidates:
             try:
+                ts_value: Any = expiry_ts
+                try:
+                    if str(expiry_ts).strip().isdigit():
+                        ts_value = int(str(expiry_ts).strip())
+                except Exception:
+                    ts_value = expiry_ts
                 resp = f.optionchain({
                     "symbol":      fyers_sym,
                     "strikecount": 20,
-                    "timestamp":   expiry_ts,
+                    "timestamp":   ts_value,
                 })
                 if resp.get("code") == 200 and resp.get("data", {}).get("optionsChain"):
                     return resp["data"]

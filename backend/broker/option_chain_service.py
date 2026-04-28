@@ -97,8 +97,9 @@ class OptionChainService:
                                 leg["ltp"] = live_ltp
                                 break
 
-                    # Compute Greeks if we have spot and LTP
-                    if spot > 0 and expiry_str:
+                    # Compute Greeks only when we actually have a valid live LTP.
+                    # This avoids heavy IV iterations on zero-priced placeholders.
+                    if spot > 0 and expiry_str and live_ltp > 0:
                         greeks = self._compute_greeks(
                             spot=spot, strike=strike, expiry_str=expiry_str,
                             option_type=otype, ltp=live_ltp,

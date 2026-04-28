@@ -437,15 +437,17 @@ export function useOptionChain() {
     let cancelled = false
     const exchange = _UL_EXCHANGE[selectedUnderlying] || 'NSE'
 
-    // Subscribe via WS for real-time push
-    if (ws.isOpen) {
-      ws.subscribeOptionChain(selectedUnderlying, selectedExpiry || '', exchange)
-    }
+    // Subscribe via WS for real-time push; SmartTraderWS will restore on reconnect.
+    ws.subscribeOptionChain(selectedUnderlying, selectedExpiry || '', exchange)
 
     const load = async () => {
       // Skip REST only if WS pushed same underlying within last 1s
       const storeState = useOptionChainStore.getState()
-      if (storeState.data && storeState.data.underlying === selectedUnderlying) {
+      if (
+        storeState.data
+        && storeState.data.underlying === selectedUnderlying
+        && (storeState.data.expiry || '') === (selectedExpiry || '')
+      ) {
         const age = Date.now() - storeState.lastUpdate
         if (age < 1_000) return  // WS is actively feeding — skip REST
       }
