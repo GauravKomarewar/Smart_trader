@@ -325,6 +325,7 @@ class LiveTickService:
 
     def __init__(self) -> None:
         self._subscribed: Set[str] = set()      # canonical "EXCHANGE:SYMBOL" keys
+        self._subscription_refcount: Dict[str, int] = {}
         self._tick_store: Dict[str, dict] = {}  # latest tick per symbol
         self._callbacks: List[Callable]  = []   # async broadcast callbacks
         self._lock = threading.Lock()
@@ -371,12 +372,21 @@ class LiveTickService:
           • "NIFTY"              (plain)
           • "NSE:RELIANCE-EQ"
         """
-        new_syms = [s for s in symbols if s not in self._subscribed]
-        if not new_syms:
+        cleaned = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        if not cleaned:
             return
+        new_syms: List[str] = []
+        status_updates: List[tuple[str, int, bool]] = []
         with self._lock:
-            self._subscribed.update(new_syms)
-            for s in new_syms:
+            for s in cleaned:
+                prev = self._subscription_refcount.get(s, 0)
+                now = prev + 1
+                self._subscription_refcount[s] = now
+                status_updates.append((s, now, True))
+                if prev > 0:
+                    continue
+                self._subscribed.add(s)
+                new_syms.append(s)
                 norm = _normalize_sym(s)
                 self._sym_alias[norm] = s
                 # Also map the Fyers-clean-sym back to the subscribed symbol so that
@@ -389,14 +399,35 @@ class LiveTickService:
                         self._sym_alias.setdefault(fyers_clean, s)
                 except Exception:
                     pass
+        if status_updates:
+            self._sync_subscription_status(status_updates)
+        if not new_syms:
+            logger.debug("Subscribe dedup hit: all symbols already active")
+            return
         logger.info("Subscribing %d new symbols: %s", len(new_syms), new_syms[:5])
         self._subscribe_fyers(new_syms)
         self._subscribe_shoonya(new_syms)
 
     def unsubscribe(self, symbols: List[str]) -> None:
+        cleaned = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        if not cleaned:
+            return
+        status_updates: List[tuple[str, int, bool]] = []
         with self._lock:
-            for s in symbols:
-                self._subscribed.discard(s)
+            for s in cleaned:
+                prev = self._subscription_refcount.get(s, 0)
+                if prev <= 0:
+                    continue
+                now = prev - 1
+                if now <= 0:
+                    self._subscription_refcount.pop(s, None)
+                    self._subscribed.discard(s)
+                    now = 0
+                else:
+                    self._subscription_refcount[s] = now
+                status_updates.append((s, now, now > 0))
+        if status_updates:
+            self._sync_subscription_status(status_updates)
 
     def get_latest(self, symbol: str) -> Optional[dict]:
         # Try exact match first, then normalized alias lookup
@@ -409,6 +440,61 @@ class LiveTickService:
 
     def get_all_latest(self) -> Dict[str, dict]:
         return dict(self._tick_store)
+
+    def _sync_subscription_status(self, updates: List[tuple[str, int, bool]]) -> None:
+        """Persist runtime subscription status to DB for cross-component visibility."""
+        if not updates:
+            return
+        try:
+            from db.trading_db import trading_cursor
+            with trading_cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO market_subscriptions (
+                        symbol,
+                        normalized_symbol,
+                        subscriber_count,
+                        is_active,
+                        last_subscribed_at,
+                        last_unsubscribed_at,
+                        updated_at
+                    ) VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        CASE WHEN %s THEN NOW() ELSE NULL END,
+                        CASE WHEN %s THEN NULL ELSE NOW() END,
+                        NOW()
+                    )
+                    ON CONFLICT (symbol) DO UPDATE SET
+                        normalized_symbol = EXCLUDED.normalized_symbol,
+                        subscriber_count = EXCLUDED.subscriber_count,
+                        is_active = EXCLUDED.is_active,
+                        last_subscribed_at = CASE
+                            WHEN EXCLUDED.is_active THEN NOW()
+                            ELSE market_subscriptions.last_subscribed_at
+                        END,
+                        last_unsubscribed_at = CASE
+                            WHEN EXCLUDED.is_active THEN market_subscriptions.last_unsubscribed_at
+                            ELSE NOW()
+                        END,
+                        updated_at = NOW()
+                    """,
+                    [
+                        (
+                            sym,
+                            _normalize_sym(sym),
+                            count,
+                            active,
+                            active,
+                            active,
+                        )
+                        for (sym, count, active) in updates
+                    ],
+                )
+        except Exception as exc:
+            logger.debug("market_subscriptions sync error: %s", exc)
 
     # ── Internal tick handler ──────────────────────────────────────────────────
 

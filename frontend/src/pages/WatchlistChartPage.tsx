@@ -234,12 +234,14 @@ function WatchlistPanel({ selectedId, onSelect }: {
   // Subscribe all watchlist symbols to MarketWS when the watchlist loads
   useEffect(() => {
     const items = activeWL?.items ?? []
+    const symbols = items
+      .map(i => wsSubSymbol(i.tradingsymbol || i.symbol, i.exchange))
+      .filter(Boolean)
     if (items.length) {
-      marketWs.subscribe(
-        items
-          .map(i => wsSubSymbol(i.tradingsymbol || i.symbol, i.exchange))
-          .filter(Boolean)
-      )
+      marketWs.subscribe(symbols)
+    }
+    return () => {
+      if (symbols.length) marketWs.unsubscribe(symbols)
     }
   }, [activeWL?.items])
 
@@ -378,14 +380,19 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
 
   useEffect(() => {
     fetchRestQuote(tickSym, item.exchange).then(() => setQuote(getLiveQuote(tickSym, item.exchange)))
-    marketWs.subscribe([wsSubSymbol(tickSym, item.exchange)])
-    return marketWs.onTick((tick) => {
+    const subSym = wsSubSymbol(tickSym, item.exchange)
+    marketWs.subscribe([subSym])
+    const unsubTick = marketWs.onTick((tick) => {
       if (normSym(tick.symbol) === normSym(tickSym)) {
         const q = { ltp: tick.ltp, changePct: tick.changePct ?? 0, change: tick.change ?? 0, volume: tick.volume ?? 0 }
         _liveQuotes[quoteKey(tickSym, item.exchange)] = q
         setQuote(q)
       }
     })
+    return () => {
+      unsubTick()
+      marketWs.unsubscribe([subSym])
+    }
   }, [tickSym, item.exchange])
 
   return (
@@ -608,12 +615,17 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
   // Live tick subscription for quote header
   useEffect(() => {
     fetchRestQuote(symbol, exchange).then(() => setQuote(getLiveQuote(symbol, exchange)))
-    marketWs.subscribe([wsSubSymbol(symbol, exchange)])
-    return marketWs.onTick((tick: MarketTick) => {
+    const subSym = wsSubSymbol(symbol, exchange)
+    marketWs.subscribe([subSym])
+    const unsubTick = marketWs.onTick((tick: MarketTick) => {
       if (normSym(tick.symbol) === normSym(symbol)) {
         setQuote({ ltp: tick.ltp, changePct: tick.changePct ?? 0, change: tick.change ?? 0, volume: tick.volume ?? 0 })
       }
     })
+    return () => {
+      unsubTick()
+      marketWs.unsubscribe([subSym])
+    }
   }, [symbol, exchange])
 
   // Reset draw tool when symbol changes
@@ -869,6 +881,9 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
       const barSec = _TF_SEC[interval] ?? 60
       let curBar: { time: number; open: number; high: number; low: number; close: number } | null = null
 
+      const subSym = wsSubSymbol(symbol, exchange)
+      marketWs.subscribe([subSym])
+
       const unsubTick = marketWs.onTick((tick: MarketTick) => {
         if (normSym(tick.symbol) !== normSym(symbol)) return
         const ltp = tick.ltp
@@ -906,6 +921,7 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
       cancelled = true
       cancelAnimationFrame(rafId)
       _unsubTick?.()
+      marketWs.unsubscribe([wsSubSymbol(symbol, exchange)])
       _ro?.disconnect()
       if (_chart) { try { _chart.remove() } catch { /* already disposed */ } }
       if (_subChart) { try { _subChart.remove() } catch { /* already disposed */ } }

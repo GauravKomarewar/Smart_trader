@@ -544,6 +544,8 @@ async def option_token_universe(
     exchange: str = Query("NFO"),
     expiry: str = Query(""),
     limit: int = Query(2000, ge=1, le=20000),
+    best_count: int = Query(0, ge=0, le=500, description="If > 0, keep nearest contracts by spot distance"),
+    subscribe_live: bool = Query(False, description="If true, auto-subscribe selected contracts to live tick service"),
     payload: dict = Depends(current_user),
 ):
     """
@@ -560,10 +562,60 @@ async def option_token_universe(
             expiry=expiry or None,
             limit=limit,
         )
+
+        # Optional near-spot filtering for low-latency subscriptions/UI payloads.
+        spot = 0.0
+        if best_count > 0 and rows:
+            try:
+                from trading.strategy_runner.market_reader import MarketReader
+                mr = MarketReader(str(exchange).upper(), str(symbol).upper(), max_stale_seconds=60)
+                try:
+                    spot = float(mr.get_spot_price() or 0)
+                finally:
+                    mr.close_all()
+            except Exception:
+                spot = 0.0
+
+            if spot > 0:
+                def _strike_distance(r: Dict[str, Any]) -> float:
+                    try:
+                        return abs(float(r.get("strike") or 0.0) - spot)
+                    except Exception:
+                        return float("inf")
+
+                rows = sorted(rows, key=_strike_distance)[:best_count]
+            else:
+                rows = rows[:best_count]
+
+        subscribed_symbols: List[str] = []
+        if subscribe_live and rows:
+            try:
+                from broker.live_tick_service import get_tick_service
+                svc = get_tick_service()
+                symbols_to_sub = [
+                    str(r.get("trading_symbol") or r.get("fyers_symbol") or "").strip()
+                    for r in rows
+                ]
+                symbols_to_sub = [s for s in symbols_to_sub if s]
+                if symbols_to_sub:
+                    svc.subscribe(symbols_to_sub)
+                    subscribed_symbols = symbols_to_sub
+            except Exception as exc:
+                logger.warning(
+                    "option_token_universe subscribe_live failed for %s/%s: %s",
+                    symbol,
+                    exchange,
+                    exc,
+                )
+
         return {
             "symbol": str(symbol).upper(),
             "exchange": str(exchange).upper(),
             "expiry": expiry,
+            "spot": spot,
+            "best_count": best_count,
+            "subscribe_live": subscribe_live,
+            "subscribed": subscribed_symbols,
             "count": len(rows),
             "rows": rows,
         }

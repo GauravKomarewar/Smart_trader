@@ -248,12 +248,21 @@ export const api = {
     api.get<any[]>('/strategy/brokers'),
   availableSymbols: () =>
     api.get<any[]>('/strategy/available-symbols'),
-  optionTokenUniverse: (symbol: string, exchange: string, expiry: string = '', limit: number = 2000) => {
+  optionTokenUniverse: (
+    symbol: string,
+    exchange: string,
+    expiry: string = '',
+    limit: number = 2000,
+    bestCount: number = 0,
+    subscribeLive: boolean = false,
+  ) => {
     const qs = new URLSearchParams({
       symbol,
       exchange,
       expiry,
       limit: String(limit),
+      best_count: String(bestCount),
+      subscribe_live: String(subscribeLive),
     }).toString()
     return api.get<any>(`/strategy/option-token-universe?${qs}`)
   },

@@ -19,6 +19,12 @@ logger = logging.getLogger("smart_trader.api")
 router = APIRouter(prefix="/market", tags=["market"])
 
 
+# Tiny in-process cache for option-chain responses to avoid repeated broker calls
+# from concurrent WS/REST requests in the same second.
+_option_chain_cache: dict[str, tuple[float, dict]] = {}
+_OPTION_CHAIN_CACHE_TTL_SEC = 1.0
+
+
 def _detect_exchange(sym: str, fallback: str = "NSE") -> str:
     """Auto-detect exchange from symbol pattern. Options/futures → NFO, else fallback."""
     upper = sym.upper().replace(" ", "")
@@ -448,6 +454,15 @@ async def get_option_chain(
     sym   = symbol.upper()
     fyers = get_fyers_client()
     oc = None
+    cache_key = f"{sym}:{exchange.upper()}:{expiry or ''}:{int(strikes)}"
+
+    try:
+        import time as _t
+        cached = _option_chain_cache.get(cache_key)
+        if cached and (_t.time() - cached[0]) <= _OPTION_CHAIN_CACHE_TTL_SEC:
+            return cached[1]
+    except Exception:
+        pass
 
     # 1) Fyers live data — resolve expiry to Fyers timestamp if switching
     if fyers.is_live:
@@ -529,6 +544,16 @@ async def get_option_chain(
         ).start()
     except Exception as _oc_err:
         logger.debug("OC service enrich failed (non-fatal): %s", _oc_err)
+
+    try:
+        import time as _t
+        _option_chain_cache[cache_key] = (_t.time(), oc)
+        # Keep cache bounded to prevent unbounded growth with random symbols.
+        if len(_option_chain_cache) > 256:
+            oldest_key = min(_option_chain_cache.items(), key=lambda x: x[1][0])[0]
+            _option_chain_cache.pop(oldest_key, None)
+    except Exception:
+        pass
 
     return oc
 

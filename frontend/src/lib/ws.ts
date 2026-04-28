@@ -33,6 +33,8 @@ class SmartTraderWS {
   private subs: Map<WsEventType, Set<Subscriber>> = new Map()
   private _open = false
   private _subscribedBroker: string | null = null
+  private _subscribedOptionChain: { symbol: string; expiry: string; exchange: string } | null = null
+  private _subscribedMarketDepth: string | null = null
 
   get isOpen() { return this._open }
 
@@ -53,6 +55,14 @@ class SmartTraderWS {
       // restore broker subscription on reconnect
       if (this._subscribedBroker) {
         this._send({ action: 'subscribe_broker', config_id: this._subscribedBroker })
+      }
+      // restore option-chain subscription on reconnect
+      if (this._subscribedOptionChain) {
+        this._send({ action: 'subscribe_option_chain', ...this._subscribedOptionChain })
+      }
+      // restore market-depth subscription on reconnect
+      if (this._subscribedMarketDepth) {
+        this._send({ action: 'subscribe_market_depth', symbol: this._subscribedMarketDepth })
       }
       // Request immediate data push on connect/reconnect
       this._send({ action: 'force_refresh' })
@@ -113,21 +123,25 @@ class SmartTraderWS {
 
   /** Subscribe to option chain data for a symbol */
   subscribeOptionChain(symbol: string, expiry?: string, exchange?: string) {
-    this._send({ action: 'subscribe_option_chain', symbol, expiry: expiry || '', exchange: exchange || 'NSE' })
+    this._subscribedOptionChain = { symbol, expiry: expiry || '', exchange: exchange || 'NSE' }
+    this._send({ action: 'subscribe_option_chain', ...this._subscribedOptionChain })
   }
 
   /** Unsubscribe from option chain feed */
   unsubscribeOptionChain() {
+    this._subscribedOptionChain = null
     this._send({ action: 'unsubscribe_option_chain' })
   }
 
   /** Subscribe to market depth for a symbol */
   subscribeMarketDepth(symbol: string) {
+    this._subscribedMarketDepth = symbol
     this._send({ action: 'subscribe_market_depth', symbol })
   }
 
   /** Unsubscribe from market depth feed */
   unsubscribeMarketDepth() {
+    this._subscribedMarketDepth = null
     this._send({ action: 'unsubscribe_market_depth' })
   }
 
@@ -143,6 +157,8 @@ class SmartTraderWS {
   disconnect() {
     this._stopPing()
     this._subscribedBroker = null
+    this._subscribedOptionChain = null
+    this._subscribedMarketDepth = null
     if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null }
     this._open = false
   }
@@ -197,8 +213,7 @@ class MarketWebSocket {
   private reconnectDelay = 1000
   private maxDelay = 15_000
   private pingTimer: ReturnType<typeof setInterval> | null = null
-  private pendingSubscribe: Set<string> = new Set()
-  private subscribed: Set<string> = new Set()
+  private refCounts: Map<string, number> = new Map()
   private tickHandlers: Set<TickHandler> = new Set()
   private strategyEventHandlers: Set<StrategyEventHandler> = new Set()
 
@@ -211,10 +226,10 @@ class MarketWebSocket {
     this.ws.onopen = () => {
       this._open = true
       this._startPing()
-      // Re-subscribe any pending or previously subscribed symbols
-      const all = new Set([...this.pendingSubscribe, ...this.subscribed])
-      if (all.size > 0) {
-        this._send({ action: 'subscribe', symbols: [...all] })
+      // Re-subscribe desired symbols on reconnect
+      const all = [...this.refCounts.keys()]
+      if (all.length > 0) {
+        this._send({ action: 'subscribe', symbols: all })
       }
     }
 
@@ -227,8 +242,6 @@ class MarketWebSocket {
           this.tickHandlers.forEach(h => { try { h(tick) } catch { /* isolate bad handler */ } })
         } else if (msg.type === 'subscribed') {
           this.reconnectDelay = 1000
-          this.subscribed = new Set(msg.symbols ?? [])
-          this.pendingSubscribe.clear()
         } else if (msg.type === 'strategy_event') {
           this.strategyEventHandlers.forEach(h => {
             try {
@@ -253,22 +266,37 @@ class MarketWebSocket {
 
   subscribe(symbols: string[]) {
     if (!symbols.length) return
-    symbols.forEach(s => this.pendingSubscribe.add(s.toUpperCase()))
+    const toSubscribe: string[] = []
+    symbols.forEach((s) => {
+      const key = s.toUpperCase()
+      const cur = this.refCounts.get(key) ?? 0
+      this.refCounts.set(key, cur + 1)
+      if (cur === 0) toSubscribe.push(key)
+    })
+    if (!toSubscribe.length) return
     if (this._open) {
-      this._send({ action: 'subscribe', symbols })
+      this._send({ action: 'subscribe', symbols: toSubscribe })
     } else {
       this.connect()
     }
   }
 
   unsubscribe(symbols: string[]) {
-    if (this._open && symbols.length) {
-      this._send({ action: 'unsubscribe', symbols })
-    }
-    symbols.forEach(s => {
-      this.subscribed.delete(s.toUpperCase())
-      this.pendingSubscribe.delete(s.toUpperCase())
+    if (!symbols.length) return
+    const toUnsubscribe: string[] = []
+    symbols.forEach((s) => {
+      const key = s.toUpperCase()
+      const cur = this.refCounts.get(key) ?? 0
+      if (cur <= 1) {
+        this.refCounts.delete(key)
+        toUnsubscribe.push(key)
+      } else {
+        this.refCounts.set(key, cur - 1)
+      }
     })
+    if (this._open && toUnsubscribe.length) {
+      this._send({ action: 'unsubscribe', symbols: toUnsubscribe })
+    }
   }
 
   onTick(handler: TickHandler): () => void {

@@ -411,7 +411,7 @@ class StrategyExecutorService:
             schedule_mode = "weekly_current"
 
         try:
-            reader = MarketReader(exchange=exchange, symbol=symbol, max_stale_seconds=30)
+            reader = MarketReader(exchange=exchange, symbol=symbol, max_stale_seconds=10)
             expiry = reader.resolve_expiry_mode(schedule_mode)
             logger.info(
                 "Strategy %s: resolved expiry %s from MarketReader (mode=%s) for %s:%s",
@@ -1479,7 +1479,7 @@ class PerStrategyExecutor:
         identity = config.get("identity", {})
         exchange = identity.get("exchange", "NFO")
         symbol = identity.get("underlying", "NIFTY")
-        self.market = MarketReader(exchange, symbol, max_stale_seconds=30)
+        self.market = MarketReader(exchange, symbol, max_stale_seconds=10)
         # Store the raw expiry mode for per-tick re-evaluation (weekly_auto support).
         self._cycle_expiry_mode = str(
             (config.get("schedule", {}) or {}).get("expiry_mode", "weekly_current")

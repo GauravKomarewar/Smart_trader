@@ -246,6 +246,23 @@ CREATE TABLE IF NOT EXISTS market_ohlcv (
 CREATE INDEX IF NOT EXISTS idx_ohlcv_sym_tf_time ON market_ohlcv(symbol, timeframe, bar_time DESC);
 """
 
+_CREATE_MARKET_SUBSCRIPTIONS = """
+CREATE TABLE IF NOT EXISTS market_subscriptions (
+    symbol               TEXT PRIMARY KEY,
+    normalized_symbol    TEXT NOT NULL,
+    subscriber_count     INTEGER NOT NULL DEFAULT 0,
+    is_active            BOOLEAN NOT NULL DEFAULT FALSE,
+    last_subscribed_at   TIMESTAMPTZ,
+    last_unsubscribed_at TIMESTAMPTZ,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_subscriptions_active
+    ON market_subscriptions(is_active, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_market_subscriptions_normalized
+    ON market_subscriptions(normalized_symbol);
+"""
+
 # ── Strategy persistence tables ──────────────────────────────────────────────
 
 _CREATE_STRATEGY_RUNS = """
@@ -423,6 +440,7 @@ def init_trading_db():
         _CREATE_POSITION_SL_SETTINGS,
         _CREATE_MARKET_TICKS,
         _CREATE_MARKET_OHLCV,
+        _CREATE_MARKET_SUBSCRIPTIONS,
         _CREATE_STRATEGY_RUNS,
         _CREATE_STRATEGY_LEGS,
         _CREATE_STRATEGY_EVENTS,

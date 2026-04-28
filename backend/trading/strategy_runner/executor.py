@@ -37,7 +37,7 @@ class StrategyExecutor:
         self.market = MarketReader(
             exchange=identity["exchange"],
             symbol=identity["underlying"],
-            max_stale_seconds=30
+            max_stale_seconds=10
         )
         # Store the raw expiry mode so it can be re-evaluated each tick.
         # This enables weekly_auto to correctly switch to the next expiry on

@@ -327,7 +327,7 @@ class MarketReader:
         Called at the start of every executor tick so that no tick ever runs
         without chain data.
         """
-        # Fast path: already have valid data
+        # Fast path: already have valid and fresh-enough data
         conn = self._get_connection(expiry)
         if conn:
             try:
@@ -335,7 +335,17 @@ class MarketReader:
                     "SELECT value FROM meta WHERE key='spot_ltp'"
                 ).fetchone()
                 if row and float(row[0] or 0) > 0:
-                    return True
+                    age = self.get_snapshot_age_seconds(expiry)
+                    if age <= float(self.max_stale_seconds):
+                        return True
+                    logger.info(
+                        "MarketReader.ensure_chain_data: stale chain %.1fs > %.1fs for %s %s (expiry=%s) — refreshing",
+                        age,
+                        float(self.max_stale_seconds),
+                        self.exchange,
+                        self.symbol,
+                        expiry or "auto",
+                    )
             except Exception:
                 pass
 
