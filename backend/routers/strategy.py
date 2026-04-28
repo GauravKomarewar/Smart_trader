@@ -190,6 +190,28 @@ def _config_path(name: str) -> Path:
     return SAVED_CONFIGS_DIR / f"{_safe_name(name)}.json"
 
 
+def _normalize_chain_request(symbol: str, exchange: str) -> tuple[str, str]:
+    """Normalize symbol/exchange used by strategy chain status/fetch endpoints."""
+    sym = str(symbol or "NIFTY").strip().upper().replace(" ", "")
+    exch = str(exchange or "NFO").strip().upper()
+
+    # Common aliases used by UI/search that map to tradable F&O underlyings.
+    alias = {
+        "NIFTY50": "NIFTY",
+        "NIFTYBANK": "BANKNIFTY",
+    }
+    sym = alias.get(sym, sym)
+    if sym.endswith("-EQ"):
+        sym = sym[:-3]
+
+    # Option-chain files are stored in derivatives segment exchange names.
+    exch = {
+        "NSE": "NFO",
+        "BSE": "BFO",
+    }.get(exch, exch)
+    return sym, exch
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG CRUD
 # ══════════════════════════════════════════════════════════════════════════════
@@ -571,6 +593,7 @@ async def chain_status(
     from datetime import date as _date
     from trading.strategy_runner.market_reader import MarketReader
 
+    symbol, exchange = _normalize_chain_request(symbol, exchange)
     mr = MarketReader(exchange, symbol, max_stale_seconds=60)
     try:
         meta = mr.get_meta()
@@ -604,8 +627,9 @@ async def fetch_chain(
     Trigger an immediate option chain fetch for a symbol/exchange.
     Called from the strategy page when chain data is missing or stale.
     """
-    symbol = str(body.get("symbol", "NIFTY")).upper()
-    exchange = str(body.get("exchange", "NFO")).upper()
+    symbol = str(body.get("symbol", "NIFTY"))
+    exchange = str(body.get("exchange", "NFO"))
+    symbol, exchange = _normalize_chain_request(symbol, exchange)
     try:
         from trading.utils.option_chain_fetcher import fetch_and_store_from_broker
         result = fetch_and_store_from_broker(exchange, symbol)

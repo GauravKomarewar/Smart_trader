@@ -252,22 +252,44 @@ class PositionSLManager:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _canon_symbol(value: Optional[str]) -> str:
+        s = str(value or "").strip().upper()
+        if ":" in s:
+            s = s.split(":", 1)[1]
+        if s.endswith("-EQ"):
+            s = s[:-3]
+        return s
+
+    @staticmethod
+    def _norm_product(value: Optional[str]) -> str:
+        v = str(value or "").strip().upper()
+        if v in {"M", "MIS"}:
+            return "MIS"
+        if v in {"I", "NRML", "NORMAL"}:
+            return "NRML"
+        if v in {"C", "CNC"}:
+            return "CNC"
+        return v
+
     def _get_position_snapshot(self, user_id: str, config_id: str, pos_key: str) -> Optional[dict]:
         """Return the latest position snapshot for a managed `pos_key`, if present."""
         from db.trading_db import get_trading_conn
         try:
             symbol, product = (pos_key.split("|") + [""])[:2]
+            symbol_key = self._canon_symbol(symbol)
+            product_key = self._norm_product(product)
             conn = get_trading_conn()
             try:
                 cur = conn.cursor()
                 cur.execute(
                     """
-                    SELECT data, exchange
+                    SELECT data, exchange, symbol
                     FROM mgr_positions
-                    WHERE user_id = %s AND config_id = %s AND symbol = %s
+                    WHERE user_id = %s AND config_id = %s
                     ORDER BY fetched_at DESC
                     """,
-                    (user_id, config_id, symbol),
+                    (user_id, config_id),
                 )
                 rows = cur.fetchall()
             finally:
@@ -277,31 +299,51 @@ class PositionSLManager:
                 logger.warning("_get_position_snapshot: no DB rows for %s/%s symbol=%s", config_id[:8], pos_key, symbol)
                 return None
 
-            for data, exchange in rows:
+            for data, exchange, db_symbol in rows:
                 if not data:
                     continue
                 p = data if isinstance(data, dict) else None
                 if not p:
                     continue
-                psym = str(p.get("tradingsymbol") or p.get("symbol") or "")
-                pprd = str(p.get("product") or p.get("prd") or p.get("productType") or "")
-                if psym != symbol or (product and pprd and pprd != product):
+
+                psym = self._canon_symbol(
+                    p.get("tradingsymbol") or p.get("symbol") or p.get("tsym") or db_symbol
+                )
+                db_sym = self._canon_symbol(db_symbol)
+                if psym != symbol_key and db_sym != symbol_key:
                     continue
 
-                qty_raw = float(
+                pprd = self._norm_product(
+                    p.get("product") or p.get("prd") or p.get("productType")
+                )
+                if product_key and pprd and pprd != product_key:
+                    continue
+
+                qty_abs = float(
                     p.get("netQty")
                     or p.get("netqty")
+                    or p.get("net_qty")
+                    or p.get("net_quantity")
+                    or p.get("quantity")
                     or p.get("qty")
                     or 0
                 )
-                side = str(p.get("side") or ("SELL" if qty_raw < 0 else "BUY")).upper()
+                side_raw = str(p.get("side") or p.get("transactionType") or "").upper()
+                qty_raw = -abs(qty_abs) if side_raw in {"SELL", "S"} else qty_abs
+                side = "SELL" if qty_raw < 0 else "BUY"
                 return {
-                    "ltp": float(p.get("ltp") or p.get("lastPrice") or p.get("lp") or 0),
+                    "ltp": float(
+                        p.get("ltp")
+                        or p.get("lastPrice")
+                        or p.get("last_price")
+                        or p.get("lp")
+                        or 0
+                    ),
                     "side": side,
                     "qty": int(abs(qty_raw)),
                     "avg_price": float(p.get("avgPrice") or p.get("averagePrice") or p.get("avg_price") or 0),
                     "exchange": str(p.get("exchange") or p.get("exch") or exchange or "NSE"),
-                    "product": pprd or product,
+                    "product": pprd or product_key,
                 }
 
             logger.warning("_get_position_snapshot: no matching row for %s/%s (rows=%d)", config_id[:8], pos_key, len(rows))
