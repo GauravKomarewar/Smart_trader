@@ -2,44 +2,23 @@
 Fyers ScriptMaster — Symbol Master Loader
 ==========================================
 
-Downloads and caches Fyers instrument CSV files.
+Downloads and caches Fyers instrument JSON files.
 Mirrors the design of shoonya_platform/scripts/scriptmaster.py.
 
-CSV Sources (no auth required):
-    NSE_FO.csv  — NSE F&O  (futures + options)
-    BSE_FO.csv  — BSE F&O
-    NSE_CM.csv  — NSE equity
-    BSE_CM.csv  — BSE equity
-    MCX_COM.csv — MCX commodities (CRUDEOIL, GOLD, SILVER, etc.)
-    NSE_CD.csv  — NSE currency derivatives (USDINR, EURINR, etc.)
-    BSE_CD.csv  — BSE currency derivatives
-
-Column layout (no headers in file):
-    0  fyToken          — unique Fyers token (long int as str)
-    1  description      — human name e.g. "NIFTY 28 Apr 26 FUT"
-    2  instrument_code  — 11=futures, 10=equity, 12=options
-    3  lot_size
-    4  tick_size
-    5  isin
-    6  trading_hours
-    7  last_updated_date
-    8  expiry_epoch     — Unix timestamp (empty for equity)
-    9  fyers_symbol     — "NSE:NIFTY26APRFUT"  (the key used in API calls)
-    10 exchange_code    — 10=NSE, 11=BSE, 20=NFO, 21=BFO
-    11 segment_code
-    12 token            — short numeric token (e.g. 66691)
-    13 underlying       — "NIFTY", "RELIANCE", etc.
-    14 underlying_token — underlying instrument token
-    15 strike_price     — -1.0 for non-options
-    16 option_type      — CE / PE / XX (XX = futures / equity)
-    17 …               — extra cols; ignored
+JSON Sources (no auth required):
+    NSE_FO_sym_master.json  — NSE equity derivatives
+    BSE_FO_sym_master.json  — BSE equity derivatives
+    NSE_CM_sym_master.json  — NSE equity
+    BSE_CM_sym_master.json  — BSE equity
+    MCX_COM_sym_master.json — MCX commodities
+    NSE_COM_sym_master.json — NSE commodities
+    NSE_CD_sym_master.json  — NSE currency derivatives
 
 SAFE TO USE IN PRODUCTION — download once per day, serve from disk cache.
 """
 from __future__ import annotations
 
-import csv
-import io
+import json
 import logging
 import threading
 import tempfile
@@ -49,29 +28,28 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from core.daily_refresh import current_refresh_cycle_start, now_ist
+from scripts.scriptmaster_export_utils import write_unified_csv
 
 logger = logging.getLogger("smart_trader.fyers_scriptmaster")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-SCRIPTMASTER_VERSION = "1.0"
+SCRIPTMASTER_VERSION = "1.1"
 
 BASE_URL = "https://public.fyers.in/sym_details"
 
 SCRIPTMASTER_URLS: Dict[str, str] = {
-    "NSE_FO":  f"{BASE_URL}/NSE_FO.csv",
-    "BSE_FO":  f"{BASE_URL}/BSE_FO.csv",
-    "NSE_CM":  f"{BASE_URL}/NSE_CM.csv",
-    "BSE_CM":  f"{BASE_URL}/BSE_CM.csv",
-    "MCX_COM": f"{BASE_URL}/MCX_COM.csv",
-    "NSE_CD":  f"{BASE_URL}/NSE_CD.csv",
-    "BSE_CD":  f"{BASE_URL}/BSE_CD.csv",
+    "NSE_FO":  f"{BASE_URL}/NSE_FO_sym_master.json",
+    "NSE_CM":  f"{BASE_URL}/NSE_CM_sym_master.json",
+    "BSE_CM":  f"{BASE_URL}/BSE_CM_sym_master.json",
+    "BSE_FO":  f"{BASE_URL}/BSE_FO_sym_master.json",
+    "MCX_COM": f"{BASE_URL}/MCX_COM_sym_master.json",
 }
 
+ALLOWED_CANONICAL_EXCHANGES = {"NSE", "NFO", "BSE", "BFO", "MCX"}
+
 # ── Instrument type codes → human label ───────────────────────────────────────
-# Fyers CSV instrument_code field (column 2):
-#   FO segments: 11=index futures, 13=stock futures, 14=index options, 15=stock options
-#   CM segments: 0/10/50=equity, 2=bond/NCD, 5=govt-sec, 8=MF, 9=ETF
+# Fyers JSON field exInstType generally maps to these known values.
 _INSTR_CODE: Dict[str, str] = {
     "0":  "EQ",    # NSE/BSE equity shares
     "10": "EQ",    # NSE/BSE equity
@@ -129,6 +107,38 @@ def _epoch_to_date(epoch_str: str) -> str:
         return ""
 
 
+def _expiry_to_date_and_epoch(expiry_value: Any) -> tuple[str, int]:
+    """Normalize Fyers JSON expiryDate into display date and epoch seconds."""
+    if expiry_value in (None, ""):
+        return "", 0
+
+    raw = str(expiry_value).strip()
+    if not raw:
+        return "", 0
+
+    # Usually provided as unix timestamp (seconds/milliseconds).
+    if raw.isdigit():
+        try:
+            ts = int(raw)
+            if ts <= 0:
+                return "", 0
+            if ts > 10_000_000_000:
+                ts //= 1000
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            return dt.strftime("%-d-%b-%Y"), ts
+        except (ValueError, OverflowError):
+            return "", 0
+
+    # Fallback for non-epoch values.
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+            return dt.strftime("%-d-%b-%Y"), int(dt.timestamp())
+        except ValueError:
+            continue
+    return "", 0
+
+
 def _exchange_from_segment(segment_key: str) -> str:
     """Derive canonical exchange name from segment key (NSE_FO → NFO, NSE_CM → NSE)."""
     mapping = {
@@ -137,42 +147,49 @@ def _exchange_from_segment(segment_key: str) -> str:
         "NSE_CM":  "NSE",
         "BSE_CM":  "BSE",
         "MCX_COM": "MCX",
+        "NSE_COM": "NSECOM",
         "NSE_CD":  "CDS",
-        "BSE_CD":  "BCD",
     }
     return mapping.get(segment_key, segment_key)
 
 
-# ── CSV parsing ───────────────────────────────────────────────────────────────
+# ── JSON parsing ──────────────────────────────────────────────────────────────
 
-def _parse_csv(content: str, segment_key: str) -> tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
-    """Parse a Fyers symbol master CSV (no header row)."""
+def _parse_json(content: str, segment_key: str) -> tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+    """Parse a Fyers symbol master JSON payload."""
     exchange = _exchange_from_segment(segment_key)
     records: Dict[str, Dict[str, Any]] = {}
     token_map: Dict[str, str] = {}
 
-    for row in csv.reader(io.StringIO(content)):
-        if len(row) < 14:
+    payload = json.loads(content)
+    if not isinstance(payload, dict):
+        return records, token_map
+
+    for ticker, item in payload.items():
+        if not isinstance(item, dict):
             continue
         try:
-            fy_token    = row[0].strip()
-            description = row[1].strip()
-            instr_code  = row[2].strip()
-            lot_size    = int(float(row[3])) if row[3] else 1
-            tick_size   = float(row[4]) if row[4] else 0.05
-            isin        = row[5].strip() if len(row) > 5 else ""
-            expiry_epoch = row[8].strip() if len(row) > 8 else ""
-            fyers_symbol = row[9].strip() if len(row) > 9 else ""
-            short_token  = row[12].strip() if len(row) > 12 else ""
-            underlying   = row[13].strip() if len(row) > 13 else ""
-            strike_price = float(row[15]) if len(row) > 15 and row[15] else -1.0
-            option_type  = row[16].strip() if len(row) > 16 else "XX"
+            fy_token = str(item.get("fyToken", "")).strip()
+            description = str(item.get("symDetails") or item.get("symbolDesc") or item.get("exSymName") or "").strip()
+            instr_code = str(item.get("exInstType", "")).strip()
+            lot_size = int(float(item.get("minLotSize", 1) or 1))
+            tick_size = float(item.get("tickSize", 0.05) or 0.05)
+            isin = str(item.get("isin", "")).strip()
+            fyers_symbol = str(item.get("symTicker") or ticker or "").strip()
+            short_token = str(item.get("exToken", "")).strip()
+            underlying = str(item.get("underSym", "")).strip()
+            strike_raw = item.get("strikePrice")
+            strike_price = float(strike_raw) if strike_raw not in (None, "", "-1", -1, -1.0) else -1.0
+            option_type = str(item.get("optType", "XX") or "XX").strip()
 
             if not fyers_symbol:
                 continue
 
             instrument = _INSTR_CODE.get(instr_code, "EQ")
-            expiry_date = _epoch_to_date(expiry_epoch)
+            expiry_date, expiry_epoch = _expiry_to_date_and_epoch(item.get("expiryDate"))
+
+            if exchange not in ALLOWED_CANONICAL_EXCHANGES:
+                continue
 
             record: Dict[str, Any] = {
                 "FyersSymbol":   fyers_symbol,        # canonical key: "NSE:NIFTY26APRFUT"
@@ -187,7 +204,7 @@ def _parse_csv(content: str, segment_key: str) -> tuple[Dict[str, Dict[str, Any]
                 "TickSize":      tick_size,
                 "ISIN":          isin,
                 "Expiry":        expiry_date,
-                "ExpiryEpoch":   int(expiry_epoch) if expiry_epoch.isdigit() else 0,
+                "ExpiryEpoch":   expiry_epoch,
                 "StrikePrice":   strike_price if strike_price > 0 else None,
                 "OptionType":    option_type if option_type not in ("XX", "") else None,
             }
@@ -196,7 +213,7 @@ def _parse_csv(content: str, segment_key: str) -> tuple[Dict[str, Dict[str, Any]
                 token_map[short_token] = fyers_symbol
 
         except Exception as exc:
-            logger.debug("Skipping row in %s: %s", segment_key, exc)
+            logger.debug("Skipping symbol %s in %s: %s", ticker, segment_key, exc)
             continue
 
     return records, token_map
@@ -208,9 +225,9 @@ def _download(segment_key: str, url: str, temp_dir: str) -> str:
     logger.info("Downloading Fyers scriptmaster: %s", url)
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
-    raw_path = Path(temp_dir) / f"{segment_key}.csv"
+    raw_path = Path(temp_dir) / f"{segment_key}.json"
     raw_path.write_bytes(resp.content)
-    return raw_path.read_text()
+    return raw_path.read_text(encoding="utf-8")
 
 
 def _build_expiry_calendar() -> None:
@@ -249,7 +266,7 @@ def _build_expiry_calendar() -> None:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def refresh(force: bool = False) -> None:
-    """Download all segment CSV files and rebuild in-memory indices."""
+    """Download all segment JSON files and rebuild in-memory indices."""
     global _last_refresh
 
     if not force and not _needs_refresh():
@@ -263,7 +280,7 @@ def refresh(force: bool = False) -> None:
         for seg_key, url in SCRIPTMASTER_URLS.items():
             try:
                 content = _download(seg_key, url, temp_dir)
-                records, token_map = _parse_csv(content, seg_key)
+                records, token_map = _parse_json(content, seg_key)
                 temp_sm.update(records)
                 temp_tok[seg_key] = token_map
                 logger.info("Loaded %d symbols from %s", len(records), seg_key)
@@ -390,3 +407,25 @@ def tick_size(fyers_symbol: str) -> float:
     """Return tick size for a Fyers symbol."""
     rec = FYERS_SCRIPTMASTER.get(fyers_symbol)
     return rec["TickSize"] if rec else 0.05
+
+
+def export_cleaned_csv(output_path: Optional[str] = None) -> str:
+    """Export currently loaded Fyers records to a cleaned CSV file."""
+    if not FYERS_SCRIPTMASTER:
+        refresh()
+
+    with _LOCK:
+        rows = list(FYERS_SCRIPTMASTER.values())
+
+    if not rows:
+        raise RuntimeError("No Fyers scriptmaster data available to export")
+
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        out_path = Path(__file__).resolve().parent / "fyers_scriptmaster_cleaned.csv"
+
+    exported = write_unified_csv(rows, str(out_path), broker="fyers")
+
+    logger.info("Exported Fyers cleaned CSV: %s (%d rows)", out_path, len(rows))
+    return exported

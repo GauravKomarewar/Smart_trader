@@ -16,6 +16,13 @@ class EntryEngine:
         self.market = market
         self.condition_engine = ConditionEngine(state)
 
+    @staticmethod
+    def _canonical_trading_symbol(symbol: str) -> str:
+        s = str(symbol or "").strip()
+        if ":" in s:
+            s = s.split(":", 1)[1].strip()
+        return s
+
     def process_entry(self, entry_config: Dict[str, Any], symbol: str, default_expiry: str) -> List[LegState]:
         """
         Process entry legs according to JSON config.
@@ -157,7 +164,7 @@ class EntryEngine:
                 qty=lots,
                 entry_price=ltp,
                 ltp=ltp,
-                trading_symbol=fut_tsym,
+                trading_symbol=self._canonical_trading_symbol(fut_tsym),
             )
             # ✅ BUG-015 FIX: Populate lot_size from market reader at entry time
             try:
@@ -246,10 +253,12 @@ class EntryEngine:
                 vega=opt_data.get("vega", 0.0),
                 iv=opt_data.get("iv", 0.0),
                 trading_symbol=(
-                    opt_data.get("trading_symbol")
-                    or opt_data.get("tsym")
-                    or opt_data.get("symbol")
-                    or ""
+                    self._canonical_trading_symbol(
+                        opt_data.get("trading_symbol")
+                        or opt_data.get("tsym")
+                        or opt_data.get("symbol")
+                        or ""
+                    )
                 ),
             )
             # ✅ BUG-015 FIX: Populate lot_size from market reader at entry time

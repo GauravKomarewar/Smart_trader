@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional, Callable
 import re
+import time
 from .state import StrategyState, LegState
 from .models import InstrumentType, OptionType, Side
 import logging
@@ -15,6 +16,15 @@ class BrokerReconciliation:
     ):
         self.state = state
         self._lot_size_resolver = lot_size_resolver
+        self._last_untagged_warn_at: float = 0.0
+        self._empty_untagged_streak: int = 0
+
+    @staticmethod
+    def _canon_symbol(value: Any) -> str:
+        s = str(value or "").strip().upper()
+        if ":" in s:
+            s = s.split(":", 1)[1].strip()
+        return s
 
     def reconcile(self, broker_positions: List[Dict[str, Any]]) -> List[str]:
         """
@@ -26,22 +36,143 @@ class BrokerReconciliation:
         broker_tags = {p.get("tag") for p in broker_positions if p.get("tag")}
         has_tagged_positions = bool(broker_tags)
 
-        # Do not perform destructive tag-based close logic on broker snapshots
-        # that do not carry strategy leg tags (common for OMS/broker position APIs).
-        if broker_positions and not has_tagged_positions:
-            warnings.append(
-                "Broker positions are untagged; skipping strict tag reconciliation to avoid false closes"
+        # Build symbol-level aggregate for untagged reconciliation and price sync.
+        broker_netqty: Dict[str, int] = {}
+        broker_avg_price: Dict[str, float] = {}
+        broker_ltp: Dict[str, float] = {}
+        for p in broker_positions:
+            sym = self._canon_symbol(
+                p.get("symbol") or p.get("tsym") or p.get("tradingsymbol")
             )
-            logger.warning(
-                "RECONCILE | Untagged broker positions snapshot (%d rows) — "
-                "skip tag-based state close",
-                len(broker_positions),
+            if not sym:
+                continue
+
+            # Broker schemas differ; support common net quantity keys.
+            net_raw = p.get("netqty")
+            if net_raw is None:
+                net_raw = p.get("net_qty")
+            if net_raw is None:
+                net_raw = p.get("quantity")
+            if net_raw is None:
+                net_raw = p.get("qty")
+            try:
+                net = int(float(net_raw or 0))
+            except Exception:
+                net = 0
+            broker_netqty[sym] = broker_netqty.get(sym, 0) + net
+
+            avg = (
+                p.get("netavgprc")
+                or p.get("avg_price")
+                or p.get("upldprc")
+                or p.get("daybuyavgprc")
+                or p.get("daysellavgprc")
+                or p.get("avgprc")
             )
+            if avg is not None:
+                try:
+                    broker_avg_price[sym] = float(avg)
+                except Exception:
+                    pass
+
+            ltp = p.get("ltp") or p.get("last_price") or p.get("lp")
+            if ltp is not None:
+                try:
+                    broker_ltp[sym] = float(ltp)
+                except Exception:
+                    pass
+
+        # For untagged snapshots, prefer symbol/netqty reconciliation. Keep a
+        # throttled warning so operators know strict tag mode is not being used.
+        if not has_tagged_positions:
+            if broker_positions:
+                warnings.append(
+                    f"Untagged broker snapshot ({len(broker_positions)} rows) — using symbol/netqty reconciliation"
+                )
+            now_ts = time.time()
+            if now_ts - self._last_untagged_warn_at >= 60:
+                logger.warning(
+                    "RECONCILE | Untagged broker snapshot (%d rows) — "
+                    "using symbol/netqty reconciliation",
+                    len(broker_positions),
+                )
+                self._last_untagged_warn_at = now_ts
+
+            if broker_positions:
+                self._empty_untagged_streak = 0
+            else:
+                self._empty_untagged_streak += 1
 
         for tag, leg in self.state.legs.items():
-            if has_tagged_positions and leg.is_active and tag not in broker_tags:
-                warnings.append(f"Leg {tag} is active in state but missing in broker")
+            if not leg.is_active:
+                continue
+
+            # Tagged path: legacy strict behavior.
+            if has_tagged_positions:
+                if tag not in broker_tags:
+                    warnings.append(f"Leg {tag} is active in state but missing in broker")
+                    leg.close()
+                continue
+
+            # Untagged path: reconcile by trading symbol and net quantity.
+            sym = self._canon_symbol(getattr(leg, "trading_symbol", None) or leg.symbol)
+            if not sym:
+                continue
+
+            # Empty untagged snapshots can be transient API/session glitches.
+            # Require 2 consecutive empty reads before closing active legs.
+            if not broker_positions:
+                if self._empty_untagged_streak >= 2:
+                    warnings.append(
+                        f"Leg {tag} ({sym}) active in state but broker returned empty positions twice"
+                    )
+                    logger.warning(
+                        "RECONCILE | %s (%s) | closing after consecutive empty untagged snapshots",
+                        tag,
+                        sym,
+                    )
+                    leg.close()
+                continue
+
+            net = broker_netqty.get(sym)
+            if net is None or net == 0:
+                warnings.append(f"Leg {tag} ({sym}) is active in state but missing/flat in broker")
                 leg.close()
+                continue
+
+            # Sync side/qty and pricing from broker so strategy PnL aligns.
+            broker_side = Side.BUY if net > 0 else Side.SELL
+            if broker_side != leg.side:
+                warnings.append(
+                    f"Leg {tag} ({sym}) side mismatch state={leg.side.value} broker={broker_side.value}"
+                )
+
+            broker_qty = abs(net)
+            broker_lots = self._contracts_to_lots(broker_qty, leg.expiry)
+            if leg.qty != broker_lots:
+                logger.info(
+                    "RECONCILE | %s (%s) | lots state=%s -> broker=%s",
+                    tag,
+                    sym,
+                    leg.qty,
+                    broker_lots,
+                )
+                leg.qty = broker_lots
+
+            avg = broker_avg_price.get(sym)
+            if avg is not None and avg > 0 and abs(avg - leg.entry_price) > 0.01:
+                logger.info(
+                    "RECONCILE | %s (%s) | entry_price sync %.2f -> %.2f",
+                    tag,
+                    sym,
+                    leg.entry_price,
+                    avg,
+                )
+                leg.entry_price = avg
+
+            ltp = broker_ltp.get(sym)
+            if ltp is not None and ltp > 0:
+                leg.ltp = ltp
 
         for pos in broker_positions:
             tag = pos.get("tag")

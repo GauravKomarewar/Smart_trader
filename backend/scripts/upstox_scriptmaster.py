@@ -47,6 +47,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from core.daily_refresh import current_refresh_cycle_start, now_ist
+from scripts.scriptmaster_export_utils import write_unified_csv
 
 logger = logging.getLogger("smart_trader.upstox_scriptmaster")
 
@@ -69,8 +70,10 @@ _SEGMENT_MAP: Dict[str, str] = {
     "BSE_FO":    "BFO",
     "BCD_FO":    "BCD",
     "MCX_FO":    "MCX",
-    "NSE_COM":   "MCX",
+    "NSE_COM":   "NSECOM",
 }
+
+ALLOWED_CANONICAL_EXCHANGES = {"NSE", "NFO", "BSE", "BFO", "MCX"}
 
 # Instrument type → canonical
 _INSTR_MAP: Dict[str, str] = {
@@ -189,6 +192,8 @@ def _parse_json(raw_data: list) -> Dict[str, Dict[str, Any]]:
             freeze_qty = 0
 
         canonical_exchange = _SEGMENT_MAP.get(segment, exchange)
+        if canonical_exchange not in ALLOWED_CANONICAL_EXCHANGES:
+            continue
         canonical_instr = _INSTR_MAP.get(instrument_type, instrument_type)
         expiry = _normalise_expiry(expiry_raw)
         underlying = _extract_underlying(trading_symbol, instrument_type, short_name or name)
@@ -365,6 +370,28 @@ def get_record_by_instrument_key(instrument_key: str) -> Optional[Dict[str, Any]
 
 def get_total_count() -> int:
     return len(UPSTOX_SCRIPTMASTER)
+
+
+def export_cleaned_csv(output_path: Optional[str] = None) -> str:
+    """Export currently loaded Upstox records to a cleaned CSV file."""
+    if not UPSTOX_SCRIPTMASTER:
+        refresh()
+
+    with _LOCK:
+        rows = list(UPSTOX_SCRIPTMASTER.values())
+
+    if not rows:
+        raise RuntimeError("No Upstox scriptmaster data available to export")
+
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        out_path = Path(__file__).resolve().parent / "upstox_scriptmaster_cleaned.csv"
+
+    exported = write_unified_csv(rows, str(out_path), broker="upstox")
+
+    logger.info("Exported Upstox cleaned CSV: %s (%d rows)", out_path, len(rows))
+    return exported
 
 
 def _parse_expiry_sort(expiry_str: str) -> datetime:

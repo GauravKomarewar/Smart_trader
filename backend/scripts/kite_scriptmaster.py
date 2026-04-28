@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from core.daily_refresh import current_refresh_cycle_start, now_ist
+from scripts.scriptmaster_export_utils import write_unified_csv
 
 logger = logging.getLogger("smart_trader.kite_scriptmaster")
 
@@ -42,7 +43,8 @@ logger = logging.getLogger("smart_trader.kite_scriptmaster")
 SCRIPTMASTER_VERSION = "1.0"
 BASE_URL = "https://api.kite.trade/instruments"
 
-EXCHANGES = ["NSE", "BSE", "NFO", "CDS", "BCD", "MCX"]
+EXCHANGES = ["NSE", "BSE", "NFO", "BFO", "MCX"]
+ALLOWED_CANONICAL_EXCHANGES = {"NSE", "NFO", "BSE", "BFO", "MCX"}
 
 # ── Instrument type → canonical ──────────────────────────────────────────────
 
@@ -175,6 +177,8 @@ def _parse_csv(content: str) -> Dict[str, Dict[str, Any]]:
         canonical_instr = _INSTR_MAP.get(instrument_type, instrument_type)
         expiry = _normalise_expiry(expiry_raw)
         canonical_exchange = _SEGMENT_TO_EXCHANGE.get(segment, exchange)
+        if canonical_exchange not in ALLOWED_CANONICAL_EXCHANGES:
+            continue
         underlying = _extract_underlying(tradingsymbol, instrument_type, name)
 
         option_type = None
@@ -374,6 +378,28 @@ def get_record_by_token(instrument_token: str) -> Optional[Dict[str, Any]]:
 
 def get_total_count() -> int:
     return len(KITE_SCRIPTMASTER)
+
+
+def export_cleaned_csv(output_path: Optional[str] = None) -> str:
+    """Export currently loaded Kite records to a cleaned CSV file."""
+    if not KITE_SCRIPTMASTER:
+        refresh()
+
+    with _LOCK:
+        rows = list(KITE_SCRIPTMASTER.values())
+
+    if not rows:
+        raise RuntimeError("No Kite scriptmaster data available to export")
+
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        out_path = Path(__file__).resolve().parent / "kite_scriptmaster_cleaned.csv"
+
+    exported = write_unified_csv(rows, str(out_path), broker="kite")
+
+    logger.info("Exported Kite cleaned CSV: %s (%d rows)", out_path, len(rows))
+    return exported
 
 
 def _parse_expiry_sort(expiry_str: str) -> datetime:

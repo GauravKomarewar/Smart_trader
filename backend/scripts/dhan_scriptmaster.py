@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from core.daily_refresh import current_refresh_cycle_start, now_ist
+from scripts.scriptmaster_export_utils import write_unified_csv
 
 logger = logging.getLogger("smart_trader.dhan_scriptmaster")
 
@@ -45,6 +46,8 @@ _SEGMENT_MAP: Dict[str, Dict[str, str]] = {
     "BSE": {"E": "BSE", "D": "BFO", "C": "BCD"},
     "MCX": {"M": "MCX", "D": "MCX"},
 }
+
+ALLOWED_CANONICAL_EXCHANGES = {"NSE", "NFO", "BSE", "BFO", "MCX"}
 
 # Instrument name → canonical
 _INSTR_MAP: Dict[str, str] = {
@@ -150,6 +153,8 @@ def _parse_csv(content: str) -> Dict[str, Dict[str, Any]]:
 
         # Derive canonical exchange
         exchange = _SEGMENT_MAP.get(exch_id, {}).get(segment, exch_id)
+        if exchange not in ALLOWED_CANONICAL_EXCHANGES:
+            continue
         canonical_instr = _INSTR_MAP.get(instrument_name, instrument_name)
         expiry = _normalise_expiry(expiry_raw)
 
@@ -328,6 +333,28 @@ def get_record_by_security_id(security_id: str) -> Optional[Dict[str, Any]]:
 
 def get_total_count() -> int:
     return len(DHAN_SCRIPTMASTER)
+
+
+def export_cleaned_csv(output_path: Optional[str] = None) -> str:
+    """Export currently loaded Dhan records to a cleaned CSV file."""
+    if not DHAN_SCRIPTMASTER:
+        refresh()
+
+    with _LOCK:
+        rows = list(DHAN_SCRIPTMASTER.values())
+
+    if not rows:
+        raise RuntimeError("No Dhan scriptmaster data available to export")
+
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        out_path = Path(__file__).resolve().parent / "dhan_scriptmaster_cleaned.csv"
+
+    exported = write_unified_csv(rows, str(out_path), broker="dhan")
+
+    logger.info("Exported Dhan cleaned CSV: %s (%d rows)", out_path, len(rows))
+    return exported
 
 
 def _parse_expiry_sort(expiry_str: str) -> datetime:

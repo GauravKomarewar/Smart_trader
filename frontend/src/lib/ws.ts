@@ -224,7 +224,7 @@ class MarketWebSocket {
         if (msg.type === 'tick' && msg.data) {
           this.reconnectDelay = 2000  // reset on real data
           const tick = msg.data as MarketTick
-          this.tickHandlers.forEach(h => { try { h(tick) } catch {} })
+          this.tickHandlers.forEach(h => { try { h(tick) } catch { /* isolate bad handler */ } })
         } else if (msg.type === 'subscribed') {
           this.reconnectDelay = 1000
           this.subscribed = new Set(msg.symbols ?? [])
@@ -233,7 +233,7 @@ class MarketWebSocket {
           this.strategyEventHandlers.forEach(h => {
             try {
               h({ run_id: msg.run_id ?? '', strategy: msg.strategy ?? '', event: msg.event ?? {} })
-            } catch {}
+            } catch { /* isolate bad handler */ }
           })
         }
       } catch { /* ignore malformed */ }

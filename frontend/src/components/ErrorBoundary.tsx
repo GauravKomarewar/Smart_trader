@@ -6,7 +6,7 @@ interface State {
 }
 
 export class ErrorBoundary extends React.Component<
-  React.PropsWithChildren<{}>,
+  React.PropsWithChildren<object>,
   State
 > {
   state: State = { hasError: false, error: null }

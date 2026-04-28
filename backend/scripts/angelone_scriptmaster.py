@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from core.daily_refresh import current_refresh_cycle_start, now_ist
+from scripts.scriptmaster_export_utils import write_unified_csv
 
 logger = logging.getLogger("smart_trader.angelone_scriptmaster")
 
@@ -61,6 +62,8 @@ _EXCH_SEG_MAP: Dict[str, str] = {
     "nse_index": "NSE",
     "bse_index": "BSE",
 }
+
+ALLOWED_CANONICAL_EXCHANGES = {"NSE", "NFO", "BSE", "BFO", "MCX"}
 
 # Instrument type → canonical
 _INSTR_MAP: Dict[str, str] = {
@@ -167,6 +170,8 @@ def _parse_json(raw_data: list) -> Dict[str, Dict[str, Any]]:
             tick_size = 0.05
 
         exchange = _EXCH_SEG_MAP.get(exch_seg, exch_seg.upper())
+        if exchange not in ALLOWED_CANONICAL_EXCHANGES:
+            continue
         canonical_instr = _INSTR_MAP.get(instrumenttype, instrumenttype)
         expiry = _parse_expiry(expiry_raw)
         underlying = _extract_underlying(symbol, instrumenttype)
@@ -351,6 +356,28 @@ def get_record_by_symbol(symbol: str) -> Optional[Dict[str, Any]]:
 
 def get_total_count() -> int:
     return len(ANGELONE_SCRIPTMASTER)
+
+
+def export_cleaned_csv(output_path: Optional[str] = None) -> str:
+    """Export currently loaded Angel One records to a cleaned CSV file."""
+    if not ANGELONE_SCRIPTMASTER:
+        refresh()
+
+    with _LOCK:
+        rows = list(ANGELONE_SCRIPTMASTER.values())
+
+    if not rows:
+        raise RuntimeError("No Angel One scriptmaster data available to export")
+
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        out_path = Path(__file__).resolve().parent / "angelone_scriptmaster_cleaned.csv"
+
+    exported = write_unified_csv(rows, str(out_path), broker="angelone")
+
+    logger.info("Exported Angel One cleaned CSV: %s (%d rows)", out_path, len(rows))
+    return exported
 
 
 def _parse_expiry_sort(expiry_str: str) -> datetime:

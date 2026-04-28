@@ -88,11 +88,11 @@ export default function AppLayout() {
   const mktLabels = { pre: '◦ Pre-Market', open: '● Market Open', post: '● Market Closed' }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-bg-base">
+    <div className="app-safe-shell flex overflow-hidden bg-bg-base">
 
       {/* ── Sidebar ── */}
       <aside className={cn(
-        'fixed inset-y-0 left-0 z-50 w-[220px] bg-bg-surface border-r border-border',
+        'app-safe-sidebar fixed left-0 z-50 w-[220px] bg-bg-surface border-r border-border',
         'flex flex-col transition-transform duration-200',
         sidebarOpen ? 'translate-x-0' : '-translate-x-full'
       )}>
@@ -217,7 +217,7 @@ export default function AppLayout() {
 
       {/* ── Main content ── */}
       <div className={cn(
-        'flex-1 flex flex-col min-w-0 overflow-hidden',
+        'app-safe-main flex-1 flex flex-col min-w-0 overflow-hidden',
         'transition-[margin] duration-200',
         sidebarOpen ? 'lg:ml-[220px]' : 'ml-0'
       )}>

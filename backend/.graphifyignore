@@ -1,0 +1,18 @@
+# Keep architecture graph focused on source modules
+
+# Generated artifacts and caches
+graphify-out/
+__pycache__/
+.pytest_cache/
+
+# Runtime logs and large data
+*.log
+logs/
+data/
+
+# Environment and static payloads
+.env
+static/
+
+# Test corpora can dominate graph size
+tests/

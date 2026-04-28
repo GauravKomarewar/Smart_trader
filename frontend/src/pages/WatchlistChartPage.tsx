@@ -907,8 +907,8 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
       cancelAnimationFrame(rafId)
       _unsubTick?.()
       _ro?.disconnect()
-      if (_chart) { try { _chart.remove() } catch {} }
-      if (_subChart) { try { _subChart.remove() } catch {} }
+      if (_chart) { try { _chart.remove() } catch { /* already disposed */ } }
+      if (_subChart) { try { _subChart.remove() } catch { /* already disposed */ } }
       chartRef.current = null
       mainSeriesRef.current = null
     }

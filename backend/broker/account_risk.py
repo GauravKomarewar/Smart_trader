@@ -204,6 +204,9 @@ class AccountRiskManager:
         self._dynamic_max_loss:   float = self._config.max_daily_loss
         self._daily_loss_hit:     bool  = False
         self._warning_sent:       bool  = False
+        self._breach_pnl:         Optional[float] = None
+        self._breach_limit:       Optional[float] = None
+        self._breach_at:          Optional[str] = None
         self._lockout_until:      Optional[datetime] = None
         self._consecutive_loss_days: int = 0
         self._force_exit_triggered:  bool = False
@@ -293,11 +296,7 @@ class AccountRiskManager:
 
             # Daily-loss hit blocks ALL new entries
             if self._daily_loss_hit and not is_exit:
-                reason = (
-                    f"Daily loss limit breached for {self.client_id} "
-                    f"(P&L: Rs.{self._daily_pnl:.0f}, limit: Rs.{self._dynamic_max_loss:.0f}). "
-                    "All new orders blocked for today."
-                )
+                reason = f"{self._daily_halt_reason()} All new orders blocked for today."
                 self._log.warning("ORDER BLOCKED — %s", reason)
                 return False, reason
 
@@ -387,6 +386,9 @@ class AccountRiskManager:
                 self._daily_loss_hit       = True
                 self._force_exit_triggered = True
                 self._consecutive_loss_days += 1
+                self._breach_pnl = pnl
+                self._breach_limit = self._dynamic_max_loss
+                self._breach_at = datetime.now(timezone.utc).isoformat()
 
                 self._log.critical(
                     "RISK BREACH — PnL Rs.%.0f hit limit Rs.%.0f for client=%s "
@@ -602,11 +604,7 @@ class AccountRiskManager:
 
             # Today's breach
             if self._daily_loss_hit:
-                return (
-                    False,
-                    f"Daily loss limit breached for {self.client_id} "
-                    f"(P&L Rs.{self._daily_pnl:.0f} <= Rs.{self._dynamic_max_loss:.0f})",
-                )
+                return False, self._daily_halt_reason()
             return True, ""
 
     def get_status(self) -> dict:
@@ -809,11 +807,24 @@ class AccountRiskManager:
         self._dynamic_max_loss   = self._config.max_daily_loss
         self._daily_loss_hit     = False
         self._warning_sent       = False
+        self._breach_pnl         = None
+        self._breach_limit       = None
+        self._breach_at          = None
         self._force_exit_triggered = False
         self._manual_trade_detected = False
         self._last_position_signature = None
         # NOTE: _lockout_until is intentionally NOT reset here
         self._save_state()
+
+    def _daily_halt_reason(self) -> str:
+        """Human-readable reason for current-day loss halt."""
+        breach_pnl = self._breach_pnl if self._breach_pnl is not None else self._daily_pnl
+        breach_limit = self._breach_limit if self._breach_limit is not None else self._dynamic_max_loss
+        return (
+            f"Daily loss limit breached for {self.client_id} "
+            f"(breached at P&L Rs.{breach_pnl:.0f} vs limit Rs.{breach_limit:.0f}; "
+            f"current P&L Rs.{self._daily_pnl:.0f})."
+        )
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
@@ -829,6 +840,9 @@ class AccountRiskManager:
                 "dynamic_max_loss":      self._dynamic_max_loss,
                 "daily_loss_hit":        self._daily_loss_hit,
                 "warning_sent":          self._warning_sent,
+                "breach_pnl":            self._breach_pnl,
+                "breach_limit":          self._breach_limit,
+                "breach_at":             self._breach_at,
                 "lockout_until":         (
                     self._lockout_until.isoformat() if self._lockout_until else None
                 ),
@@ -891,6 +905,9 @@ class AccountRiskManager:
             self._dynamic_max_loss   = float(state.get("dynamic_max_loss",  self._config.max_daily_loss))
             self._daily_loss_hit     = bool( state.get("daily_loss_hit",    False))
             self._warning_sent       = bool( state.get("warning_sent",      False))
+            self._breach_pnl         = state.get("breach_pnl")
+            self._breach_limit       = state.get("breach_limit")
+            self._breach_at          = state.get("breach_at")
             self._force_exit_triggered = bool(state.get("force_exit_triggered", False))
             self._manual_trade_detected = bool(state.get("manual_trade_detected", False))
             self._last_position_signature = state.get("position_signature")

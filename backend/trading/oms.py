@@ -70,6 +70,7 @@ class OrderRequest:
     quantity:    int
     price:       float = 0.0
     trigger_price: float = 0.0
+    unique_key:  str = ""
     strategy_id: Optional[str] = None
     tag:         Optional[str] = None        # ENTRY / EXIT / ADJUST
     test_mode:   bool = False
@@ -227,6 +228,7 @@ class OrderManagementSystem:
                 broker_resp = self.broker.place_order({
                     "symbol":        req.symbol,
                     "exchange":      req.exchange,
+                    "unique_key":    req.unique_key,
                     "side":          order.side,
                     "order_type":    order.order_type,
                     "product":       order.product,

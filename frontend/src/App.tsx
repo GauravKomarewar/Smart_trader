@@ -36,7 +36,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
   if (isChecking) {
     return (
-      <div className="h-screen w-screen flex items-center justify-center bg-bg-base">
+      <div className="safe-screen flex items-center justify-center bg-bg-base">
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 border-2 border-brand border-t-transparent rounded-full animate-spin" />
           <span className="text-text-sec text-sm">Loading Smart Trader…</span>
@@ -56,7 +56,7 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isChecking, user } = useAuthStore()
   const { toast } = useToastStore()
   if (isChecking) return (
-    <div className="h-screen w-screen flex items-center justify-center bg-bg-base">
+    <div className="safe-screen flex items-center justify-center bg-bg-base">
       <div className="w-8 h-8 border-2 border-brand border-t-transparent rounded-full animate-spin" />
     </div>
   )

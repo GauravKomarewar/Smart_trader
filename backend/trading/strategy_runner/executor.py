@@ -211,6 +211,21 @@ class StrategyExecutor:
             s = s.split(":", 1)[1].strip()
         return s
 
+    @staticmethod
+    def _resolve_order_identity(trading_symbol: str, exchange: str) -> tuple[str, str]:
+        """Return (unique_key, resolved_exchange) from symbols DB for a symbol."""
+        try:
+            from db.symbols_db import lookup_by_trading_symbol as _lookup
+
+            rec = _lookup(trading_symbol, exchange)
+            if not rec:
+                return "", exchange
+            unique_key = str(rec.get("unique_key") or "").strip().upper()
+            resolved_exchange = str(rec.get("exchange") or exchange or "").strip().upper() or exchange
+            return unique_key, resolved_exchange
+        except Exception:
+            return "", exchange
+
     def _allow_time_exit_attempt(self, reason: str, now: datetime) -> bool:
         """Throttle repeated time/EOD exit attempts for the same reason."""
         reason_s = str(reason or "")
@@ -284,6 +299,7 @@ class StrategyExecutor:
             tsym = self._canonical_trading_symbol(leg.trading_symbol or leg.symbol)
             leg.trading_symbol = tsym
             exchange = getattr(self.market, 'exchange', 'NFO')
+            unique_key, exchange = self._resolve_order_identity(tsym, exchange)
 
             req = OrderRequest(
                 symbol=tsym,
@@ -293,6 +309,7 @@ class StrategyExecutor:
                 product=ProductType.NRML,
                 quantity=leg.order_qty,
                 price=leg.entry_price,
+                unique_key=unique_key,
                 strategy_id=self._strategy_id,
                 tag="ENTRY",
                 test_mode=self._paper_mode,
@@ -368,6 +385,7 @@ class StrategyExecutor:
             tsym = self._canonical_trading_symbol(leg.trading_symbol or leg.symbol)
             leg.trading_symbol = tsym
             exchange = getattr(self.market, 'exchange', 'NFO')
+            unique_key, exchange = self._resolve_order_identity(tsym, exchange)
 
             req = OrderRequest(
                 symbol=tsym,
@@ -377,6 +395,7 @@ class StrategyExecutor:
                 product=ProductType.NRML,
                 quantity=leg.order_qty,
                 price=leg.ltp,
+                unique_key=unique_key,
                 strategy_id=self._strategy_id,
                 tag="EXIT",
                 test_mode=self._paper_mode,
@@ -552,8 +571,10 @@ class StrategyExecutor:
         try:
             from trading.oms import OrderRequest, OrderSide, OrderType, ProductType
             exit_side = OrderSide.SELL if leg.side == Side.BUY else OrderSide.BUY
-            tsym = leg.trading_symbol or leg.symbol
+            tsym = self._canonical_trading_symbol(leg.trading_symbol or leg.symbol)
+            leg.trading_symbol = tsym
             exchange = getattr(self.market, 'exchange', 'NFO')
+            unique_key, exchange = self._resolve_order_identity(tsym, exchange)
             fill_price = leg.exit_price if (leg.exit_price and leg.exit_price > 0) else leg.ltp
 
             req = OrderRequest(
@@ -564,6 +585,7 @@ class StrategyExecutor:
                 product=ProductType.NRML,
                 quantity=leg.order_qty,
                 price=fill_price,
+                unique_key=unique_key,
                 strategy_id=self._strategy_id,
                 tag="ADJUSTMENT",
                 test_mode=self._paper_mode,
@@ -958,18 +980,24 @@ class StrategyExecutor:
             try:
                 raw_pos = self._oms.broker.get_positions() or []
                 if raw_pos:
+                    def _canon(v: Any) -> str:
+                        s = str(v or "").strip().upper()
+                        if ":" in s:
+                            s = s.split(":", 1)[1].strip()
+                        return s
+
                     # Build symbol → leg mapping for tag injection
                     sym_to_leg = {}
                     for leg in self.state.legs.values():
                         if leg.is_active:
-                            sym = (getattr(leg, "trading_symbol", None) or leg.symbol or "").split(":", 1)[-1]
+                            sym = _canon(getattr(leg, "trading_symbol", None) or leg.symbol)
                             if sym:
                                 sym_to_leg[sym] = leg
 
                     positions = []
                     for pos in raw_pos:
                         p = pos if isinstance(pos, dict) else pos.__dict__ if hasattr(pos, '__dict__') else vars(pos)
-                        sym_raw = str(p.get("symbol") or p.get("tsym") or "").split(":", 1)[-1]
+                        sym_raw = _canon(p.get("symbol") or p.get("tsym") or p.get("tradingsymbol"))
                         leg = sym_to_leg.get(sym_raw)
                         if leg:
                             p = dict(p)  # copy to avoid mutating adapter object

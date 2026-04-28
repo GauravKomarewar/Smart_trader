@@ -292,10 +292,11 @@ class ShoonyaAdapter(BrokerAdapter):
         if ":" in sym:
             sym = sym.split(":", 1)[1]
         exch = order.get("exchange", "NSE")
+        unique_key = str(order.get("unique_key") or "").strip()
         tick_size = 0.05
         try:
             from db.symbols_db import resolve_broker_symbol as _gbs
-            resolved = _gbs(sym, "shoonya", exch)
+            resolved = _gbs(sym, "shoonya", exch, unique_key=unique_key)
             if resolved["symbol"]:
                 logger.debug("Shoonya symbol resolved: %s → %s", sym, resolved["symbol"])
                 sym = resolved["symbol"]

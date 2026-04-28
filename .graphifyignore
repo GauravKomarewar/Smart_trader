@@ -1,0 +1,25 @@
+# Graphify scope tuning for architecture-focused graphing
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# VCS / caches / previous graph artifacts
+.git/
+graphify-out/
+__pycache__/
+.pytest_cache/
+.vite/
+
+# Logs and runtime data artifacts
+*.log
+backend/logs/
+backend/data/**/*.sqlite
+backend/data/**/*.sqlite-*
+backend/data/**/*.db
+
+# Build artifacts and generated bundles
+frontend/dist/
+dist/
+**/*.min.js
+**/*.bundle.js

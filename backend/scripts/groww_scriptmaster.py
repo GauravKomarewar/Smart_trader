@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from core.daily_refresh import current_refresh_cycle_start, now_ist
+from scripts.scriptmaster_export_utils import write_unified_csv
 
 logger = logging.getLogger("smart_trader.groww_scriptmaster")
 
@@ -45,6 +46,8 @@ _SEGMENT_MAP: Dict[str, Dict[str, str]] = {
     "BSE": {"CASH": "BSE", "FNO": "BFO"},
     "MCX": {"COMMODITY": "MCX", "FNO": "MCX"},
 }
+
+ALLOWED_CANONICAL_EXCHANGES = {"NSE", "NFO", "BSE", "BFO", "MCX"}
 
 # Instrument type → canonical
 _INSTR_MAP: Dict[str, str] = {
@@ -165,6 +168,8 @@ def _parse_csv(content: str) -> Dict[str, Dict[str, Any]]:
         sell_allowed = (row.get("sell_allowed") or "").strip() == "1"
 
         canonical_exchange = _SEGMENT_MAP.get(exchange, {}).get(segment, exchange)
+        if canonical_exchange not in ALLOWED_CANONICAL_EXCHANGES:
+            continue
         canonical_instr = _INSTR_MAP.get(instrument_type, instrument_type)
         expiry = _normalise_expiry(expiry_raw)
         underlying = _extract_underlying(trading_symbol, underlying_symbol, instrument_type)
@@ -349,6 +354,28 @@ def get_record_by_token(exchange_token: str) -> Optional[Dict[str, Any]]:
 
 def get_total_count() -> int:
     return len(GROWW_SCRIPTMASTER)
+
+
+def export_cleaned_csv(output_path: Optional[str] = None) -> str:
+    """Export currently loaded Groww records to a cleaned CSV file."""
+    if not GROWW_SCRIPTMASTER:
+        refresh()
+
+    with _LOCK:
+        rows = list(GROWW_SCRIPTMASTER.values())
+
+    if not rows:
+        raise RuntimeError("No Groww scriptmaster data available to export")
+
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        out_path = Path(__file__).resolve().parent / "groww_scriptmaster_cleaned.csv"
+
+    exported = write_unified_csv(rows, str(out_path), broker="groww")
+
+    logger.info("Exported Groww cleaned CSV: %s (%d rows)", out_path, len(rows))
+    return exported
 
 
 def _parse_expiry_sort(expiry_str: str) -> datetime:

@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from core.daily_refresh import current_refresh_cycle_start, now_ist
+from scripts.scriptmaster_export_utils import write_unified_csv
 
 logger = logging.getLogger("smart_trader.shoonya_scriptmaster")
 
@@ -47,8 +48,9 @@ SCRIPTMASTER_URLS: Dict[str, str] = {
     "BSE": f"{BASE_URL}/BSE_symbols.txt.zip",
     "BFO": f"{BASE_URL}/BFO_symbols.txt.zip",
     "MCX": f"{BASE_URL}/MCX_symbols.txt.zip",
-    "CDS": f"{BASE_URL}/CDS_symbols.txt.zip",
 }
+
+ALLOWED_CANONICAL_EXCHANGES = {"NSE", "NFO", "BSE", "BFO", "MCX"}
 
 # ── Canonical instrument groups ───────────────────────────────────────────────
 
@@ -383,6 +385,28 @@ def requires_limit_order(exchange: str, token: Optional[str] = None,
 def get_total_count() -> int:
     """Return total loaded instruments count."""
     return len(SHOONYA_UNIVERSAL)
+
+
+def export_cleaned_csv(output_path: Optional[str] = None) -> str:
+    """Export currently loaded Shoonya records to a cleaned CSV file."""
+    if not SHOONYA_UNIVERSAL:
+        refresh()
+
+    with _LOCK:
+        rows = list(SHOONYA_UNIVERSAL.values())
+
+    if not rows:
+        raise RuntimeError("No Shoonya scriptmaster data available to export")
+
+    if output_path:
+        out_path = Path(output_path)
+    else:
+        out_path = Path(__file__).resolve().parent / "shoonya_scriptmaster_cleaned.csv"
+
+    exported = write_unified_csv(rows, str(out_path), broker="shoonya")
+
+    logger.info("Exported Shoonya cleaned CSV: %s (%d rows)", out_path, len(rows))
+    return exported
 
 
 def _parse_expiry(expiry_str: str) -> datetime:

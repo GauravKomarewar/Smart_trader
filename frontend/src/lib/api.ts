@@ -248,6 +248,15 @@ export const api = {
     api.get<any[]>('/strategy/brokers'),
   availableSymbols: () =>
     api.get<any[]>('/strategy/available-symbols'),
+  optionTokenUniverse: (symbol: string, exchange: string, expiry: string = '', limit: number = 2000) => {
+    const qs = new URLSearchParams({
+      symbol,
+      exchange,
+      expiry,
+      limit: String(limit),
+    }).toString()
+    return api.get<any>(`/strategy/option-token-universe?${qs}`)
+  },
   chainStatus: (symbol: string, exchange: string) =>
     api.getNoStore<{ symbol: string; exchange: string; available: boolean; spot: number; age_seconds: number | null; file: string | null }>(`/strategy/chain-status?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}`),
   fetchChain: (symbol: string, exchange: string) =>
