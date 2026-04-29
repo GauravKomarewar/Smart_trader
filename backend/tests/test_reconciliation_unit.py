@@ -94,6 +94,26 @@ class TestReconciliation:
         # Should produce a warning about untagged positions
         assert any("untagged" in w.lower() for w in warnings)
 
+    def test_untagged_symbol_with_spaces_and_hyphens_still_reconciles(self):
+        """Symbol canonicalization should match compact leg symbol against broker variants."""
+        leg = _leg("CE_SELL", symbol="NIFTY2650524500CE")
+        leg.is_active = True
+        state = self._state_with_legs(leg)
+        rec = BrokerReconciliation(state)
+
+        # Simulate broker variant formatting that previously failed strict match.
+        warnings = rec.reconcile([
+            {
+                "tradingsymbol": "NIFTY-26 50 52 4500 CE",
+                "netqty": -1,
+                "avg_price": 100.0,
+                "ltp": 99.5,
+            }
+        ])
+
+        assert leg.is_active is True
+        assert not any("missing/flat in broker" in w for w in warnings)
+
     def test_empty_broker_with_active_legs_no_close(self):
         """Empty broker snapshot with active legs → skip reconciliation (BUG-11 guard)."""
         leg = _leg("CE_SELL")
@@ -111,6 +131,138 @@ class TestReconciliation:
         rec = BrokerReconciliation(state)
         warnings = rec.reconcile([])
         assert warnings == []
+
+    def test_tagged_broker_position_recovers_inactive_leg(self):
+        """If tagged broker position is still open, resume should reactivate the leg."""
+        leg = _leg("CE_SELL", is_active=False)
+        state = self._state_with_legs(leg)
+        rec = BrokerReconciliation(state)
+
+        warnings = rec.reconcile([
+            {
+                "tag": "CE_SELL",
+                "symbol": "NIFTY24CE",
+                "netqty": -1,
+                "avg_price": 101.5,
+                "ltp": 99.0,
+            }
+        ])
+
+        assert leg.is_active is True
+        assert leg.qty == 1
+        assert leg.entry_price == pytest.approx(101.5)
+        assert any("Recovered leg CE_SELL" in w for w in warnings)
+
+    def test_tagged_duplicate_rows_do_not_false_close_leg(self):
+        """Aggregate duplicate tagged rows so a zero-net duplicate cannot re-close a live leg."""
+        leg = _leg("CE_SELL", is_active=False)
+        state = self._state_with_legs(leg)
+        rec = BrokerReconciliation(state)
+
+        warnings = rec.reconcile([
+            {
+                "tag": "CE_SELL",
+                "symbol": "NIFTY24CE",
+                "netqty": -65,
+                "avg_price": 102.0,
+                "ltp": 98.0,
+            },
+            {
+                "tag": "CE_SELL",
+                "symbol": "NIFTY24CE",
+                "netqty": 0,
+                "avg_price": 0,
+                "ltp": 98.0,
+            },
+        ])
+
+        assert leg.is_active is True
+        assert any("Recovered leg CE_SELL" in w for w in warnings)
+
+    def test_untagged_recovery_for_inactive_leg(self):
+        """Inactive leg should be revived from untagged netqty when symbols match."""
+        leg = _leg("CE_SELL", is_active=False, symbol="NIFTY2650524500CE")
+        state = self._state_with_legs(leg)
+        rec = BrokerReconciliation(state)
+
+        warnings = rec.reconcile([
+            {
+                "tradingsymbol": "NIFTY2650524500CE",
+                "netqty": -65,
+                "avg_price": 101.0,
+                "ltp": 99.0,
+            }
+        ])
+
+        assert leg.is_active is True
+        assert any("Recovered leg CE_SELL from untagged broker snapshot" in w for w in warnings)
+
+    def test_untagged_shoonya_style_symbol_matches_compact_leg(self):
+        """Shoonya C/P strike suffix format should map to CE/PE compact leg symbols."""
+        leg = _leg("CE_SELL", is_active=True, symbol="NIFTY2650524500CE")
+        state = self._state_with_legs(leg)
+        rec = BrokerReconciliation(state)
+
+        warnings = rec.reconcile([
+            {
+                "tradingsymbol": "NIFTY05MAY26C24500",
+                "netqty": -65,
+                "avg_price": 84.2,
+                "ltp": 117.1,
+            }
+        ])
+
+        assert leg.is_active is True
+        assert not any("closing" in w.lower() for w in warnings)
+
+    def test_tagged_transient_zero_snapshot_does_not_immediately_close(self):
+        """Require repeated tagged net=0 snapshots before closing an active leg."""
+        leg = _leg("CE_SELL", is_active=False, symbol="NIFTY2650524500CE")
+        state = self._state_with_legs(leg)
+        rec = BrokerReconciliation(state)
+
+        # Recover first.
+        rec.reconcile([
+            {
+                "tag": "CE_SELL",
+                "symbol": "NIFTY2650524500CE",
+                "qty": -65,
+            }
+        ])
+        assert leg.is_active is True
+
+        # First transient zero snapshot should not close.
+        warnings = rec.reconcile([
+            {
+                "tag": "CE_SELL",
+                "symbol": "NIFTY2650524500CE",
+                "qty": 0,
+            }
+        ])
+        assert leg.is_active is True
+        assert any("retaining state" in w for w in warnings)
+
+    def test_tagged_nonzero_position_never_ends_with_all_legs_closed(self):
+        """Final guard should revive a tagged non-zero leg if state ends fully closed."""
+        ce = _leg("LEG@1_CE", is_active=True, symbol="NIFTY2650524500CE")
+        pe = _leg("LEG@2_PE", is_active=False, symbol="NIFTY2650524500PE")
+        pe.option_type = OptionType.PE
+        state = self._state_with_legs(ce, pe)
+        rec = BrokerReconciliation(state)
+
+        warnings = rec.reconcile([
+            {
+                "tag": "LEG@2_PE",
+                "symbol": "NIFTY2650524500PE",
+                "netqty": -65,
+                "avg_price": 88.0,
+                "ltp": 92.0,
+            }
+        ])
+
+        assert state.active_legs_count >= 1
+        assert state.legs["LEG@2_PE"].is_active is True
+        assert any("Recovered leg LEG@2_PE" in w for w in warnings)
 
 
 # ── AdjustmentEngine noop reactivation (Bug 3 fix) ───────────────────────────

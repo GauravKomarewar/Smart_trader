@@ -4,8 +4,7 @@
    ═══════════════════════════════════════════ */
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
-import { fmtINR, pnlClass, cn } from '../lib/utils'
-import { usePositionsDetailStore } from '../stores'
+import { fmtINR, cn } from '../lib/utils'
 import {
   ShieldAlert, TrendingDown, Target, RefreshCw, X, Edit2, Check,
   ArrowUp, ArrowDown, Loader2, Info,
@@ -43,23 +42,9 @@ export default function PositionManagerPage() {
   const [saving, setSaving]       = useState(false)
   const [exiting, setExiting]     = useState<string | null>(null)
 
-  // WS-fed positions (primary source)
-  const wsPositions = usePositionsDetailStore(s => s.positions)
-  const wsLastUpdate = usePositionsDetailStore(s => s.lastUpdate)
-
-  // Sync from WS store when WS pushes new data
-  useEffect(() => {
-    if (wsPositions.length > 0 || wsLastUpdate > 0) {
-      setPositions(wsPositions as Position[])
-      setLoading(false)
-    }
-  }, [wsPositions, wsLastUpdate])
-
   const load = useCallback(async () => {
-    // Skip REST if WS pushed recently (< 1s) — WS is primary at ~1s cycle
-    const lastWs = usePositionsDetailStore.getState().lastUpdate
-    if (lastWs && Date.now() - lastWs < 1_000) return
     try {
+      setError('')
       const data = await api.get<Position[]>('/positions')
       setPositions(data)
     } catch (e: any) {
@@ -71,7 +56,7 @@ export default function PositionManagerPage() {
 
   useEffect(() => {
     load()
-    const interval = setInterval(load, 1_000)  // 1s REST fallback when WS misses
+    const interval = setInterval(load, 1_000)
     return () => clearInterval(interval)
   }, [load])
 
@@ -167,6 +152,7 @@ export default function PositionManagerPage() {
             <tbody className="divide-y divide-white/5">
               {positions.map(pos => {
                 const isEditing = editing?.commandId === pos.command_id
+                const canManage = Boolean(pos.command_id)
                 return (
                   <tr key={pos.command_id} className="hover:bg-white/5 transition">
                     <td className="px-4 py-3">
@@ -263,16 +249,17 @@ export default function PositionManagerPage() {
                           <>
                             <button
                               onClick={() => startEdit(pos)}
+                              disabled={!canManage}
                               className="p-1.5 rounded bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 transition"
-                              title="Edit SL/Target"
+                              title={canManage ? 'Edit SL/Target' : 'No persisted order mapping for this broker position'}
                             >
                               <Edit2 size={12} />
                             </button>
                             <button
                               onClick={() => cancelOrder(pos.command_id)}
-                              disabled={exiting === pos.command_id}
+                              disabled={!canManage || exiting === pos.command_id}
                               className="p-1.5 rounded bg-red-500/20 hover:bg-red-500/30 text-red-400 transition"
-                              title="Cancel order"
+                              title={canManage ? 'Cancel order' : 'No persisted order mapping for this broker position'}
                             >
                               {exiting === pos.command_id
                                 ? <Loader2 size={12} className="animate-spin" />
@@ -300,6 +287,8 @@ export default function PositionManagerPage() {
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
+    OPEN:             'bg-emerald-500/20 text-emerald-400',
+    CLOSED:           'bg-gray-500/20 text-gray-400',
     CREATED:          'bg-gray-500/20 text-gray-400',
     SENT_TO_BROKER:   'bg-yellow-500/20 text-yellow-400',
     EXECUTED:         'bg-emerald-500/20 text-emerald-400',

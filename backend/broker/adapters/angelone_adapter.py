@@ -379,7 +379,20 @@ class AngelOneAdapter(BrokerAdapter):
             otype_map = {"MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "STOPLOSS_LIMIT", "SL-M": "STOPLOSS_MARKET"}
             otype_raw = str(modifications.get("order_type", "LIMIT")).upper()
 
-            modify_data = {
+            # Fetch original order to get tradingsymbol/symboltoken (required by Angel One modify API)
+            orig_tsym = modifications.get("tradingsymbol") or modifications.get("symbol") or ""
+            orig_token = str(modifications.get("symboltoken") or modifications.get("token") or "")
+            if not orig_tsym or not orig_token:
+                try:
+                    book = self.get_order_book()
+                    for o in book:
+                        if str(getattr(o, "order_id", "")) == str(order_id):
+                            orig_tsym = orig_tsym or getattr(o, "symbol", "")
+                            break
+                except Exception:
+                    pass
+
+            modify_data: Dict[str, Any] = {
                 "variety": "NORMAL",
                 "orderid": order_id,
                 "ordertype": otype_map.get(otype_raw, "LIMIT"),
@@ -389,6 +402,10 @@ class AngelOneAdapter(BrokerAdapter):
                 "quantity": str(int(modifications.get("qty", 0))) if modifications.get("qty") else "0",
                 "triggerprice": str(float(modifications.get("trigger_price", 0) or 0)),
             }
+            if orig_tsym:
+                modify_data["tradingsymbol"] = orig_tsym
+            if orig_token:
+                modify_data["symboltoken"] = orig_token
             # Remove zero-value optional fields
             if modify_data["quantity"] == "0":
                 del modify_data["quantity"]

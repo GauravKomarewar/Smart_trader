@@ -311,9 +311,22 @@ class GrowwAdapter(BrokerAdapter):
         if not self.is_connected():
             return {"success": False, "message": "Not connected"}
         try:
+            # Segment is required by Groww cancel API. Infer from order book.
+            segment = "CASH"
+            try:
+                book = self.get_order_book()
+                for o in book:
+                    if str(getattr(o, "order_id", "")) == str(order_id):
+                        exch = getattr(o, "exchange", "NSE")
+                        seg_map = {"NSE": "CASH", "BSE": "CASH", "NFO": "FNO",
+                                   "BFO": "FNO", "MCX": "COMMODITY", "CDS": "FNO"}
+                        segment = seg_map.get(exch, "CASH")
+                        break
+            except Exception:
+                pass
             result = self._post("/v1/order/cancel", {
                 "groww_order_id": order_id,
-                "segment": "CASH",
+                "segment": segment,
             })
             if result and result.get("status") == "SUCCESS":
                 return {"success": True, "message": "Order cancelled"}

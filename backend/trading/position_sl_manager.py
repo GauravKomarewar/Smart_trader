@@ -554,12 +554,17 @@ class PositionSLManager:
                 ON CONFLICT (user_id, config_id, pos_key)
                 DO UPDATE SET
                     active          = EXCLUDED.active,
-                    stop_loss       = EXCLUDED.stop_loss,
-                    target          = EXCLUDED.target,
-                    trailing_value  = EXCLUDED.trailing_value,
-                    trail_when      = EXCLUDED.trail_when,
-                    initial_ltp     = COALESCE(EXCLUDED.initial_ltp, position_sl_settings.initial_ltp),
-                    base_stop_loss  = COALESCE(EXCLUDED.base_stop_loss, position_sl_settings.base_stop_loss),
+                    stop_loss       = COALESCE(EXCLUDED.stop_loss,      position_sl_settings.stop_loss),
+                    target          = COALESCE(EXCLUDED.target,          position_sl_settings.target),
+                    trailing_value  = COALESCE(EXCLUDED.trailing_value,  position_sl_settings.trailing_value),
+                    trail_when      = COALESCE(EXCLUDED.trail_when,      position_sl_settings.trail_when),
+                    trail_stop      = CASE
+                                          WHEN EXCLUDED.active = TRUE AND position_sl_settings.active = FALSE
+                                          THEN NULL
+                                          ELSE position_sl_settings.trail_stop
+                                      END,
+                    initial_ltp     = COALESCE(EXCLUDED.initial_ltp,    position_sl_settings.initial_ltp),
+                    base_stop_loss  = COALESCE(EXCLUDED.base_stop_loss,  position_sl_settings.base_stop_loss),
                     updated_at      = NOW()
             """, (user_id, config_id, pos_key, active, stop_loss, target,
                   trailing_value, trail_when, initial_ltp, base_stop_loss))

@@ -335,12 +335,25 @@ class KiteAdapter(BrokerAdapter):
         try:
             sym = order.get("symbol", "")
             exch = order.get("exchange", "NSE")
+            if ":" in sym:
+                sym = sym.split(":", 1)[1]
             side_str = str(order.get("side", "BUY")).upper()
             txn_type = "BUY" if side_str in ("BUY", "B") else "SELL"
 
             # Kite products/order_types are already canonical — pass through
             product = str(order.get("product", "MIS")).upper()
             order_type = str(order.get("order_type", "MARKET")).upper()
+
+            # Resolve Kite instrument token and correct exchange from symbols DB
+            try:
+                from db.symbols_db import resolve_broker_symbol as _gbs
+                resolved = _gbs(sym, "kite", exch)
+                if resolved["symbol"]:
+                    logger.debug("Kite token resolved: %s → %s", sym, resolved["symbol"])
+                if resolved["exchange"]:
+                    exch = resolved["exchange"]
+            except Exception as e:
+                logger.warning("Kite symbol lookup failed for %s: %s", sym, e)
 
             variety = "regular"  # regular/amo/co/iceberg/auction
 

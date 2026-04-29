@@ -218,3 +218,165 @@ def test_normalizer_search_returns_smart_trader_name(monkeypatch):
     assert len(results) == 1
     assert results[0]["smart_trader_name"] == "NFO-NIFTY-FUT-28Apr26"
     assert results[0]["lot_size"] == 75
+
+
+def test_broker_symbol_candidates_shoonya_option_format():
+    from broker.symbol_normalizer import broker_symbol_candidates
+
+    cands = broker_symbol_candidates(
+        broker="shoonya",
+        exchange="NFO",
+        trading_symbol="NIFTY05MAY2624000CE",
+        underlying="NIFTY",
+        instrument_type="OPT",
+        expiry="2026-05-05",
+        strike=24000,
+        option_type="CE",
+    )
+    assert "NIFTY05MAY26C24000" in cands
+
+
+def test_broker_symbol_candidates_shoonya_future_short_f_format():
+    from broker.symbol_normalizer import broker_symbol_candidates
+
+    cands = broker_symbol_candidates(
+        broker="shoonya",
+        exchange="NFO",
+        trading_symbol="SBIN26MAY26FUT",
+        underlying="SBIN",
+        instrument_type="FUT",
+        expiry="2026-05-26",
+        strike=0,
+        option_type="",
+    )
+    assert cands[0] == "SBIN26MAY26F"
+
+
+def test_to_broker_symbol_equity_uses_eq_suffix():
+    from broker.symbol_normalizer import to_broker_symbol
+
+    assert to_broker_symbol("SBIN", "NSE", "shoonya", underlying="SBIN", instrument_type="EQ") == "SBIN-EQ"
+    assert to_broker_symbol("SBIN", "NSE", "fyers", underlying="SBIN", instrument_type="EQ") == "NSE:SBIN-EQ"
+    assert to_broker_symbol("SBIN", "BSE", "shoonya", underlying="SBIN", instrument_type="EQ") == "SBIN"
+    assert to_broker_symbol("SBIN", "BSE", "fyers", underlying="SBIN", instrument_type="EQ") == "BSE:SBIN"
+
+
+def test_to_broker_symbol_fyers_monthly_derivative_without_year():
+    from broker.symbol_normalizer import to_broker_symbol
+
+    fut = to_broker_symbol(
+        trading_symbol="SBIN26MAY26FUT",
+        exchange="NFO",
+        broker="fyers",
+        underlying="SBIN",
+        instrument_type="FUT",
+        expiry="2026-05-26",
+    )
+    opt = to_broker_symbol(
+        trading_symbol="SBIN26MAY261000CE",
+        exchange="NFO",
+        broker="fyers",
+        underlying="SBIN",
+        instrument_type="OPT",
+        expiry="2026-05-26",
+        strike=1000,
+        option_type="CE",
+    )
+    assert fut == "NFO:SBIN26MAYFUT"
+    assert opt == "NFO:SBIN26MAY1000CE"
+
+
+def test_to_broker_symbol_kite_uses_plain_eq_and_ddmon_derivatives():
+    from broker.symbol_normalizer import to_broker_symbol
+
+    eq = to_broker_symbol("SBIN", "NSE", "kite", underlying="SBIN", instrument_type="EQ")
+    fut = to_broker_symbol(
+        trading_symbol="SBIN26MAY26FUT",
+        exchange="NFO",
+        broker="kite",
+        underlying="SBIN",
+        instrument_type="FUT",
+        expiry="2026-05-26",
+    )
+    opt = to_broker_symbol(
+        trading_symbol="SBIN26MAY261000CE",
+        exchange="NFO",
+        broker="kite",
+        underlying="SBIN",
+        instrument_type="OPT",
+        expiry="2026-05-26",
+        strike=1000,
+        option_type="CE",
+    )
+    assert eq == "SBIN"
+    assert fut == "SBIN26MAYFUT"
+    assert opt == "SBIN26MAY1000CE"
+
+
+def test_to_broker_symbol_angelone_uses_ddmonyy_derivatives():
+    from broker.symbol_normalizer import to_broker_symbol
+
+    fut = to_broker_symbol(
+        trading_symbol="SBIN26MAY26FUT",
+        exchange="NFO",
+        broker="angelone",
+        underlying="SBIN",
+        instrument_type="FUT",
+        expiry="2026-05-26",
+    )
+    opt = to_broker_symbol(
+        trading_symbol="SBIN26MAY261000CE",
+        exchange="NFO",
+        broker="angelone",
+        underlying="SBIN",
+        instrument_type="OPT",
+        expiry="2026-05-26",
+        strike=1000,
+        option_type="CE",
+    )
+    assert fut == "SBIN26MAY26FUT"
+    assert opt == "SBIN26MAY261000CE"
+
+
+def test_to_broker_symbol_token_based_brokers_do_not_fake_text_keys():
+    from broker.symbol_normalizer import to_broker_symbol
+
+    assert to_broker_symbol("SBIN", "NSE", "dhan", underlying="SBIN", instrument_type="EQ") == ""
+    assert to_broker_symbol("SBIN", "NSE", "upstox", underlying="SBIN", instrument_type="EQ") == ""
+
+
+def test_resolve_broker_symbol_uses_formula_fallback(monkeypatch):
+    class _FakeCursor:
+        def execute(self, _query, _params):
+            return None
+
+        def fetchone(self):
+            return None
+
+    class _FakeConn:
+        def cursor(self, cursor_factory=None):
+            return _FakeCursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(sdb, "get_trading_conn", lambda: _FakeConn())
+    monkeypatch.setattr(
+        sdb,
+        "lookup_by_trading_symbol",
+        lambda *_args, **_kwargs: {
+            "trading_symbol": "NIFTY05MAY2624000CE",
+            "exchange": "NFO",
+            "instrument_type": "OPT",
+            "expiry": "2026-05-05",
+            "strike": 24000,
+            "option_type": "CE",
+            "symbol": "NIFTY",
+            "lot_size": 75,
+            "tick_size": 0.05,
+            "shoonya_tsym": "",
+        },
+    )
+
+    resolved = sdb.resolve_broker_symbol("NIFTY05MAY2624000CE", "shoonya", "NFO")
+    assert resolved["symbol"] in {"NIFTY05MAY2624000CE", "NIFTY05MAY26C24000"}

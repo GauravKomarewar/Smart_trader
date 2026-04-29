@@ -1,0 +1,354 @@
+{
+  "summary_counts": {
+    "total_rows": 370912,
+    "fyers_rows": 227963,
+    "shoonya_rows": 268782,
+    "angelone_rows": 216986,
+    "dhan_rows": 273641,
+    "kite_rows": 172516,
+    "upstox_rows": 172177,
+    "groww_rows": 250376
+  },
+  "broker_list_counts": {
+    "fyers": 147165,
+    "shoonya": 188662,
+    "angelone": 136605,
+    "dhan": 203113,
+    "kite_exchange_token": 91611,
+    "kite_instrument_token": 91611,
+    "upstox": 91246,
+    "groww": 159828
+  },
+  "segment_counts": [
+    {
+      "exchange": "BFO",
+      "instrument_type": "FUT",
+      "total": 625,
+      "fyers": 57,
+      "shoonya": 625,
+      "angelone": 625,
+      "dhan": 619,
+      "kite": 15,
+      "upstox": 18,
+      "groww": 15
+    },
+    {
+      "exchange": "BFO",
+      "instrument_type": "OPT",
+      "total": 57108,
+      "fyers": 14292,
+      "shoonya": 55994,
+      "angelone": 55994,
+      "dhan": 55486,
+      "kite": 11208,
+      "upstox": 11208,
+      "groww": 10744
+    },
+    {
+      "exchange": "BSE",
+      "instrument_type": "EQ",
+      "total": 26027,
+      "fyers": 17898,
+      "shoonya": 17823,
+      "angelone": 16770,
+      "dhan": 17431,
+      "kite": 17915,
+      "upstox": 17869,
+      "groww": 12381
+    },
+    {
+      "exchange": "BSE",
+      "instrument_type": "IDX",
+      "total": 120,
+      "fyers": 0,
+      "shoonya": 0,
+      "angelone": 73,
+      "dhan": 106,
+      "kite": 0,
+      "upstox": 57,
+      "groww": 0
+    },
+    {
+      "exchange": "MCX",
+      "instrument_type": "COMDTY",
+      "total": 398,
+      "fyers": 0,
+      "shoonya": 0,
+      "angelone": 398,
+      "dhan": 0,
+      "kite": 0,
+      "upstox": 0,
+      "groww": 0
+    },
+    {
+      "exchange": "MCX",
+      "instrument_type": "EQ",
+      "total": 11,
+      "fyers": 0,
+      "shoonya": 0,
+      "angelone": 0,
+      "dhan": 0,
+      "kite": 11,
+      "upstox": 0,
+      "groww": 0
+    },
+    {
+      "exchange": "MCX",
+      "instrument_type": "FUT",
+      "total": 298,
+      "fyers": 292,
+      "shoonya": 292,
+      "angelone": 292,
+      "dhan": 292,
+      "kite": 292,
+      "upstox": 292,
+      "groww": 290
+    },
+    {
+      "exchange": "MCX",
+      "instrument_type": "IDX",
+      "total": 17,
+      "fyers": 0,
+      "shoonya": 0,
+      "angelone": 17,
+      "dhan": 0,
+      "kite": 0,
+      "upstox": 0,
+      "groww": 0
+    },
+    {
+      "exchange": "MCX",
+      "instrument_type": "OPT",
+      "total": 51268,
+      "fyers": 44800,
+      "shoonya": 43488,
+      "angelone": 44800,
+      "dhan": 44800,
+      "kite": 44800,
+      "upstox": 44800,
+      "groww": 48792
+    },
+    {
+      "exchange": "NFO",
+      "instrument_type": "FUT",
+      "total": 1518,
+      "fyers": 1279,
+      "shoonya": 1297,
+      "angelone": 1297,
+      "dhan": 1297,
+      "kite": 1279,
+      "upstox": 1279,
+      "groww": 1090
+    },
+    {
+      "exchange": "NFO",
+      "instrument_type": "OPT",
+      "total": 171781,
+      "fyers": 132265,
+      "shoonya": 132265,
+      "angelone": 79672,
+      "dhan": 102216,
+      "kite": 79670,
+      "upstox": 79672,
+      "groww": 128287
+    },
+    {
+      "exchange": "NSE",
+      "instrument_type": "BL",
+      "total": 15,
+      "fyers": 0,
+      "shoonya": 15,
+      "angelone": 0,
+      "dhan": 0,
+      "kite": 0,
+      "upstox": 0,
+      "groww": 0
+    },
+    {
+      "exchange": "NSE",
+      "instrument_type": "EQ",
+      "total": 19405,
+      "fyers": 17080,
+      "shoonya": 16983,
+      "angelone": 16921,
+      "dhan": 16928,
+      "kite": 17295,
+      "upstox": 16827,
+      "groww": 6920
+    },
+    {
+      "exchange": "NSE",
+      "instrument_type": "FUT",
+      "total": 132,
+      "fyers": 0,
+      "shoonya": 0,
+      "angelone": 0,
+      "dhan": 0,
+      "kite": 0,
+      "upstox": 0,
+      "groww": 132
+    },
+    {
+      "exchange": "NSE",
+      "instrument_type": "IDX",
+      "total": 231,
+      "fyers": 0,
+      "shoonya": 0,
+      "angelone": 127,
+      "dhan": 136,
+      "kite": 0,
+      "upstox": 155,
+      "groww": 25
+    },
+    {
+      "exchange": "NSE",
+      "instrument_type": "OPT",
+      "total": 41958,
+      "fyers": 0,
+      "shoonya": 0,
+      "angelone": 0,
+      "dhan": 34330,
+      "kite": 31,
+      "upstox": 0,
+      "groww": 41700
+    }
+  ],
+  "constructor_stats": {
+    "angelone:BFO:FUT": {
+      "total": 625,
+      "db_present": 625,
+      "mismatch": 613,
+      "match_any_candidate": 12
+    },
+    "angelone:BFO:OPT": {
+      "total": 57108,
+      "db_present": 55994,
+      "match_any_candidate": 5802,
+      "db_missing": 1114,
+      "constructor_can_generate": 1114,
+      "mismatch": 50192
+    },
+    "angelone:NFO:FUT": {
+      "total": 1518,
+      "db_missing": 221,
+      "constructor_can_generate": 221,
+      "db_present": 1297,
+      "match_any_candidate": 1291,
+      "mismatch": 6
+    },
+    "angelone:NFO:OPT": {
+      "total": 171781,
+      "db_missing": 92109,
+      "constructor_can_generate": 92109,
+      "db_present": 79672,
+      "match_any_candidate": 77190,
+      "mismatch": 2482
+    },
+    "fyers:BFO:FUT": {
+      "total": 625,
+      "db_missing": 568,
+      "constructor_can_generate": 568,
+      "db_present": 57,
+      "mismatch": 57
+    },
+    "fyers:BFO:OPT": {
+      "total": 57108,
+      "db_missing": 42816,
+      "constructor_can_generate": 42816,
+      "db_present": 14292,
+      "mismatch": 14292
+    },
+    "fyers:NFO:FUT": {
+      "total": 1518,
+      "db_missing": 239,
+      "constructor_can_generate": 239,
+      "db_present": 1279,
+      "mismatch": 1279
+    },
+    "fyers:NFO:OPT": {
+      "total": 171781,
+      "db_missing": 39516,
+      "constructor_can_generate": 39516,
+      "db_present": 132265,
+      "mismatch": 132265
+    },
+    "groww:BFO:FUT": {
+      "total": 625,
+      "db_missing": 610,
+      "constructor_can_generate": 610,
+      "db_present": 15,
+      "mismatch": 15
+    },
+    "groww:BFO:OPT": {
+      "total": 57108,
+      "db_missing": 46364,
+      "constructor_can_generate": 46364,
+      "db_present": 10744,
+      "mismatch": 10744
+    },
+    "groww:NFO:FUT": {
+      "total": 1518,
+      "db_present": 1090,
+      "mismatch": 1090,
+      "db_missing": 428,
+      "constructor_can_generate": 428
+    },
+    "groww:NFO:OPT": {
+      "total": 171781,
+      "db_present": 128287,
+      "mismatch": 128287,
+      "db_missing": 43494,
+      "constructor_can_generate": 43494
+    },
+    "kite:BFO:FUT": {
+      "total": 625,
+      "db_present": 625,
+      "match_any_candidate": 625
+    },
+    "kite:BFO:OPT": {
+      "total": 57108,
+      "db_present": 57108,
+      "match_any_candidate": 57108
+    },
+    "kite:NFO:FUT": {
+      "total": 1518,
+      "db_present": 1518,
+      "match_any_candidate": 1518
+    },
+    "kite:NFO:OPT": {
+      "total": 171781,
+      "db_present": 171781,
+      "match_any_candidate": 171781
+    },
+    "shoonya:BFO:FUT": {
+      "total": 625,
+      "db_present": 625,
+      "mismatch": 613,
+      "match_any_candidate": 12
+    },
+    "shoonya:BFO:OPT": {
+      "total": 57108,
+      "db_present": 55994,
+      "match_any_candidate": 5802,
+      "db_missing": 1114,
+      "constructor_can_generate": 1114,
+      "mismatch": 50192
+    },
+    "shoonya:NFO:FUT": {
+      "total": 1518,
+      "db_missing": 221,
+      "constructor_can_generate": 221,
+      "db_present": 1297,
+      "match_any_candidate": 1291,
+      "mismatch": 6
+    },
+    "shoonya:NFO:OPT": {
+      "total": 171781,
+      "db_missing": 39516,
+      "constructor_can_generate": 39516,
+      "db_present": 132265,
+      "match_any_candidate": 128455,
+      "mismatch": 3810
+    }
+  }
+}

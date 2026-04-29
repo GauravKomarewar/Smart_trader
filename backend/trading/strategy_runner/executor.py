@@ -2,7 +2,7 @@ import time
 import json
 import logging
 from datetime import datetime, time as dt_time
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 
 from .state import StrategyState, LegState
 from .models import Side, InstrumentType
@@ -735,6 +735,55 @@ class StrategyExecutor:
         warnings = self.reconciliation.reconcile(broker_positions)
         for w in warnings:
             logger.warning(f"Reconciliation warning: {w}")
+        if any("Recovered leg" in str(w) for w in warnings):
+            active_tags = [t for t, l in self.state.legs.items() if l.is_active]
+            closed_tags = [t for t, l in self.state.legs.items() if not l.is_active]
+            logger.warning(
+                "RECONCILE POST-STATE | active_tags=%s | closed_tags=%s",
+                active_tags,
+                closed_tags,
+            )
+
+        # Safety repair: if reconciliation/strategy flow leaves state flat while
+        # broker still reports tagged non-zero positions, revive those legs so
+        # monitor/heartbeat remains aligned with live broker truth.
+        if self.state.entered_today and self.state.active_legs_count == 0 and broker_positions:
+            tagged_net: Dict[str, int] = {}
+            for pos in broker_positions:
+                tag = pos.get("tag")
+                if not tag or tag not in self.state.legs:
+                    continue
+                net_raw = (
+                    pos.get("netqty")
+                    or pos.get("net_qty")
+                    or pos.get("qty")
+                    or pos.get("quantity")
+                    or 0
+                )
+                try:
+                    net = int(float(net_raw or 0))
+                except Exception:
+                    net = 0
+                tagged_net[tag] = tagged_net.get(tag, 0) + net
+
+            open_tagged = {t: n for t, n in tagged_net.items() if n != 0}
+            if open_tagged:
+                revived_tags = []
+                for tag, net in open_tagged.items():
+                    leg = self.state.legs[tag]
+                    leg.is_active = True
+                    leg.exit_timestamp = None
+                    leg.exit_price = None
+                    leg.side = Side.BUY if net > 0 else Side.SELL
+                    lots = self.reconciliation._contracts_to_lots(abs(net), leg.expiry)
+                    if lots > 0:
+                        leg.qty = lots
+                    revived_tags.append(tag)
+                logger.warning(
+                    "STATE_MISMATCH_REPAIR | broker_open_tags=%s | revived=%s",
+                    list(open_tagged.keys()),
+                    revived_tags,
+                )
 
         # NEW: Expiry day actions
         self._check_expiry_day_action(now)
@@ -984,25 +1033,113 @@ class StrategyExecutor:
                         s = str(v or "").strip().upper()
                         if ":" in s:
                             s = s.split(":", 1)[1].strip()
+                        s = s.replace(" ", "").replace("-", "")
                         return s
+
+                    def _position_exchange(p: dict) -> str:
+                        return str(
+                            p.get("exchange")
+                            or p.get("exch")
+                            or p.get("exch_seg")
+                            or self.market.exchange
+                            or ""
+                        ).strip().upper()
+
+                    def _symbol_candidates(raw_symbol: str, exchange: str, token: Any = None) -> set[str]:
+                        candidates: set[str] = set()
+                        base = _canon(raw_symbol)
+                        if base:
+                            candidates.add(base)
+
+                        # Token-based lookup is the most reliable path when broker
+                        # trading symbol formats differ from strategy canonical symbols.
+                        tok = str(token or "").strip()
+                        if tok and exchange:
+                            try:
+                                from db.symbols_db import lookup_by_token  # noqa: PLC0415
+
+                                rec = lookup_by_token(exchange, tok)
+                                if rec:
+                                    for val in (
+                                        rec.get("trading_symbol"),
+                                        rec.get("normalized_trading_symbol"),
+                                        rec.get("shoonya_tsym"),
+                                        rec.get("fyers_symbol"),
+                                        rec.get("smart_trader_name"),
+                                    ):
+                                        cv = _canon(val)
+                                        if cv:
+                                            candidates.add(cv)
+                            except Exception:
+                                pass
+
+                        try:
+                            from broker.symbol_normalizer import lookup_by_trading_symbol  # noqa: PLC0415
+
+                            inst = (
+                                lookup_by_trading_symbol(raw_symbol, exchange)
+                                or lookup_by_trading_symbol(raw_symbol)
+                            )
+                            if inst:
+                                for val in (
+                                    getattr(inst, "trading_symbol", ""),
+                                    getattr(inst, "normalized_trading_symbol", ""),
+                                    getattr(inst, "shoonya_symbol", ""),
+                                    getattr(inst, "fyers_symbol", ""),
+                                ):
+                                    cv = _canon(val)
+                                    if cv:
+                                        candidates.add(cv)
+                        except Exception:
+                            pass
+
+                        return candidates
 
                     # Build symbol → leg mapping for tag injection
                     sym_to_leg = {}
                     for leg in self.state.legs.values():
-                        if leg.is_active:
-                            sym = _canon(getattr(leg, "trading_symbol", None) or leg.symbol)
-                            if sym:
-                                sym_to_leg[sym] = leg
+                        leg_sym = getattr(leg, "trading_symbol", None) or leg.symbol
+                        leg_exch = str(getattr(self.market, "exchange", "") or "").upper()
+                        for cand in _symbol_candidates(leg_sym, leg_exch):
+                            # Prefer active legs when collisions happen.
+                            prev = sym_to_leg.get(cand)
+                            if prev is None or (not prev.is_active and leg.is_active):
+                                sym_to_leg[cand] = leg
 
                     positions = []
+                    tagged_count = 0
                     for pos in raw_pos:
                         p = pos if isinstance(pos, dict) else pos.__dict__ if hasattr(pos, '__dict__') else vars(pos)
-                        sym_raw = _canon(p.get("symbol") or p.get("tsym") or p.get("tradingsymbol"))
-                        leg = sym_to_leg.get(sym_raw)
+                        raw_symbol = p.get("symbol") or p.get("tsym") or p.get("tradingsymbol")
+                        exch = _position_exchange(p)
+                        token = p.get("token") or p.get("exchange_token") or p.get("tk")
+                        leg = None
+                        for cand in _symbol_candidates(raw_symbol, exch, token):
+                            leg = sym_to_leg.get(cand)
+                            if leg:
+                                break
                         if leg:
                             p = dict(p)  # copy to avoid mutating adapter object
                             p["tag"] = leg.tag
+                            tagged_count += 1
                         positions.append(p)
+
+                    if positions and tagged_count == 0 and sym_to_leg:
+                        broker_syms = [
+                            _canon(
+                                (p.get("symbol") or p.get("tsym") or p.get("tradingsymbol"))
+                                if isinstance(p, dict) else ""
+                            )
+                            for p in positions[:5]
+                        ]
+                        state_syms = list(sym_to_leg.keys())[:5]
+                        logger.warning(
+                            "RECONCILE | no broker positions tagged (rows=%d). "
+                            "broker_symbols=%s state_symbols=%s",
+                            len(positions),
+                            broker_syms,
+                            state_syms,
+                        )
                     return positions
             except Exception as e:
                 logger.warning("RECONCILE | live broker get_positions failed: %s", e)

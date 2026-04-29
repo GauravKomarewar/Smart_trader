@@ -18,13 +18,72 @@ class BrokerReconciliation:
         self._lot_size_resolver = lot_size_resolver
         self._last_untagged_warn_at: float = 0.0
         self._empty_untagged_streak: int = 0
+        self._untagged_leg_miss_streak: Dict[str, int] = {}
+        self._tagged_zero_streak: Dict[str, int] = {}
 
     @staticmethod
     def _canon_symbol(value: Any) -> str:
         s = str(value or "").strip().upper()
         if ":" in s:
             s = s.split(":", 1)[1].strip()
+        s = s.replace(" ", "").replace("-", "")
         return s
+
+    @staticmethod
+    def _parse_symbol_option_fields(sym: str) -> tuple[Optional[int], Optional[OptionType]]:
+        s = str(sym or "").upper().strip()
+        if not s:
+            return None, None
+
+        m = re.search(r"(\d{4,6})(CE|PE)$", s)
+        if m:
+            try:
+                return int(m.group(1)), OptionType(m.group(2))
+            except Exception:
+                return None, None
+
+        # Shoonya style: ...C24500 / ...P24000
+        m = re.search(r"([CP])(\d{4,6})$", s)
+        if m:
+            try:
+                strike = int(m.group(2))
+                opt = OptionType.CE if m.group(1) == "C" else OptionType.PE
+                return strike, opt
+            except Exception:
+                return None, None
+
+        return None, None
+
+    def _resolve_leg_net(
+        self,
+        leg: LegState,
+        broker_netqty: Dict[str, int],
+    ) -> Optional[int]:
+        sym = self._canon_symbol(getattr(leg, "trading_symbol", None) or leg.symbol)
+        if sym in broker_netqty:
+            return broker_netqty[sym]
+
+        leg_opt = leg.option_type if leg.instrument == InstrumentType.OPT else None
+        leg_strike = int(leg.strike) if leg.instrument == InstrumentType.OPT and leg.strike is not None else None
+        if leg_opt is None or leg_strike is None:
+            return None
+
+        underlying_hint = self._canon_symbol(leg.symbol)
+        fallback_net = 0
+        matched = False
+        for broker_sym, net in broker_netqty.items():
+            if underlying_hint and underlying_hint not in broker_sym:
+                continue
+            b_strike, b_opt = self._parse_symbol_option_fields(broker_sym)
+            if b_strike is None or b_opt is None:
+                continue
+            if b_opt == leg_opt and b_strike == leg_strike:
+                fallback_net += net
+                matched = True
+
+        if matched:
+            return fallback_net
+        return None
 
     def reconcile(self, broker_positions: List[Dict[str, Any]]) -> List[str]:
         """
@@ -134,11 +193,21 @@ class BrokerReconciliation:
                     leg.close()
                 continue
 
-            net = broker_netqty.get(sym)
+            net = self._resolve_leg_net(leg, broker_netqty)
             if net is None or net == 0:
-                warnings.append(f"Leg {tag} ({sym}) is active in state but missing/flat in broker")
+                streak = self._untagged_leg_miss_streak.get(tag, 0) + 1
+                self._untagged_leg_miss_streak[tag] = streak
+                if streak < 3:
+                    warnings.append(
+                        f"Leg {tag} ({sym}) unresolved/flat in untagged broker snapshot (streak={streak})"
+                    )
+                    continue
+                warnings.append(
+                    f"Leg {tag} ({sym}) unresolved/flat in untagged broker snapshot for {streak} ticks — closing"
+                )
                 leg.close()
                 continue
+            self._untagged_leg_miss_streak[tag] = 0
 
             # Sync side/qty and pricing from broker so strategy PnL aligns.
             broker_side = Side.BUY if net > 0 else Side.SELL
@@ -180,17 +249,149 @@ class BrokerReconciliation:
                 warnings.append(f"Broker has extra position {tag} not in state")
                 self._reconstruct_leg(pos)
 
+        # Untagged resume recovery path: if broker rows are untagged but clearly
+        # map to an existing inactive leg, revive it so monitoring can continue.
+        if not has_tagged_positions:
+            for tag, leg in self.state.legs.items():
+                if leg.is_active:
+                    continue
+                net = self._resolve_leg_net(leg, broker_netqty)
+                if not net:
+                    continue
+                broker_qty = abs(net)
+                broker_lots = self._contracts_to_lots(broker_qty, leg.expiry)
+                if broker_lots > 0:
+                    leg.qty = broker_lots
+                leg.side = Side.BUY if net > 0 else Side.SELL
+                leg.is_active = True
+                leg.exit_timestamp = None
+                leg.exit_price = None
+                self._untagged_leg_miss_streak[tag] = 0
+                warnings.append(
+                    f"Recovered leg {tag} from untagged broker snapshot (netqty={net})"
+                )
+
+        # Consolidate tagged rows before applying updates. Some brokers emit
+        # multiple rows for a single instrument where one row can be net=0;
+        # processing rows one-by-one can incorrectly re-close recovered legs.
+        tagged_agg: Dict[str, Dict[str, Any]] = {}
         for pos in broker_positions:
             tag = pos.get("tag")
-            if tag and tag in self.state.legs:
+            if not tag or tag not in self.state.legs:
+                continue
+
+            bucket = tagged_agg.setdefault(tag, {"net": 0, "ltp": None, "avg": None, "delta": None})
+
+            net_raw = pos.get("netqty")
+            if net_raw is None:
+                net_raw = pos.get("net_qty")
+            if net_raw is None:
+                net_raw = pos.get("qty")
+            if net_raw is None:
+                net_raw = pos.get("quantity")
+            try:
+                bucket["net"] += int(float(net_raw or 0))
+            except Exception:
+                pass
+
+            ltp_v = pos.get("ltp") or pos.get("last_price") or pos.get("lp")
+            if ltp_v is not None:
+                try:
+                    bucket["ltp"] = float(ltp_v)
+                except Exception:
+                    pass
+
+            avg_v = (
+                pos.get("netavgprc")
+                or pos.get("avg_price")
+                or pos.get("upldprc")
+                or pos.get("daybuyavgprc")
+                or pos.get("daysellavgprc")
+                or pos.get("avgprc")
+            )
+            if avg_v is not None:
+                try:
+                    avg_f = float(avg_v)
+                    if avg_f > 0:
+                        bucket["avg"] = avg_f
+                except Exception:
+                    pass
+
+            if "delta" in pos:
+                try:
+                    bucket["delta"] = float(pos["delta"])
+                except Exception:
+                    pass
+
+        for tag, agg in tagged_agg.items():
+            leg = self.state.legs[tag]
+            if agg.get("ltp") is not None:
+                leg.ltp = float(agg["ltp"])
+            if agg.get("delta") is not None:
+                leg.delta = float(agg["delta"])
+
+            net = int(agg.get("net") or 0)
+            if net == 0:
+                streak = self._tagged_zero_streak.get(tag, 0) + 1
+                self._tagged_zero_streak[tag] = streak
+                if streak < 3:
+                    warnings.append(
+                        f"Leg {tag} tagged snapshot net=0 (streak={streak}) — retaining state"
+                    )
+                    continue
+                if leg.is_active:
+                    warnings.append(
+                        f"Leg {tag} tagged snapshot net=0 for {streak} ticks — closing"
+                    )
+                    leg.close()
+                continue
+            self._tagged_zero_streak[tag] = 0
+
+            broker_qty = abs(net)
+            broker_lots = self._contracts_to_lots(broker_qty, leg.expiry)
+            if broker_lots > 0:
+                leg.qty = broker_lots
+
+            broker_side = Side.BUY if net > 0 else Side.SELL
+            if leg.side != broker_side:
+                leg.side = broker_side
+
+            if not leg.is_active:
+                # Resume-safe recovery: if broker still has this tagged leg
+                # open, reactivate it in state so monitoring can continue.
+                leg.is_active = True
+                leg.exit_timestamp = None
+                leg.exit_price = None
+                warnings.append(
+                    f"Recovered leg {tag} from broker snapshot (netqty={net})"
+                )
+
+            avg_final = agg.get("avg")
+            if avg_final is not None:
+                leg.entry_price = float(avg_final)
+
+        # Final guard: if broker still reports tagged non-zero nets but state
+        # ended with zero active legs, revive those tagged legs. This protects
+        # monitor continuity against transient close/reopen races.
+        if has_tagged_positions and not any(l.is_active for l in self.state.legs.values()):
+            repaired = 0
+            for tag, agg in tagged_agg.items():
+                net = int(agg.get("net") or 0)
+                if net == 0 or tag not in self.state.legs:
+                    continue
                 leg = self.state.legs[tag]
-                leg.ltp = pos.get("ltp", leg.ltp)
-                if "delta" in pos:
-                    leg.delta = pos["delta"]
-                if "qty" in pos:
-                    leg.qty = pos["qty"]
-                    if leg.qty == 0:
-                        leg.close()
+                leg.is_active = True
+                leg.exit_timestamp = None
+                leg.exit_price = None
+                leg.side = Side.BUY if net > 0 else Side.SELL
+                lots = self._contracts_to_lots(abs(net), leg.expiry)
+                if lots > 0:
+                    leg.qty = lots
+                repaired += 1
+            if repaired:
+                warnings.append(
+                    f"Invariant repair: revived {repaired} tagged leg(s) from broker netqty"
+                )
 
         return warnings
 

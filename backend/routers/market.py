@@ -465,7 +465,32 @@ async def get_option_chain(
     sym   = symbol.upper()
     fyers = get_fyers_client()
     oc = None
-    cache_key = f"{sym}:{exchange.upper()}:{expiry or ''}:{int(strikes)}"
+    req_exchange = exchange.upper()
+
+    # Map equity exchange to F&O exchange for option-chain lookups.
+    _fo_map = {
+        "NSE": "NFO", "NFO": "NFO", "BSE": "BFO", "BFO": "BFO",
+        "MCX": "MCX", "CDS": "CDS",
+    }
+    oc_exchange = _fo_map.get(req_exchange, req_exchange)
+
+    # For MCX, default to nearest OPTION expiry from ScriptMaster instead of
+    # broker "nearest" chain, which can drift to futures expiry.
+    requested_expiry_iso = _normalise_expiry_date(expiry) if expiry else ""
+    scriptmaster_opt_expiries = get_expiries(sym, exchange=oc_exchange, instrument_type="OPT")
+    if req_exchange == "MCX" and not requested_expiry_iso and scriptmaster_opt_expiries:
+        requested_expiry_iso = _normalise_expiry_date(scriptmaster_opt_expiries[0])
+
+    if req_exchange == "MCX":
+        logger.info(
+            "MCX_OC_EXPIRY_SELECT | symbol=%s requested=%s selected=%s source=%s",
+            sym,
+            expiry or "",
+            requested_expiry_iso,
+            "scriptmaster_opt" if requested_expiry_iso else "broker_nearest",
+        )
+
+    cache_key = f"{sym}:{exchange.upper()}:{requested_expiry_iso or ''}:{int(strikes)}"
 
     def _run_with_timeout(fn, timeout_sec: float = 2.5):
         import threading as _th
@@ -507,9 +532,9 @@ async def get_option_chain(
         fyers_ts = ""
         iso_exp = ""
         raw = None
-        if expiry:
+        if requested_expiry_iso:
             # Convert ISO date "2026-04-07" or DD-MM-YYYY to Fyers timestamp
-            iso_exp = _normalise_expiry_date(expiry)
+            iso_exp = requested_expiry_iso
             ts_map = _fyers_expiry_ts.get(sym, {})
             fyers_ts = ts_map.get(iso_exp, "")
 
@@ -552,16 +577,12 @@ async def get_option_chain(
                 oc = data
 
     # 3) ScriptMaster chain (structure with strikes, zero prices)
-    # Map equity exchange to F&O exchange for option chain lookup
-    _fo_map = {"NSE": "NFO", "NFO": "NFO", "BSE": "BFO", "BFO": "BFO",
-               "MCX": "MCX", "CDS": "CDS"}
-    oc_exchange = _fo_map.get(exchange, exchange)
 
     # If user explicitly asked for an expiry but broker returned nearest/current,
     # rebuild for requested expiry from ScriptMaster immediately so UI does not
     # remain stuck on old expiry data.
-    if oc and expiry:
-        req_expiry = _normalise_expiry_date(expiry)
+    if oc and requested_expiry_iso:
+        req_expiry = requested_expiry_iso
         got_expiry = _normalise_expiry_date(str(oc.get("expiry", "")))
         if req_expiry and got_expiry and req_expiry != got_expiry:
             spot_hint = float(oc.get("underlyingLtp", 0) or 0)
@@ -587,7 +608,7 @@ async def get_option_chain(
                 if q:
                     spot = q.get("ltp", 0)
         sm_chain = build_option_chain_from_scriptmaster(
-            sym, exchange=oc_exchange, expiry=expiry or "",
+            sym, exchange=oc_exchange, expiry=requested_expiry_iso or "",
             strikes_per_side=strikes, spot_price=spot,
         )
         if sm_chain and sm_chain.get("rows"):
@@ -605,6 +626,10 @@ async def get_option_chain(
     # Enrich with ScriptMaster expiries if broker didn't provide them
     if not oc.get("expiries"):
         oc["expiries"] = get_expiries(sym, exchange=oc_exchange, instrument_type="OPT")
+
+    # Keep MCX expiry dropdown strictly option-expiry based.
+    if req_exchange == "MCX" and scriptmaster_opt_expiries:
+        oc["expiries"] = scriptmaster_opt_expiries
 
     # Enrich each row with trading_symbol + lot_size for basket ordering
     # (skip if source is scriptmaster — already enriched)
@@ -890,6 +915,30 @@ async def symbols_stats():
         return {"total": total, "breakdown": breakdown, "broker_coverage": coverage}
     except Exception as e:
         return {"total": 0, "error": str(e)}
+
+
+@router.get("/symbols/verify_coverage")
+async def verify_symbols_coverage(
+    instrument_type: str = Query("", description="Filter: EQ, FUT, OPT, IDX"),
+    exchange: str = Query("", description="Filter: NSE, NFO, MCX, etc."),
+    limit: int = Query(50, ge=1, le=500, description="Max sample_missing rows"),
+):
+    """
+    Verify symbol DB broker coverage.
+
+    Returns per-broker stats: how many instruments are ready for live trading,
+    how many are missing required fields, and how many can be filled by formula fallback.
+    Also returns a sample of missing rows with formula synthesis results.
+    """
+    try:
+        from db.symbols_db import verify_broker_coverage
+        return verify_broker_coverage(
+            instrument_type=instrument_type,
+            exchange=exchange,
+            limit=limit,
+        )
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ── /market/ohlcv/{symbol} — chart candle data from stored ticks ───────────────

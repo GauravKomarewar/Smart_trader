@@ -364,9 +364,22 @@ class UpstoxAdapter(BrokerAdapter):
             # Upstox uses instrument_token (format: "NSE_EQ|INE848E01016")
             inst_token = order.get("instrument_token") or order.get("token") or ""
             if not inst_token:
-                # Construct from exchange and symbol as fallback
+                # Resolve from symbols DB (upstox_ikey field)
+                try:
+                    from db.symbols_db import resolve_broker_symbol as _gbs
+                    resolved = _gbs(sym, "upstox", exch)
+                    if resolved["symbol"]:
+                        inst_token = resolved["symbol"]
+                        logger.debug("Upstox instrument_key resolved: %s → %s", sym, inst_token)
+                    if resolved["exchange"]:
+                        exch = resolved["exchange"]
+                except Exception as e:
+                    logger.warning("Upstox symbol lookup failed for %s: %s", sym, e)
+            if not inst_token:
+                # Last-resort: construct from exchange segment + symbol (may be wrong for some instruments)
                 seg = _EXCH_TO_UPSTOX.get(exch, "NSE_EQ")
                 inst_token = f"{seg}|{sym}"
+                logger.warning("Upstox: no instrument_key in DB for %s:%s — using fallback %s", exch, sym, inst_token)
 
             upstox_order = {
                 "quantity": int(order.get("qty", 0)),

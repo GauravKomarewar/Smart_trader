@@ -199,10 +199,13 @@ export default function PositionManager() {
       trailing_value: edits.trailing_value ? parseFloat(edits.trailing_value) : prev?.trailing_value,
       trail_when:     edits.trail_when     ? parseFloat(edits.trail_when)     : prev?.trail_when,
     }
-    // Capture initial_ltp on first activation (current LTP at activation time)
-    const initialLtp = prev?.initial_ltp ?? currentLtp ?? undefined
-    // base_stop_loss = original SL before any trailing
-    const baseStopLoss = prev?.base_stop_loss ?? settings.stop_loss ?? undefined
+    // On re-activation from inactive state (or fresh), always reset anchor to current LTP and new SL.
+    // On update while already active, preserve existing anchor so trail progress is not lost.
+    const wasActive = prev?.active === true
+    // Capture initial_ltp: fresh current LTP on new/re-activation; preserve on active update
+    const initialLtp = (wasActive ? prev?.initial_ltp : undefined) ?? currentLtp ?? undefined
+    // base_stop_loss = original SL before any trailing: always use new SL on fresh activation
+    const baseStopLoss = (wasActive ? prev?.base_stop_loss : undefined) ?? settings.stop_loss ?? undefined
 
     setManaged(prev => ({
       ...prev,
@@ -228,10 +231,23 @@ export default function PositionManager() {
   }
 
   async function deactivateManaged(stateKey: string, posKey: string, accountId: string) {
+    // Capture current values BEFORE clearing local state so we can persist them to DB
+    const curr = managed[stateKey]
     setManaged(prev => { const n = { ...prev }; delete n[stateKey]; return n })
     setPmEdits(prev => { const n = { ...prev }; delete n[stateKey]; return n })
     try {
-      await api.setSLSettings({ configId: accountId, posKey, active: false })
+      // Send current values along with active:false so DB preserves them for next activation
+      await api.setSLSettings({
+        configId: accountId,
+        posKey,
+        active: false,
+        stopLoss:       curr?.stop_loss       || null,
+        target:         curr?.target          || null,
+        trailingValue:  curr?.trailing_value  || null,
+        trailWhen:      curr?.trail_when      || null,
+        initialLtp:     curr?.initial_ltp     || null,
+        baseStopLoss:   curr?.base_stop_loss  || null,
+      })
     } catch { /* non-fatal */ }
     toast(`Position manager deactivated`, 'info')
   }

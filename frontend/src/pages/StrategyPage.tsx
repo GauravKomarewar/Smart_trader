@@ -1936,8 +1936,13 @@ export default function StrategyPage() {
     } catch (e: any) { toast(e?.message || 'Failed to delete strategy', 'error') }
   }
 
-  const runningCount = instances.length
-  const liveCount    = instances.filter(i => !i.paper_mode).length
+  const runningInstances = useMemo(
+    () => (instances || []).filter(i => String(i?.status || '').toLowerCase() === 'running'),
+    [instances],
+  )
+
+  const runningCount = runningInstances.length
+  const liveCount    = runningInstances.filter(i => !i.paper_mode).length
 
   const TABS: { id: PageTab; label: string; badge?: number; badgeLive?: boolean }[] = [
     { id: 'all',     label: 'All Strategies' },
@@ -1973,7 +1978,7 @@ export default function StrategyPage() {
         </div>
 
         {/* Summary KPIs — hide on monitor/history tab */}
-        {tab !== 'monitor' && tab !== 'history' && <SummaryKPIs strategies={savedStrategies} instances={instances} />}
+        {tab !== 'monitor' && tab !== 'history' && <SummaryKPIs strategies={savedStrategies} instances={runningInstances} />}
 
         {/* Tab bar */}
         <div className="flex items-center gap-1 bg-bg-surface border border-border rounded-lg p-1 w-fit">
@@ -2008,13 +2013,13 @@ export default function StrategyPage() {
         {/* ── Running tab — instance cards ── */}
         {tab === 'running' && (
           <div className="space-y-2">
-            {instances.length === 0 ? (
+            {runningInstances.length === 0 ? (
               <div className="card flex flex-col items-center justify-center h-40 text-text-muted text-sm gap-2">
                 <GitBranch className="w-6 h-6" />
                 No running strategies. Go to <button className="text-brand underline" onClick={() => setTab('all')}>All Strategies</button> to deploy one.
               </div>
             ) : (
-              instances.map(inst => (
+              runningInstances.map(inst => (
                 <InstanceCard
                   key={inst.run_id}
                   inst={inst}
@@ -2047,7 +2052,7 @@ export default function StrategyPage() {
                     brokers={brokers}
                     symbols={symbols}
                     loadingBS={loadingBS}
-                    instanceCount={instances.filter(i => i.template_name === s.name).length}
+                    instanceCount={runningInstances.filter(i => i.template_name === s.name).length}
                   />
                 ))}
                 {savedStrategies.length === 0 && (

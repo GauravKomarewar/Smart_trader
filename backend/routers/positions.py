@@ -3,16 +3,18 @@ Smart Trader — Positions Router
 =================================
 
 Endpoints:
-  GET  /api/positions              — all open positions with SL/target data
-  GET  /api/positions/orders       — recent order history from PostgreSQL
-  POST /api/positions/{id}/cancel  — cancel a pending order
-  PUT  /api/positions/{id}/sl      — update stop-loss on a managed exit
+    GET  /api/positions              — all open positions with SL/target data
+    GET  /api/positions/orders       — recent order history from PostgreSQL
+    POST /api/positions/{id}/cancel  — cancel a pending order
+    PUT  /api/positions/{id}/sl      — update stop-loss on a managed exit
 """
 
+from collections import defaultdict
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from core.deps import current_user
+from db.trading_db import get_trading_conn
 
 positions_router = APIRouter(prefix="/positions", tags=["positions"])
 
@@ -25,14 +27,133 @@ def _get_repo(user_sub: str):
     return None
 
 
+def _load_account_map(user_sub: str) -> dict[str, str]:
+    conn = get_trading_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT client_id, config_id
+            FROM mgr_sessions
+            WHERE user_id = %s
+            """,
+            (user_sub,),
+        )
+        rows = cur.fetchall()
+        return {
+            str(client_id or "").strip(): str(config_id or "").strip()
+            for client_id, config_id in rows
+            if client_id and config_id
+        }
+    finally:
+        conn.close()
+
+
+def _position_qty(raw_position: dict) -> float:
+    try:
+        return float(
+            raw_position.get("netqty")
+            or raw_position.get("net_quantity")
+            or raw_position.get("qty")
+            or 0
+        )
+    except Exception:
+        return 0.0
+
+
+def _record_product(product: Optional[str]) -> str:
+    mapping = {"M": "MIS", "C": "CNC", "I": "NRML"}
+    value = str(product or "").upper()
+    return mapping.get(value, value)
+
+
+def _build_position_rows(user_sub: str) -> list[dict]:
+    from managers.supreme_manager import supreme
+    from routers.orders import _normalize_position
+    from trading.persistence.repository import OrderRepository
+
+    rows = supreme.get_positions(user_sub)
+    if not rows:
+        return []
+
+    account_map = _load_account_map(user_sub)
+    repo = OrderRepository(user_sub, "__all__")
+    records = repo.get_all(limit=500)
+
+    exact_matches: dict[tuple[str, str, str, str], list] = defaultdict(list)
+    loose_matches: dict[tuple[str, str, str], list] = defaultdict(list)
+
+    for record in records:
+        if record.execution_type == "EXIT":
+            continue
+        if record.status in {"FAILED", "CANCELLED"}:
+            continue
+
+        symbol = str(record.symbol or "").strip()
+        product = _record_product(record.product)
+        side = str(record.side or "").upper()
+        if not symbol or not product or not side:
+            continue
+
+        account_id = account_map.get(str(record.client_id or "").strip(), "")
+        exact_matches[(account_id, symbol, product, side)].append(record)
+        loose_matches[(symbol, product, side)].append(record)
+
+    positions: list[dict] = []
+    for idx, row in enumerate(rows):
+        raw = dict(row.get("data", row)) if isinstance(row, dict) else {}
+        if not raw:
+            continue
+
+        if isinstance(row, dict):
+            raw.setdefault("account_id", row.get("config_id") or raw.get("account_id"))
+            raw.setdefault("broker_id", row.get("broker_id") or raw.get("broker_id"))
+            raw.setdefault("client_id", row.get("client_id") or raw.get("client_id"))
+
+        if _position_qty(raw) == 0:
+            continue
+
+        normalized = _normalize_position(raw, idx)
+        normalized["status"] = "OPEN"
+
+        exact_key = (
+            str(normalized.get("accountId") or ""),
+            str(normalized.get("tradingsymbol") or normalized.get("symbol") or ""),
+            str(normalized.get("product") or ""),
+            str(normalized.get("side") or ""),
+        )
+        loose_key = exact_key[1:]
+
+        record = None
+        if exact_matches.get(exact_key):
+            record = exact_matches[exact_key].pop(0)
+        elif loose_matches.get(loose_key):
+            record = loose_matches[loose_key].pop(0)
+
+        normalized.update({
+            "command_id": record.command_id if record else "",
+            "strategy_name": record.strategy_name if record else "",
+            "stop_loss": record.stop_loss if record else None,
+            "target": record.target if record else None,
+            "trailing_type": record.trailing_type if record else None,
+            "trailing_value": record.trailing_value if record else None,
+            "trail_when": record.trail_when if record else None,
+            "broker_order_id": record.broker_order_id if record else None,
+            "created_at": record.created_at if record else None,
+        })
+        positions.append(normalized)
+
+    positions.sort(key=lambda position: (
+        str(position.get("tradingsymbol") or position.get("symbol") or ""),
+        str(position.get("accountId") or ""),
+    ))
+    return positions
+
+
 @positions_router.get("")
 def get_positions(payload: dict = Depends(current_user)):
-    """Open positions from PostgreSQL (EXECUTED, not yet closed)."""
-    repo = _get_repo(payload["sub"])
-    if repo is None:
-        return []
-    orders = repo.get_open_orders()
-    return [vars(o) if not isinstance(o, dict) else o for o in orders]
+    """Open broker positions merged with persisted Smart Trader risk fields."""
+    return _build_position_rows(payload["sub"])
 
 
 @positions_router.get("/orders")
