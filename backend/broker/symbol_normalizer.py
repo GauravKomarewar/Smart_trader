@@ -261,6 +261,36 @@ def _compact_underlying(underlying: str) -> str:
     return re.sub(r"\s+", "", str(underlying or "").upper()).strip()
 
 
+def _broker_exchange_label(broker_id: str, exchange: str, family: str = "") -> str:
+    exch = str(exchange or "").upper().strip()
+    fam = str(family or "").upper().strip()
+    if broker_id == "fyers":
+        # Keep derivatives on their native segment label (NFO/BFO), but map cash to NSE/BSE.
+        if fam in {"FUT", "OPT"}:
+            return exch
+        return {"NSE": "NSE", "BSE": "BSE", "NFO": "NSE", "BFO": "BSE", "MCX": "MCX", "CDS": "NSE"}.get(exch, exch)
+    if broker_id == "groww":
+        # Groww commonly uses NSE/BSE labels for derivative display symbols.
+        return {"NFO": "NSE", "BFO": "BSE", "NSE": "NSE", "BSE": "BSE", "MCX": "MCX", "CDS": "NSE"}.get(exch, exch)
+    return exch
+
+def _base_from_hyphenated_trading_symbol(clean: str, family: str) -> str:
+    """Extract underlying head from hyphenated canonical trading symbols.
+
+    FUT: HEAD-MONYYYY-FUT -> HEAD
+    OPT: HEAD-MONYYYY-STRIKE-CE -> HEAD
+    """
+    if not clean or "-" not in clean:
+        return ""
+    parts = [p for p in clean.split("-") if p]
+    fam = (family or "").upper().strip()
+    if fam == "FUT" and len(parts) >= 3:
+        return "-".join(parts[:-2]).strip()
+    if fam == "OPT" and len(parts) >= 4:
+        return "-".join(parts[:-3]).strip()
+    return ""
+
+
 def _ddmonyy_from_iso(expiry_iso: str) -> str:
     if not expiry_iso:
         return ""
@@ -284,6 +314,15 @@ def _ddmonyyyy_from_iso(expiry_iso: str) -> str:
         return ""
     try:
         return datetime.strptime(expiry_iso, "%Y-%m-%d").strftime("%d%b%Y").upper()
+    except ValueError:
+        return ""
+
+
+def _yymon_from_iso(expiry_iso: str) -> str:
+    if not expiry_iso:
+        return ""
+    try:
+        return datetime.strptime(expiry_iso, "%Y-%m-%d").strftime("%y%b").upper()
     except ValueError:
         return ""
 
@@ -316,15 +355,20 @@ def broker_symbol_candidates(
     clean = trading_symbol.split(":", 1)[-1].strip().upper() if trading_symbol else ""
 
     family = str(instrument_type or "").upper().strip()
+    broker_exch = _broker_exchange_label(broker_id, exch, family)
     expiry_iso = expiry_to_iso(expiry)
     ddmon = _ddmon_from_iso(expiry_iso)
     ddmonyy = _ddmonyy_from_iso(expiry_iso)
     ddmonyyyy = _ddmonyyyy_from_iso(expiry_iso)
+    yymon = _yymon_from_iso(expiry_iso)
     strike_txt = _format_strike_value(strike)
     opt = str(option_type or "").upper().strip()
     cp = "C" if opt == "CE" else ("P" if opt == "PE" else "")
 
     base = _compact_underlying(underlying)
+    tsym_head = _base_from_hyphenated_trading_symbol(clean, family)
+    if tsym_head:
+        base = _compact_underlying(tsym_head) or base
     if not base:
         base = _compact_underlying(clean)
 
@@ -350,19 +394,29 @@ def broker_symbol_candidates(
             candidates.append(base)
         elif broker_id == "groww":
             # Groww often stores groww_symbol with exchange prefix convention.
-            candidates.extend([f"{exch}-{base}", base])
+            candidates.extend([f"{broker_exch}-{base}", base])
         elif broker_id in {"dhan", "upstox"}:
             # Token-based brokers: cannot synthesize reliable order key from text.
             candidates = []
 
     if family == "FUT" and base:
         if broker_id == "shoonya":
+            if exch == "BFO" and yymon:
+                # BFO commonly uses YYMON + FUT.
+                candidates.append(f"{base}{yymon}FUT")
             # Shoonya NFO futures: SBIN26MAY26F
             if ddmonyy:
                 candidates.append(f"{base}{ddmonyy}F")
                 candidates.append(f"{base}{ddmonyy}FUT")
-        elif broker_id in {"fyers", "kite"}:
-            # Fyers/Kite commonly use DDMON without year for NFO monthly futures.
+        elif broker_id == "fyers":
+            if exch == "BFO" and yymon:
+                candidates.append(f"{base}{yymon}FUT")
+            # Fyers NFO monthly futures commonly use DDMON without year.
+            if ddmon:
+                candidates.append(f"{base}{ddmon}FUT")
+            if ddmonyy:
+                candidates.append(f"{base}{ddmonyy}FUT")
+        elif broker_id == "kite":
             if ddmon:
                 candidates.append(f"{base}{ddmon}FUT")
             if ddmonyy:
@@ -371,11 +425,17 @@ def broker_symbol_candidates(
             ddmonyy_title = _ddmonyy_title_from_iso(expiry_iso)
             if ddmonyy_title:
                 candidates.extend([
-                    f"{exch}-{base}-{ddmonyy_title}-FUT",
+                    f"{broker_exch}-{base}-{ddmonyy_title}-FUT",
                     f"{base}{ddmonyy}FUT" if ddmonyy else "",
                 ])
         elif broker_id in {"dhan", "upstox"}:
             candidates = []
+        elif broker_id == "angelone":
+            if exch == "BFO" and yymon:
+                candidates.append(f"{base}{yymon}FUT")
+            if ddmonyy:
+                candidates.append(f"{base}{ddmonyy}FUT")
+                candidates.append(f"{base}-{ddmonyy}-FUT")
         else:
             if ddmonyy:
                 candidates.append(f"{base}{ddmonyy}FUT")
@@ -383,12 +443,26 @@ def broker_symbol_candidates(
 
     elif family == "OPT" and base and strike_txt and opt:
         if broker_id == "shoonya":
-            # Shoonya options: SBIN26MAY26C1000 / SBIN26MAY26P1000
+            # BFO commonly uses YYMON + strike + CE/PE.
+            if exch == "BFO" and yymon:
+                candidates.append(f"{base}{yymon}{strike_txt}{opt}")
+                if cp:
+                    candidates.append(f"{base}{yymon}{cp}{strike_txt}")
+            # Shoonya NFO options: SBIN26MAY26C1000 / SBIN26MAY261000CE
             if ddmonyy and cp:
                 candidates.append(f"{base}{ddmonyy}{cp}{strike_txt}")
                 candidates.append(f"{base}{ddmonyy}{strike_txt}{opt}")
-        elif broker_id in {"fyers", "kite"}:
-            # Fyers/Kite often use DDMON without year for NFO monthly options.
+        elif broker_id == "fyers":
+            if exch == "BFO" and yymon:
+                candidates.append(f"{base}{yymon}{strike_txt}{opt}")
+            # Fyers NFO monthly options often use DDMON without year.
+            if ddmon:
+                candidates.append(f"{base}{ddmon}{strike_txt}{opt}")
+            if ddmonyy:
+                candidates.append(f"{base}{ddmonyy}{strike_txt}{opt}")
+                if cp:
+                    candidates.append(f"{base}{ddmonyy}{cp}{strike_txt}")
+        elif broker_id == "kite":
             if ddmon:
                 candidates.append(f"{base}{ddmon}{strike_txt}{opt}")
             if ddmonyy:
@@ -399,11 +473,22 @@ def broker_symbol_candidates(
             ddmonyy_title = _ddmonyy_title_from_iso(expiry_iso)
             if ddmonyy_title:
                 candidates.extend([
-                    f"{exch}-{base}-{ddmonyy_title}-{strike_txt}-{opt}",
+                    f"{broker_exch}-{base}-{ddmonyy_title}-{strike_txt}-{opt}",
                     f"{base}{ddmonyy}{strike_txt}{opt}" if ddmonyy else "",
                 ])
         elif broker_id in {"dhan", "upstox"}:
             candidates = []
+        elif broker_id == "angelone":
+            if exch == "BFO" and yymon:
+                candidates.append(f"{base}{yymon}{strike_txt}{opt}")
+            if ddmonyy:
+                candidates.extend([
+                    f"{base}{ddmonyy}{strike_txt}{opt}",
+                    f"{base}{ddmonyy}{cp}{strike_txt}" if cp else "",
+                    f"{base}-{ddmonyy}-{strike_txt}-{opt}",
+                ])
+            if ddmonyyyy:
+                candidates.append(f"{base}-{ddmonyyyy}-{strike_txt}-{opt}")
         else:
             if ddmonyy:
                 candidates.extend([
@@ -424,8 +509,12 @@ def broker_symbol_candidates(
             dedup.append(val)
 
     if broker_id == "fyers":
-        prefixed = [f"{exch}:{sym}" for sym in dedup]
-        return prefixed + dedup
+        prefixed_primary = [f"{broker_exch}:{sym}" for sym in dedup]
+        alt_exch = _broker_exchange_label("fyers", exch, "EQ")
+        if alt_exch != broker_exch:
+            prefixed_alt = [f"{alt_exch}:{sym}" for sym in dedup]
+            return prefixed_primary + prefixed_alt + dedup
+        return prefixed_primary + dedup
     return dedup
 
 
@@ -441,6 +530,7 @@ def to_broker_symbol(
     expiry: str = "",
     strike: float = 0.0,
     option_type: str = "",
+    allow_db_lookup: bool = False,
 ) -> str:
     """
     Convert canonical trading_symbol to broker-specific format.
@@ -455,6 +545,24 @@ def to_broker_symbol(
         Shoonya: "NIFTY26APR24500CE"
         Paper:   "NIFTY26APR24500CE"
     """
+    broker_id = (broker or "").lower().strip()
+
+    # Reliability-first path: use verified DB mapping when available.
+    if allow_db_lookup:
+        try:
+            from db.symbols_db import resolve_broker_symbol as _resolve_broker_symbol
+
+            resolved = _resolve_broker_symbol(
+                trading_symbol=trading_symbol,
+                broker_id=broker_id,
+                exchange=exchange,
+            )
+            db_symbol = str((resolved or {}).get("symbol") or "").strip()
+            if db_symbol:
+                return db_symbol
+        except Exception:
+            pass
+
     candidates = broker_symbol_candidates(
         broker=broker,
         exchange=exchange,
@@ -467,7 +575,7 @@ def to_broker_symbol(
     )
     if candidates:
         return candidates[0]
-    if (broker or "").lower().strip() in {"dhan", "upstox"}:
+    if broker_id in {"dhan", "upstox"}:
         return ""
     return trading_symbol.split(":", 1)[-1] if ":" in trading_symbol else trading_symbol
 

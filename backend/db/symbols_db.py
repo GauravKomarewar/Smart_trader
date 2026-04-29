@@ -1769,6 +1769,7 @@ def resolve_broker_symbol(
                     expiry=str(rec.get("expiry") or ""),
                     strike=float(rec.get("strike") or 0),
                     option_type=rec.get("option_type") or "",
+                    allow_db_lookup=False,
                 )
                 if guessed:
                     return {
