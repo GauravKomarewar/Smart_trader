@@ -721,7 +721,8 @@ async def search_instruments_api(
                 "symbol":                    rec.get("symbol", ""),
                 "trading_symbol":            rec.get("trading_symbol", ""),
                 "tradingsymbol":             rec.get("trading_symbol", ""),
-                "normalized_trading_symbol": rec.get("normalized_trading_symbol") or rec.get("trading_symbol", ""),
+                    "normalized_trading_symbol": rec.get("smart_trader_name") or rec.get("normalized_trading_symbol") or rec.get("trading_symbol", ""),
+                    "smart_trader_name":         rec.get("smart_trader_name", ""),
                 "exchange":                  rec.get("exchange", ""),
                 "type":                      rec.get("instrument_type", "EQ"),
                 "token":                     rec.get("exchange_token", ""),
@@ -972,6 +973,18 @@ async def get_ohlcv(
     }
     db_sym = _SYM_ALIASES.get(sym, sym)
 
+    # Build variant list: original, exchange-prefixed (how ticks are stored), base without suffix
+    _variants_set = [db_sym, sym]
+    # Add exchange-prefixed variant (how ticks are stored when user subscribes NSE:SBIN-EQ)
+    prefixed = f"{exchange}:{sym}"
+    _variants_set.append(prefixed)
+    # Strip trailing -EQ / -INDEX to get base symbol (e.g. SBIN-EQ → SBIN)
+    _base = sym.replace("-EQ", "").replace("-INDEX", "").replace("-BE", "")
+    if _base != sym:
+        _variants_set.append(_base)
+        _variants_set.append(f"{exchange}:{_base}")
+    sym_variants = list(dict.fromkeys(_variants_set))  # deduplicated, order preserved
+
     def _rows_to_candles(rows):
         return [
             {
@@ -990,8 +1003,6 @@ async def get_ohlcv(
     try:
         from db.trading_db import trading_cursor
         with trading_cursor() as cur:
-            # Try all symbol variants to search — original sym and any alias
-            sym_variants = list(dict.fromkeys([db_sym, sym]))  # deduplicated, alias first
             rows = []
             for s in sym_variants:
                 if tf_min == 1:

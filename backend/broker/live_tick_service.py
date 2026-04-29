@@ -507,6 +507,13 @@ class LiveTickService:
         self._tick_store[sym] = tick
         _ohlcv_agg.push(tick)
         _buffer_tick(tick)
+        # Also persist under the plain trading symbol (strip exchange prefix like "NSE:")
+        # so OHLCV queries using just "SBIN-EQ" or "SBIN" can find the data
+        if ":" in sym:
+            plain_sym = sym.split(":", 1)[1]
+            plain_tick = {**tick, "symbol": plain_sym}
+            _ohlcv_agg.push(plain_tick)
+            _buffer_tick(plain_tick)
         # Pre-serialize once — all clients get the same bytes
         self._broadcast_preserialized(tick)
 

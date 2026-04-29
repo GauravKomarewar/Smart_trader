@@ -37,6 +37,15 @@ function quoteKey(symbol: string, exchange: string): string {
 function wsSubSymbol(symbol: string, exchange?: string): string {
   if (!symbol) return ''
   if (symbol.includes(':')) return symbol
+  // Detect smart_trader_name format: NSE-SBIN-EQ, NFO-NIFTY-FUT-28Apr26 etc.
+  // These have a known exchange prefix separated by '-'
+  const KNOWN_EX = ['NSE', 'BSE', 'NFO', 'BFO', 'MCX', 'CDS']
+  const firstPart = symbol.split('-')[0].toUpperCase()
+  if (KNOWN_EX.includes(firstPart)) {
+    // Strip exchange prefix: NSE-SBIN-EQ → NSE:SBIN-EQ
+    const sym = symbol.substring(firstPart.length + 1)
+    return `${firstPart}:${sym}`
+  }
   const ex = (exchange || detectExchange(symbol) || 'NSE').toUpperCase()
   return `${ex}:${symbol}`
 }
@@ -122,7 +131,9 @@ export default function WatchlistChartPage() {
     activeWatchlist?.items[0]?.id ?? null
   )
   const selectedItem = activeWatchlist?.items.find(i => i.id === selectedItemId) ?? activeWatchlist?.items[0] ?? null
-  const chartSymbol = selectedItem ? displaySymbol(selectedItem) : null
+  // Broker symbol for API/WS, display name (smart_trader_name) for UI
+  const chartSymbol = selectedItem ? (selectedItem.symbol || selectedItem.tradingsymbol) : null
+  const chartDisplayName = selectedItem ? displaySymbol(selectedItem) : null
   const chartExchange = selectedItem?.exchange || (chartSymbol ? detectExchange(chartSymbol) : 'NSE')
   // Mobile view toggle
   const [mobileView, setMobileView] = useState<'list' | 'chart'>('list')
@@ -161,7 +172,7 @@ export default function WatchlistChartPage() {
           )}
         >
           <BarChart2 className="w-3.5 h-3.5" /> Chart
-          {chartSymbol && <span className="ml-1 text-[10px] text-text-muted">{chartSymbol}</span>}
+            {chartDisplayName && <span className="ml-1 text-[10px] text-text-muted">{chartDisplayName}</span>}
         </button>
       </div>
 
@@ -194,7 +205,7 @@ export default function WatchlistChartPage() {
           {/* Chart Panel */}
           <div className="flex-1 flex flex-col overflow-hidden">
             {chartSymbol ? (
-              <ChartPanel symbol={chartSymbol} exchange={chartExchange} showDepth={showDepth} onToggleDepth={() => setShowDepth(d => !d)} />
+              <ChartPanel symbol={chartSymbol} displayName={chartDisplayName ?? undefined} exchange={chartExchange} showDepth={showDepth} onToggleDepth={() => setShowDepth(d => !d)} />
             ) : (
               <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
                 <div className="text-center space-y-2">
@@ -235,7 +246,7 @@ function WatchlistPanel({ selectedId, onSelect }: {
   useEffect(() => {
     const items = activeWL?.items ?? []
     const symbols = items
-      .map(i => wsSubSymbol(i.tradingsymbol || i.symbol, i.exchange))
+        .map(i => wsSubSymbol(i.symbol || i.tradingsymbol, i.exchange))
       .filter(Boolean)
     if (items.length) {
       marketWs.subscribe(symbols)
@@ -321,9 +332,10 @@ function WatchlistPanel({ selectedId, onSelect }: {
                     <button
                       key={i}
                       onMouseDown={() => {
-                        const tsym = r.normalized_trading_symbol || r.trading_symbol || r.tradingsymbol || r.symbol
-                        const watchSymbol = isDerivativeType(r.type) ? tsym : (r.symbol || tsym)
-                        addItem(activeId, { symbol: watchSymbol, tradingsymbol: tsym, exchange: r.exchange, type: r.type })
+                        // symbol = broker trading symbol (for WS/API), tradingsymbol = smart_trader_name (for display)
+                        const brokerSym = r.trading_symbol || r.tradingsymbol || r.symbol
+                        const smartName = r.normalized_trading_symbol || r.trading_symbol || r.symbol
+                        addItem(activeId, { symbol: brokerSym, tradingsymbol: smartName, exchange: r.exchange, type: r.type })
                         setSearch('')
                       }}
                       className="w-full flex items-center gap-3 px-3 py-2 hover:bg-bg-hover text-left transition-colors"
@@ -374,18 +386,20 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
   onRemove: () => void
 }) {
   const { openOrderModal } = useUIStore()
-  const tickSym = displaySymbol(item)
-  const [quote, setQuote] = useState(getLiveQuote(tickSym, item.exchange))
+    // Use broker format for subscriptions/API, smart_trader_name for display
+    const brokerSym = item.symbol || item.tradingsymbol
+    const displayName = displaySymbol(item)
+    const [quote, setQuote] = useState(getLiveQuote(brokerSym, item.exchange))
   const [hover, setHover] = useState(false)
 
   useEffect(() => {
-    fetchRestQuote(tickSym, item.exchange).then(() => setQuote(getLiveQuote(tickSym, item.exchange)))
-    const subSym = wsSubSymbol(tickSym, item.exchange)
+      fetchRestQuote(brokerSym, item.exchange).then(() => setQuote(getLiveQuote(brokerSym, item.exchange)))
+      const subSym = wsSubSymbol(brokerSym, item.exchange)
     marketWs.subscribe([subSym])
     const unsubTick = marketWs.onTick((tick) => {
-      if (normSym(tick.symbol) === normSym(tickSym)) {
+        if (normSym(tick.symbol) === normSym(brokerSym)) {
         const q = { ltp: tick.ltp, changePct: tick.changePct ?? 0, change: tick.change ?? 0, volume: tick.volume ?? 0 }
-        _liveQuotes[quoteKey(tickSym, item.exchange)] = q
+          _liveQuotes[quoteKey(brokerSym, item.exchange)] = q
         setQuote(q)
       }
     })
@@ -393,7 +407,7 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
       unsubTick()
       marketWs.unsubscribe([subSym])
     }
-  }, [tickSym, item.exchange])
+    }, [brokerSym, item.exchange])
 
   return (
     <div
@@ -407,7 +421,7 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
       onMouseLeave={() => setHover(false)}
     >
       <div className="flex-1 min-w-0">
-        <div className="text-[12px] font-semibold text-text-bright truncate">{displaySymbol(item)}</div>
+          <div className="text-[12px] font-semibold text-text-bright truncate">{displayName}</div>
         <div className="text-[10px] text-text-muted">{item.exchange}</div>
       </div>
       <div className="text-right">
@@ -419,12 +433,12 @@ function WatchlistRow({ item, isSelected, onSelect, onRemove }: {
       {/* Hover actions */}
       <div className={cn('flex items-center gap-0.5 ml-2 transition-opacity', hover ? 'opacity-100' : 'opacity-0')}>
         <button
-          onClick={e => { e.stopPropagation(); openOrderModal(displaySymbol(item), item.exchange) }}
+            onClick={e => { e.stopPropagation(); openOrderModal(brokerSym, item.exchange) }}
           className="btn-buy btn-xs !px-1.5 !py-0.5"
           title="Buy"
         >B</button>
         <button
-          onClick={e => { e.stopPropagation(); openOrderModal(displaySymbol(item), item.exchange) }}
+            onClick={e => { e.stopPropagation(); openOrderModal(brokerSym, item.exchange) }}
           className="btn-sell btn-xs !px-1.5 !py-0.5"
           title="Sell"
         >S</button>
@@ -587,8 +601,8 @@ function MarketDepthPanel({ symbol, exchange }: { symbol: string; exchange: stri
 }
 
 // ── Enhanced Chart Panel with Full Indicators ─────
-function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
-  symbol: string; exchange: string; showDepth: boolean; onToggleDepth: () => void
+function ChartPanel({ symbol, displayName, exchange, showDepth, onToggleDepth }: {
+  symbol: string; displayName?: string; exchange: string; showDepth: boolean; onToggleDepth: () => void
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const subContainerRef = useRef<HTMLDivElement>(null)
@@ -989,7 +1003,7 @@ function ChartPanel({ symbol, exchange, showDepth, onToggleDepth }: {
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Toolbar row 1 — symbol, intervals, chart type, volume */}
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-bg-surface shrink-0 flex-wrap gap-y-1">
-        <span className="text-[13px] font-bold text-text-bright">{symbol}</span>
+        <span className="text-[13px] font-bold text-text-bright">{displayName || symbol}</span>
         <div className={cn('text-[13px] font-mono font-bold', changeCls(quote.changePct))}>
           {fmtNum(quote.ltp)}
           <span className="text-[11px] ml-1.5">{quote.changePct >= 0 ? '+' : ''}{quote.changePct.toFixed(2)}%</span>

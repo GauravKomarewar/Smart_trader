@@ -40,12 +40,13 @@ export default function GlobalSearch() {
   if (!searchOpen) return null
 
   const handleSelect = (item: any) => {
-    const tsym = item.trading_symbol || item.tradingsymbol || item.symbol
-    const displaySym = isDerivativeType(item.type) ? tsym : (item.symbol || tsym)
-    saveRecent(displaySym)
+    // brokerSym = broker trading symbol (for WS/API), smartName = smart_trader_name (for display)
+    const brokerSym = item.trading_symbol || item.tradingsymbol || item.symbol
+    const smartName = item.normalized_trading_symbol || item.trading_symbol || item.symbol
+    saveRecent(smartName)
     setRecent(loadRecent())
     navigate('/app/watchlist')
-    addItem(activeId, { symbol: displaySym, tradingsymbol: tsym, exchange: item.exchange, type: item.type })
+    addItem(activeId, { symbol: brokerSym, tradingsymbol: smartName, exchange: item.exchange, type: item.type })
     setSearchOpen(false)
   }
 
@@ -129,6 +130,7 @@ export default function GlobalSearch() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-[13px] font-semibold text-text-bright">{r.trading_symbol || r.tradingsymbol || r.symbol}</div>
+                                        <div className="text-[13px] font-semibold text-text-bright">{r.normalized_trading_symbol || r.trading_symbol || r.tradingsymbol || r.symbol}</div>
                     <div className="text-[10px] text-text-muted">{r.name || r.symbol} · {r.exchange} · {r.type}{r.lot_size > 1 ? ` · Lot: ${r.lot_size}` : ''}</div>
                   </div>
                   <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
