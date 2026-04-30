@@ -444,28 +444,58 @@ class AccountRiskManager:
             self._log.debug("heartbeat: get_positions failed: %s", exc)
             return result
 
-        # Guard against stale empty-positions read mid-session close
-        if not positions and self._last_known_pnl != 0.0:
-            result["pnl"] = self._last_known_pnl
-            return result
-
         # ── Detect manual / orphan trades ─────────────────────────────
         self._check_manual_trades(positions)
 
         # ── Compute total PnL — ALL products including CNC/delivery ───────
         pnl = 0.0
         open_count = 0
-        for p in positions:
-            if not isinstance(p, dict):
-                continue
-            # Include realised + unrealised for every product type
-            rpnl   = float(p.get("realised_pnl")  or p.get("rpnl",   0) or 0)
-            urmtom = float(p.get("unrealised_pnl") or p.get("urmtom", 0)
-                           or p.get("pnl", 0) or 0)
-            pnl += rpnl + urmtom
-            net_qty = int(p.get("net_qty") or p.get("netqty") or p.get("qty", 0) or 0)
-            if net_qty != 0:
-                open_count += 1
+        if positions:
+            for p in positions:
+                if not isinstance(p, dict):
+                    continue
+
+                # Preserve explicit zeroes. Avoid double-counting when a broker
+                # sends both component and total pnl fields.
+                rpnl = self._pick_numeric(
+                    p,
+                    "realised_pnl",
+                    "realized_pnl",
+                    "rpnl",
+                )
+                urmtom = self._pick_numeric(
+                    p,
+                    "unrealised_pnl",
+                    "unrealized_pnl",
+                    "urmtom",
+                    "urpnl",
+                )
+                total_pnl = self._pick_numeric(
+                    p,
+                    "pnl",
+                    "day_pnl",
+                    "mtm",
+                )
+
+                if rpnl is not None and urmtom is not None:
+                    line_pnl = rpnl + urmtom
+                elif total_pnl is not None:
+                    line_pnl = total_pnl
+                else:
+                    line_pnl = (rpnl or 0.0) + (urmtom or 0.0)
+
+                pnl += line_pnl
+                net_qty = int(p.get("net_qty") or p.get("netqty") or p.get("qty", 0) or 0)
+                if net_qty != 0:
+                    open_count += 1
+        else:
+            # Some brokers return an empty position book after square-off while
+            # still exposing day PnL via limits. Use that to avoid stale halted PnL.
+            fallback_pnl = self._pnl_from_limits_snapshot(session)
+            if fallback_pnl is None and self._last_known_pnl != 0.0:
+                pnl = self._last_known_pnl
+            else:
+                pnl = float(fallback_pnl or 0.0)
 
         self._last_known_pnl       = pnl
         result["pnl"]              = round(pnl, 2)
@@ -514,6 +544,53 @@ class AccountRiskManager:
                 pass
 
         return result
+
+    @staticmethod
+    def _pick_numeric(payload: dict, *keys: str) -> Optional[float]:
+        """
+        Return first present numeric field among keys.
+        Unlike `or` chains, this preserves explicit zero values.
+        """
+        for key in keys:
+            if key not in payload:
+                continue
+            val = payload.get(key)
+            if val in (None, ""):
+                continue
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _pnl_from_limits_snapshot(self, session) -> Optional[float]:
+        """
+        Best-effort day PnL from broker limits payload.
+        Returns None when unavailable/unparsable.
+        """
+        try:
+            limits = session.get_limits() or {}
+            if not isinstance(limits, dict):
+                return None
+
+            unrealized = self._pick_numeric(
+                limits,
+                "unrealised_pnl",
+                "unrealizedPnl",
+                "unrealized_pnl",
+                "urmtom",
+                "urpnl",
+            )
+            realized = self._pick_numeric(
+                limits,
+                "realised_pnl",
+                "realizedPnl",
+                "realized_pnl",
+                "rpnl",
+            )
+            return float(realized or 0.0) + float(unrealized or 0.0)
+        except Exception:
+            return None
 
     # ── Broker order cancellation ─────────────────────────────────────────────
 
@@ -729,8 +806,18 @@ class AccountRiskManager:
                 # If there are recent SENT/EXECUTED orders in last 30s, it's our order
                 for rec in recent:
                     if rec.status in ("SENT_TO_BROKER", "EXECUTED", "DISPATCHING"):
-                        age = (datetime.now(timezone.utc) - rec.updated_at).total_seconds() \
-                            if hasattr(rec, "updated_at") and rec.updated_at else 999
+                        age = 999.0
+                        if hasattr(rec, "updated_at") and rec.updated_at:
+                            updated_at = rec.updated_at
+                            if isinstance(updated_at, str):
+                                try:
+                                    updated_at = datetime.fromisoformat(updated_at)
+                                except ValueError:
+                                    updated_at = None
+                            if isinstance(updated_at, datetime):
+                                if updated_at.tzinfo is None:
+                                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+                                age = (datetime.now(timezone.utc) - updated_at).total_seconds()
                         if age < 30:
                             # Likely our order, not manual
                             self._last_position_signature = current_sig
@@ -823,7 +910,8 @@ class AccountRiskManager:
         return (
             f"Daily loss limit breached for {self.client_id} "
             f"(breached at P&L Rs.{breach_pnl:.0f} vs limit Rs.{breach_limit:.0f}; "
-            f"current P&L Rs.{self._daily_pnl:.0f})."
+            f"current P&L Rs.{self._daily_pnl:.0f}). "
+            f"Trading remains halted for the rest of the day after breach."
         )
 
     # ── Persistence ───────────────────────────────────────────────────────────
