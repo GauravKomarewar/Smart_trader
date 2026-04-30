@@ -66,7 +66,7 @@ def test_resolve_symbol_for_broker_fallback_when_db_unavailable(monkeypatch):
 
     assert canonical == "SBIN"
     assert exchange == "NSE"
-    assert broker_symbol == "NSE:SBIN"
+    assert broker_symbol == "NSE:SBIN-EQ"
 
 
 def test_resolve_symbol_for_broker_ignores_wrong_exchange_hint_when_db_has_match(monkeypatch):

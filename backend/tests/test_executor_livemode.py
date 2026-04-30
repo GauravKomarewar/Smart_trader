@@ -343,3 +343,33 @@ class TestPriceSanitization:
         assert req.price == pytest.approx(102.80)
         assert leg.entry_price == pytest.approx(102.80)
         assert leg.is_active is True
+
+    def test_exit_order_rejects_contaminated_shoonya_style_option_ltp(self):
+        """Shoonya C/P strike suffix symbols must also be protected from spot contamination."""
+        order = MagicMock()
+        order.id = "oid-3"
+        order.status = "COMPLETE"
+
+        oms = MagicMock()
+        oms.place_order.return_value = order
+
+        exec_ = self._make_blank_executor(oms, paper_mode=False)
+        exec_.market.get_option_at_strike.return_value = {"ltp": 95.35}
+        exec_._tick_service.get_latest.return_value = {"ltp": 23837.75}
+
+        leg = _make_leg(
+            tag="LEG@2_PE",
+            order_status="FILLED",
+            is_active=True,
+            strike=23600,
+            trading_symbol="NIFTY05MAY26P23600",
+        )
+        leg.option_type = OptionType.PE
+        leg.ltp = 23837.75
+
+        ok = exec_._place_exit_order(leg)
+
+        assert ok is True
+        req = oms.place_order.call_args[0][0]
+        assert req.price == pytest.approx(95.35)
+        assert leg.ltp == pytest.approx(95.35)

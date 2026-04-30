@@ -149,6 +149,16 @@ def test_clean_underlying_empty_returns_empty():
     assert sdb._clean_underlying(None) == ""
 
 
+def test_extract_underlying_hint_handles_360one_option_formats():
+    assert sdb._extract_underlying_hint("360ONE 1000 CE 26 MAY 26") == "360ONE"
+    assert sdb._extract_underlying_hint("BFO:360ONE26MAY261000CE") == "360ONE"
+
+
+def test_extract_underlying_hint_handles_numeric_cash_aliases():
+    assert sdb._extract_underlying_hint("12 MFLS2") == "12"
+    assert sdb._extract_underlying_hint("505196") == "505196"
+
+
 def test_clean_underlying_index_names_preserved():
     assert sdb._clean_underlying("NIFTY") == "NIFTY"
     assert sdb._clean_underlying("BANKNIFTY") == "BANKNIFTY"

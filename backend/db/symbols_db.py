@@ -102,6 +102,16 @@ def _extract_underlying_hint(trading_symbol: str) -> str:
     if ":" in raw:
         raw = raw.split(":", 1)[1].strip()
 
+    # Long-form broker symbols are best handled by the cleaner directly.
+    if " " in raw:
+        cleaned = _clean_underlying(raw)
+        if cleaned:
+            return cleaned
+        # Fallback for rare cash rows like "12 MFLS2" where removing trailing
+        # digits from the first token would otherwise yield an empty symbol.
+        first_token = _clean_text(raw.split()[0] if raw.split() else "")
+        return first_token
+
     compact = raw.replace(" ", "")
 
     # Prefer explicit known families to preserve names that contain digits.
@@ -116,17 +126,22 @@ def _extract_underlying_hint(trading_symbol: str) -> str:
             return head
 
     # Generic compact derivatives like "RELIANCE26APR2500CE".
-    m = re.match(r"^([A-Z0-9]+?)(\d{1,2}[A-Z]{3}\d{2}.*)$", compact)
+    m = re.match(rf"^([A-Z0-9]+?)(\d{{1,2}}(?:{_MONTHS})\d{{2}}.*)$", compact)
     if m:
         return m.group(1)
 
     # Weekly/compact style like "NIFTY2642124500CE".
-    m = re.match(r"^([A-Z0-9]+?)(\d{5,}.*)$", compact)
+    m = re.match(r"^([A-Z0-9]+?)(\d{5,}(?:CE|PE|FUT).*)$", compact)
     if m:
         return m.group(1)
 
     # Fallback to broker-style suffix stripping.
-    return _clean_text(_extract_base_symbol(raw))
+    fallback = _clean_text(_extract_base_symbol(raw))
+    if fallback:
+        return fallback
+    # Last-resort fallback to prevent persisting blank symbol values.
+    token = _clean_text(raw.split()[0] if raw.split() else "")
+    return token
 from core.daily_refresh import IST, current_refresh_cycle_start, next_refresh_time
 from db.trading_db import get_trading_conn
 
@@ -1148,6 +1163,30 @@ def _finalize_normalized_columns(cur, table_name: str) -> None:
           AND UPPER(BTRIM(trading_symbol)) ~ '^.*-[0-9]+(?:\\.[0-9]+)?-(CE|PE)$'
         """
     )
+
+    # Repair legacy rows where symbol was persisted as empty even though
+    # trading_symbol is present; this keeps normalized_underlying reliable.
+    cur.execute(
+        f"""
+        SELECT ctid::text, trading_symbol
+        FROM {table_name}
+        WHERE COALESCE(BTRIM(symbol), '') = ''
+          AND COALESCE(BTRIM(trading_symbol), '') <> ''
+        """
+    )
+    repaired = 0
+    for ctid_text, trading_symbol in cur.fetchall() or []:
+        inferred = _extract_underlying_hint(trading_symbol)
+        cleaned = _clean_underlying(inferred)
+        if not cleaned:
+            continue
+        cur.execute(
+            f"UPDATE {table_name} SET symbol = %s WHERE ctid = %s::tid",
+            (cleaned, ctid_text),
+        )
+        repaired += 1
+    if repaired:
+        logger.info("Repaired %d rows with missing symbol in %s", repaired, table_name)
 
     cur.execute(
         f"""

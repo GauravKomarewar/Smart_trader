@@ -777,7 +777,7 @@ class LiveTickService:
             # Sanity guard: option symbols (CE/PE suffix) should never have an LTP
             # in the index-price range (~10000+).  If topic_id collision caused an
             # index tick to be mislabelled as an option, reject it here.
-            if _re.search(r'\d{3,}(CE|PE)$', clean_sym.upper()) and ltp > 10000:
+            if _re.search(r'(?:\d{3,}(?:CE|PE)|[CP]\d{3,})$', clean_sym.upper()) and ltp > 10000:
                 logger.debug(
                     "Rejected contaminated tick: sym=%s ltp=%.2f (likely index value)",
                     subscribed_sym, ltp,
@@ -992,7 +992,7 @@ class LiveTickService:
 
             # Same contamination guard used for Fyers path: reject option-symbol
             # ticks carrying index-like values due upstream topic aliasing.
-            if _re.search(r'\d{3,}(CE|PE)$', str(subscribed_sym).upper().replace(" ", "")) and ltp > 10000:
+            if _re.search(r'(?:\d{3,}(?:CE|PE)|[CP]\d{3,})$', str(subscribed_sym).upper().replace(" ", "")) and ltp > 10000:
                 logger.debug(
                     "Rejected contaminated Shoonya tick: sym=%s ltp=%.2f",
                     subscribed_sym,

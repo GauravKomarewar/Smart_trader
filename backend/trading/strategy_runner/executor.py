@@ -211,17 +211,28 @@ class StrategyExecutor:
 
     @staticmethod
     def _looks_like_option_symbol(symbol: str) -> bool:
-        return bool(re.search(r"\d{3,}(CE|PE)$", str(symbol or "").upper().replace(" ", "")))
+        compact = str(symbol or "").upper().replace(" ", "")
+        return bool(
+            re.search(r"\d{3,}(CE|PE)$", compact)
+            or re.search(r"[CP]\d{3,}$", compact)
+        )
 
-    def _is_contaminated_option_ltp(self, symbol: str, live_ltp: float, ref_ltp: Optional[float]) -> bool:
+    def _is_contaminated_option_ltp(
+        self,
+        symbol: str,
+        live_ltp: float,
+        ref_ltp: Optional[float],
+        *,
+        force_option_leg: bool = False,
+    ) -> bool:
         """Reject clearly impossible option LTP values (typically spot/index contamination)."""
-        if not self._looks_like_option_symbol(symbol):
+        if not force_option_leg and not self._looks_like_option_symbol(symbol):
             return False
         if live_ltp <= 0:
             return False
         if ref_ltp is None or ref_ltp <= 0:
-            # Without chain reference, only reject extreme index-like values.
-            return live_ltp > 10000
+            # Without chain reference, reject clearly index/spot-like values.
+            return live_ltp > 2000
 
         ratio = live_ltp / max(ref_ltp, 0.01)
         if live_ltp > 10000 and (ratio >= 8 or live_ltp >= (ref_ltp + 5000)):
@@ -247,7 +258,12 @@ class StrategyExecutor:
 
             live_ltp = self._get_live_ltp(tsym)
             if live_ltp and live_ltp > 0:
-                if self._is_contaminated_option_ltp(tsym, live_ltp, chain_ltp):
+                if self._is_contaminated_option_ltp(
+                    tsym,
+                    live_ltp,
+                    chain_ltp,
+                    force_option_leg=True,
+                ):
                     logger.warning(
                         "LTP_SANITIZED | %s %s | rejected live_ltp=%.2f chain_ltp=%s",
                         context, tsym, live_ltp,
@@ -298,6 +314,58 @@ class StrategyExecutor:
             return unique_key, resolved_exchange
         except Exception:
             return "", exchange
+
+    def _current_broker_id(self) -> str:
+        """Best-effort broker id inference from injected OMS broker adapter instance."""
+        try:
+            broker = getattr(self._oms, "broker", None) if self._oms else None
+            if broker is None:
+                return ""
+            name = type(broker).__name__.lower()
+            module = getattr(type(broker), "__module__", "").lower()
+            hay = f"{module}.{name}"
+            if "shoonya" in hay:
+                return "shoonya"
+            if "fyers" in hay:
+                return "fyers"
+            if "angel" in hay:
+                return "angelone"
+            if "dhan" in hay:
+                return "dhan"
+            if "kite" in hay or "zerodha" in hay:
+                return "kite"
+            if "upstox" in hay:
+                return "upstox"
+            if "groww" in hay:
+                return "groww"
+            if "paper" in hay:
+                return "paper"
+            return ""
+        except Exception:
+            return ""
+
+    def _validate_symbol_resolution(self, tsym: str, exchange: str, unique_key: str) -> tuple[bool, str]:
+        """
+        Validate live-order symbol resolution for current broker.
+
+        Returns (ok, reason). In paper mode or unknown broker, returns True.
+        """
+        if self._paper_mode or not self._oms:
+            return True, "paper_or_no_oms"
+
+        broker_id = self._current_broker_id()
+        if not broker_id:
+            return True, "unknown_broker_skip"
+
+        try:
+            from db.symbols_db import resolve_broker_symbol as _resolve
+
+            resolved = _resolve(tsym, broker_id, exchange, unique_key=unique_key)
+            if not resolved or not str(resolved.get("symbol") or "").strip():
+                return False, f"unresolved_for_broker:{broker_id}"
+            return True, f"resolved:{broker_id}"
+        except Exception as exc:
+            return False, f"resolve_error:{exc}"
 
     def _allow_time_exit_attempt(self, reason: str, now: datetime) -> bool:
         """Throttle repeated time/EOD exit attempts for the same reason."""
@@ -379,6 +447,15 @@ class StrategyExecutor:
             leg.trading_symbol = tsym
             exchange = getattr(self.market, 'exchange', 'NFO')
             unique_key, exchange = self._resolve_order_identity(tsym, exchange)
+
+            ok, why = self._validate_symbol_resolution(tsym, exchange, unique_key)
+            if not ok:
+                leg.order_status = "FAILED"
+                logger.error(
+                    "SYMBOL_RESOLVE_FAILED | ENTRY %s %s exchange=%s reason=%s",
+                    leg.tag, tsym, exchange, why,
+                )
+                return
 
             req = OrderRequest(
                 symbol=tsym,
@@ -469,6 +546,14 @@ class StrategyExecutor:
             leg.trading_symbol = tsym
             exchange = getattr(self.market, 'exchange', 'NFO')
             unique_key, exchange = self._resolve_order_identity(tsym, exchange)
+
+            ok, why = self._validate_symbol_resolution(tsym, exchange, unique_key)
+            if not ok:
+                logger.error(
+                    "SYMBOL_RESOLVE_FAILED | EXIT %s %s exchange=%s reason=%s",
+                    leg.tag, tsym, exchange, why,
+                )
+                return False
 
             req = OrderRequest(
                 symbol=tsym,
@@ -661,6 +746,14 @@ class StrategyExecutor:
             fill_price = leg.exit_price if (leg.exit_price and leg.exit_price > 0) else self._resolve_leg_market_price(leg, "ADJ_EXIT")
             if fill_price <= 0:
                 fill_price = leg.ltp
+
+            ok, why = self._validate_symbol_resolution(tsym, exchange, unique_key)
+            if not ok:
+                logger.error(
+                    "SYMBOL_RESOLVE_FAILED | ADJ_EXIT %s %s exchange=%s reason=%s",
+                    leg.tag, tsym, exchange, why,
+                )
+                return
 
             req = OrderRequest(
                 symbol=tsym,
@@ -1061,7 +1154,12 @@ class StrategyExecutor:
                         live_ltp = self._get_live_ltp(tsym)
                         _sq_ltp = opt_data.get("ltp")
                         if live_ltp and live_ltp > 0:
-                            if self._is_contaminated_option_ltp(tsym, live_ltp, _sq_ltp):
+                            if self._is_contaminated_option_ltp(
+                                tsym,
+                                live_ltp,
+                                _sq_ltp,
+                                force_option_leg=True,
+                            ):
                                 logger.warning(
                                     "LTP_SANITIZED | UPDATE %s | rejected live_ltp=%.2f sqlite_ltp=%s",
                                     tsym,
