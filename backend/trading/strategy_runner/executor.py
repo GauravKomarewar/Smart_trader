@@ -813,6 +813,15 @@ class StrategyExecutor:
             }
             self._log_event(ev_type, reason=exit_reason, details=exit_details)
             self._save_state()  # Save immediately on significant event
+            # Terminal exits (time/SL/target/manual exit_all) should end the run lifecycle
+            # as soon as we're flat, otherwise the instance remains RUNNING until EOD cutoff.
+            if not self.state.any_leg_active:
+                self._request_stop = True
+                logger.info(
+                    "AUTO_STOP_REQUESTED | flat after terminal exit | reason=%s",
+                    exit_reason,
+                )
+                return
             self._maybe_request_auto_stop(now, exit_reason)
             return
 
