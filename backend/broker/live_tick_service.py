@@ -46,9 +46,9 @@ def _normalize_sym(s: str) -> str:
 import re as _re
 
 # MCX commodity keywords for exchange detection
-_MCX_KEYWORDS = {"GOLD", "SILVER", "CRUDE", "NATURALGAS", "COPPER", "ZINC", "LEAD",
-                 "ALUMINIUM", "NICKEL", "GOLDPETAL", "SILVERMIC", "GOLDGUINEA",
-                 "CRUDEOIL", "NGAS", "COTTONCNDY", "MENTHAOIL"}
+_MCX_KEYWORDS = {"GOLD", "GOLDM", "SILVER", "SILVERM", "CRUDE", "CRUDEOIL", "CRUDEOILM",
+                 "NATURALGAS", "NATURALGASM", "COPPER", "ZINC", "LEAD", "ALUMINIUM", "NICKEL",
+                 "GOLDPETAL", "SILVERMIC", "GOLDGUINEA", "NGAS", "COTTONCNDY", "MENTHAOIL"}
 
 # Index families where Fyers WS expects NSE:/BSE: prefixed derivatives.
 _FYERS_INDEX_NSE_PREFIXES = ("NIFTY", "BANKNIFTY", "NIFTYBANK", "FINNIFTY", "MIDCPNIFTY")
@@ -817,10 +817,13 @@ class LiveTickService:
             exchange_hint = parts[0].upper().strip()
             raw_symbol = parts[1]
         upper = raw_symbol.upper().replace(" ", "")
+        # Normalize common equity/index suffixes first so commodity spot symbols
+        # like NATURALGAS-EQ / CRUDEOILM-INDEX still resolve to MCX.
+        upper_base = upper.replace("-EQ", "").replace("-INDEX", "")
         looks_derivative = bool(
-            _re.search(r'\d{3,}(CE|PE)', upper)
-            or _re.search(r'\d{1,2}[A-Z]{3}\d{2}(CE|PE)$', upper)
-            or _re.search(r'\d+FUT$', upper)
+            _re.search(r'\d{3,}(CE|PE)', upper_base)
+            or _re.search(r'\d{1,2}[A-Z]{3}\d{2}(CE|PE)$', upper_base)
+            or _re.search(r'\d+FUT$', upper_base)
         )
         # Indices
         _idx = {
@@ -839,6 +842,13 @@ class LiveTickService:
         if upper_orig in {"NIFTY 50"}: return "NSE:NIFTY50-INDEX"
         if upper_orig in {"NIFTY BANK", "BANK NIFTY"}: return "NSE:NIFTYBANK-INDEX"
         if upper_orig in {"FIN NIFTY"}: return "NSE:FINNIFTY-INDEX"
+
+        # Commodity spot/root symbols should always stay on MCX.
+        # Handle plain and suffixed forms (e.g. CRUDEOILM, NATURALGAS-EQ).
+        if not looks_derivative:
+            for kw in _MCX_KEYWORDS:
+                if upper_base.startswith(kw):
+                    return f"MCX:{upper_base}"
 
         # symbols DB-first resolution: canonical symbol -> broker format
         # Skip DB lookup when caller already provided a valid exchange prefix (NSE/BSE/NFO/BFO).
@@ -890,44 +900,50 @@ class LiveTickService:
 
         # MCX commodities (plain name without CE/PE/FUT) — subscribe as MCX
         for kw in _MCX_KEYWORDS:
-            if upper == kw:
-                return f"MCX:{upper}"
+            if upper_base.startswith(kw):
+                return f"MCX:{upper_base}"
 
         # Option symbols: contain CE or PE preceded by digits (e.g. NIFTY24APR22500CE, NIFTY2290030JUN26CE)
         import re
-        if re.search(r'\d{3,}(CE|PE)', upper) or re.search(r'\d{1,2}[A-Z]{3}\d{2}(CE|PE)$', upper):
+        if re.search(r'\d{3,}(CE|PE)', upper_base) or re.search(r'\d{1,2}[A-Z]{3}\d{2}(CE|PE)$', upper_base):
             # Detect MCX options by commodity keyword prefix
             for kw in _MCX_KEYWORDS:
-                if upper.startswith(kw):
-                    return f"MCX:{upper}"
+                if upper_base.startswith(kw):
+                    return f"MCX:{upper_base}"
             # Preserve the caller-supplied exchange hint (e.g. "NSE" from trading_symbol
             # "NSE:NIFTY2642124600CE").  Fyers WS requires NSE: for NIFTY/BANKNIFTY options;
             # falling back unconditionally to NFO: causes "invalid_symbols" WS errors and
             # breaks live-tick delivery for option legs (PnL only updates every 30 s from SQLite).
-            ex = _fyers_derivative_exchange_hint(upper, exchange_hint)
-            return f"{ex}:{upper}"
+            ex = _fyers_derivative_exchange_hint(upper_base, exchange_hint)
+            return f"{ex}:{upper_base}"
         # Futures: end with FUT and contain digits (e.g. NIFTY24APRFUT)
-        if re.search(r'\d+FUT$', upper):
+        if re.search(r'\d+FUT$', upper_base):
             for kw in _MCX_KEYWORDS:
-                if upper.startswith(kw):
-                    return f"MCX:{upper}"
-            ex = _fyers_derivative_exchange_hint(upper, exchange_hint)
-            return f"{ex}:{upper}"
+                if upper_base.startswith(kw):
+                    return f"MCX:{upper_base}"
+            ex = _fyers_derivative_exchange_hint(upper_base, exchange_hint)
+            return f"{ex}:{upper_base}"
         # Dated derivatives without explicit FUT suffix (e.g. GOLDPETAL30APR26)
-        if re.search(r'\d{1,2}[A-Z]{3}\d{2}$', upper) and not re.search(r'(CE|PE)$', upper):
+        if re.search(r'\d{1,2}[A-Z]{3}\d{2}$', upper_base) and not re.search(r'(CE|PE)$', upper_base):
             for kw in _MCX_KEYWORDS:
-                if upper.startswith(kw):
-                    return f"MCX:{upper}FUT"
-            ex = _fyers_derivative_exchange_hint(upper, exchange_hint)
-            return f"{ex}:{upper}FUT"
+                if upper_base.startswith(kw):
+                    return f"MCX:{upper_base}FUT"
+            ex = _fyers_derivative_exchange_hint(upper_base, exchange_hint)
+            return f"{ex}:{upper_base}FUT"
         if exchange_hint:
+            for kw in _MCX_KEYWORDS:
+                if upper_base.startswith(kw):
+                    return f"MCX:{upper_base}"
             if exchange_hint in ("NFO", "BFO", "MCX"):
-                return f"{exchange_hint}:{upper}"
+                return f"{exchange_hint}:{upper_base}"
             if exchange_hint in ("NSE", "BSE"):
-                return f"{exchange_hint}:{upper}-EQ"
-            return f"{exchange_hint}:{upper}"
+                return f"{exchange_hint}:{upper_base}-EQ"
+            return f"{exchange_hint}:{upper_base}"
+        for kw in _MCX_KEYWORDS:
+            if upper_base.startswith(kw):
+                return f"MCX:{upper_base}"
         # Default: assume NSE equity
-        return f"NSE:{upper}-EQ"
+        return f"NSE:{upper_base}-EQ"
 
     # ── Shoonya WebSocket ──────────────────────────────────────────────────────
 

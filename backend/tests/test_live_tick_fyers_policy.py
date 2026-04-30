@@ -24,6 +24,21 @@ def test_to_fyers_sym_keeps_mcx_for_commodity_option():
     assert sym == "MCX:GOLDPETAL30APR26CE"
 
 
+def test_to_fyers_sym_keeps_mcx_for_crudeoilm_spot_root():
+    sym = LiveTickService._to_fyers_sym("CRUDEOILM")
+    assert sym == "MCX:CRUDEOILM"
+
+
+def test_to_fyers_sym_keeps_mcx_for_naturalgas_eq_variant():
+    sym = LiveTickService._to_fyers_sym("NATURALGAS-EQ")
+    assert sym == "MCX:NATURALGAS"
+
+
+def test_to_fyers_sym_exchange_hint_nse_still_forces_mcx_for_commodity():
+    sym = LiveTickService._to_fyers_sym("NSE:CRUDEOILM")
+    assert sym == "MCX:CRUDEOILM"
+
+
 def test_to_fyers_sym_ignores_cross_underlying_db_fallback(monkeypatch):
     from db import symbols_db as sdb
 
