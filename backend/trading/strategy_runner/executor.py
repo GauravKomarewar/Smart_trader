@@ -1,6 +1,7 @@
 import time
 import json
 import logging
+import re
 from datetime import datetime, time as dt_time
 from typing import Optional, List, Any, Dict
 
@@ -62,7 +63,12 @@ class StrategyExecutor:
         # OMS + broker integration (injected externally via set_oms)
         self._oms: Optional[Any] = None
         self._db_persistence: Optional[Any] = None
-        self._paper_mode: bool = identity.get("paper_mode", True)
+        self._paper_mode: bool = bool(
+            identity.get(
+                "paper_mode",
+                self.config.get("paper_mode", self.config.get("test_mode", True)),
+            )
+        )
         self._strategy_id: str = self.config.get("id", self.config.get("name", "unknown"))
 
         # Live tick overlay — receives real-time LTP from LiveTickService
@@ -204,6 +210,73 @@ class StrategyExecutor:
         return None
 
     @staticmethod
+    def _looks_like_option_symbol(symbol: str) -> bool:
+        return bool(re.search(r"\d{3,}(CE|PE)$", str(symbol or "").upper().replace(" ", "")))
+
+    def _is_contaminated_option_ltp(self, symbol: str, live_ltp: float, ref_ltp: Optional[float]) -> bool:
+        """Reject clearly impossible option LTP values (typically spot/index contamination)."""
+        if not self._looks_like_option_symbol(symbol):
+            return False
+        if live_ltp <= 0:
+            return False
+        if ref_ltp is None or ref_ltp <= 0:
+            # Without chain reference, only reject extreme index-like values.
+            return live_ltp > 10000
+
+        ratio = live_ltp / max(ref_ltp, 0.01)
+        if live_ltp > 10000 and (ratio >= 8 or live_ltp >= (ref_ltp + 5000)):
+            return True
+        if ratio >= 25:
+            return True
+        return False
+
+    def _resolve_leg_market_price(self, leg: LegState, context: str) -> float:
+        """Resolve a safe market price for order placement and state accounting."""
+        tsym = self._canonical_trading_symbol(leg.trading_symbol or leg.symbol)
+
+        if leg.instrument == InstrumentType.OPT and leg.strike is not None and leg.option_type is not None:
+            chain_ltp: Optional[float] = None
+            try:
+                opt_data = self.market.get_option_at_strike(leg.strike, leg.option_type, leg.expiry)
+                if opt_data:
+                    _v = opt_data.get("ltp")
+                    if _v is not None and float(_v) > 0:
+                        chain_ltp = float(_v)
+            except Exception:
+                chain_ltp = None
+
+            live_ltp = self._get_live_ltp(tsym)
+            if live_ltp and live_ltp > 0:
+                if self._is_contaminated_option_ltp(tsym, live_ltp, chain_ltp):
+                    logger.warning(
+                        "LTP_SANITIZED | %s %s | rejected live_ltp=%.2f chain_ltp=%s",
+                        context, tsym, live_ltp,
+                        f"{chain_ltp:.2f}" if chain_ltp else "NA",
+                    )
+                else:
+                    return float(live_ltp)
+
+            if chain_ltp and chain_ltp > 0:
+                return float(chain_ltp)
+
+        elif leg.instrument == InstrumentType.FUT:
+            try:
+                fut = float(self.market.get_fut_ltp(leg.expiry) or 0.0)
+                if fut > 0:
+                    return fut
+            except Exception:
+                pass
+            live_ltp = self._get_live_ltp(tsym)
+            if live_ltp and live_ltp > 0:
+                return float(live_ltp)
+
+        if leg.ltp and leg.ltp > 0:
+            return float(leg.ltp)
+        if leg.entry_price and leg.entry_price > 0:
+            return float(leg.entry_price)
+        return 0.0
+
+    @staticmethod
     def _canonical_trading_symbol(symbol: str) -> str:
         """Store canonical symbols (without EXCH: prefix) in strategy state/DB."""
         s = str(symbol or "").strip()
@@ -283,6 +356,12 @@ class StrategyExecutor:
 
     def _place_entry_order(self, leg: LegState) -> None:
         """Place an entry order for a leg via OMS."""
+        resolved_entry = self._resolve_leg_market_price(leg, "ENTRY")
+        if resolved_entry > 0:
+            leg.entry_price = resolved_entry
+            if not leg.ltp or leg.ltp <= 0:
+                leg.ltp = resolved_entry
+
         if not self._oms:
             # No OMS — state-only tracking (paper simulation within executor)
             leg.order_status = "SIMULATED"
@@ -308,7 +387,7 @@ class StrategyExecutor:
                 order_type=OrderType.MARKET,
                 product=ProductType.NRML,
                 quantity=leg.order_qty,
-                price=leg.entry_price,
+                price=resolved_entry if resolved_entry > 0 else leg.entry_price,
                 unique_key=unique_key,
                 strategy_id=self._strategy_id,
                 tag="ENTRY",
@@ -378,6 +457,10 @@ class StrategyExecutor:
             )
             return True
 
+        resolved_exit = self._resolve_leg_market_price(leg, "EXIT")
+        if resolved_exit > 0:
+            leg.ltp = resolved_exit
+
         try:
             from trading.oms import OrderRequest, OrderSide, OrderType, ProductType
             # Exit is opposite side
@@ -394,7 +477,7 @@ class StrategyExecutor:
                 order_type=OrderType.MARKET,
                 product=ProductType.NRML,
                 quantity=leg.order_qty,
-                price=leg.ltp,
+                price=resolved_exit if resolved_exit > 0 else leg.ltp,
                 unique_key=unique_key,
                 strategy_id=self._strategy_id,
                 tag="EXIT",
@@ -575,7 +658,9 @@ class StrategyExecutor:
             leg.trading_symbol = tsym
             exchange = getattr(self.market, 'exchange', 'NFO')
             unique_key, exchange = self._resolve_order_identity(tsym, exchange)
-            fill_price = leg.exit_price if (leg.exit_price and leg.exit_price > 0) else leg.ltp
+            fill_price = leg.exit_price if (leg.exit_price and leg.exit_price > 0) else self._resolve_leg_market_price(leg, "ADJ_EXIT")
+            if fill_price <= 0:
+                fill_price = leg.ltp
 
             req = OrderRequest(
                 symbol=tsym,
@@ -974,11 +1059,19 @@ class StrategyExecutor:
                         # LTP: prefer live tick service, fall back to SQLite
                         tsym = leg.trading_symbol or leg.symbol
                         live_ltp = self._get_live_ltp(tsym)
+                        _sq_ltp = opt_data.get("ltp")
                         if live_ltp and live_ltp > 0:
-                            leg.ltp = live_ltp
+                            if self._is_contaminated_option_ltp(tsym, live_ltp, _sq_ltp):
+                                logger.warning(
+                                    "LTP_SANITIZED | UPDATE %s | rejected live_ltp=%.2f sqlite_ltp=%s",
+                                    tsym,
+                                    live_ltp,
+                                    f"{float(_sq_ltp):.2f}" if (_sq_ltp is not None and float(_sq_ltp) > 0) else "NA",
+                                )
+                            else:
+                                leg.ltp = live_ltp
                         else:
                             # Only update from SQLite if it has a valid non-zero price
-                            _sq_ltp = opt_data.get("ltp")
                             if _sq_ltp is not None and _sq_ltp > 0:
                                 leg.ltp = _sq_ltp
 

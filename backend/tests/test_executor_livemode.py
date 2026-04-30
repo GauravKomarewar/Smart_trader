@@ -266,3 +266,80 @@ class TestL4AllEntriesRejected:
             exec_.state.entered_today = True
 
         assert exec_.state.entered_today is True
+
+
+class TestPriceSanitization:
+    def _make_blank_executor(self, oms, paper_mode: bool = False):
+        from trading.strategy_runner.executor import StrategyExecutor
+
+        exec_ = object.__new__(StrategyExecutor)
+        exec_.state = StrategyState()
+        exec_._oms = oms
+        exec_._paper_mode = paper_mode
+        exec_._strategy_id = "UT_STRAT"
+        exec_.market = MagicMock()
+        exec_.market.exchange = "NFO"
+        exec_._tick_service = MagicMock()
+        exec_._subscribed_symbols = set()
+        return exec_
+
+    def test_exit_order_rejects_contaminated_option_ltp(self):
+        """Option exit should never place order with spot-like contaminated LTP."""
+        order = MagicMock()
+        order.id = "oid-1"
+        order.status = "COMPLETE"
+
+        oms = MagicMock()
+        oms.place_order.return_value = order
+
+        exec_ = self._make_blank_executor(oms, paper_mode=False)
+        exec_.market.get_option_at_strike.return_value = {"ltp": 195.45}
+        exec_._tick_service.get_latest.return_value = {"ltp": 23849.75}
+
+        leg = _make_leg(
+            tag="LEG@1_CE",
+            order_status="FILLED",
+            is_active=True,
+            strike=24100,
+            trading_symbol="NIFTY2650524100CE",
+        )
+        leg.ltp = 23849.75
+
+        ok = exec_._place_exit_order(leg)
+
+        assert ok is True
+        req = oms.place_order.call_args[0][0]
+        assert req.price == pytest.approx(195.45)
+        assert leg.ltp == pytest.approx(195.45)
+
+    def test_paper_entry_uses_current_option_price(self):
+        """Paper-mode entry should record current option price, not stale leg.entry_price."""
+        order = MagicMock()
+        order.id = "oid-2"
+        order.broker_order_id = "brk-2"
+        order.status = "COMPLETE"
+        order.avg_price = 0.0
+
+        oms = MagicMock()
+        oms.place_order.return_value = order
+
+        exec_ = self._make_blank_executor(oms, paper_mode=True)
+        exec_.market.get_option_at_strike.return_value = {"ltp": 102.80}
+        exec_._tick_service.get_latest.return_value = {"ltp": 102.80}
+
+        leg = _make_leg(
+            tag="LEG@1_CE",
+            order_status="PENDING",
+            is_active=False,
+            strike=24100,
+            trading_symbol="NIFTY2650524100CE",
+        )
+        leg.entry_price = 95.0
+        leg.ltp = 0.0
+
+        exec_._place_entry_order(leg)
+
+        req = oms.place_order.call_args[0][0]
+        assert req.price == pytest.approx(102.80)
+        assert leg.entry_price == pytest.approx(102.80)
+        assert leg.is_active is True

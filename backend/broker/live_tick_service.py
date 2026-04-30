@@ -989,6 +989,17 @@ class LiveTickService:
                     subscribed_sym = self._sym_alias.get(fyers_clean, sym)
                 else:
                     subscribed_sym = sym
+
+            # Same contamination guard used for Fyers path: reject option-symbol
+            # ticks carrying index-like values due upstream topic aliasing.
+            if _re.search(r'\d{3,}(CE|PE)$', str(subscribed_sym).upper().replace(" ", "")) and ltp > 10000:
+                logger.debug(
+                    "Rejected contaminated Shoonya tick: sym=%s ltp=%.2f",
+                    subscribed_sym,
+                    ltp,
+                )
+                return
+
             tick = _norm_tick(
                 subscribed_sym,
                 ltp,
